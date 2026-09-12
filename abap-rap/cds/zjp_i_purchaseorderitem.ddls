@@ -1,0 +1,26 @@
+@AccessControl.authorizationCheck: #NOT_REQUIRED
+@EndUserText.label: 'Procurement Hub: Purchase Order Item'
+define view entity ZJP_I_PurchaseOrderItem
+  as select from zjp_po_i
+  association to parent ZJP_I_PurchaseOrder as _PurchaseOrder
+    on $projection.PurchaseOrderUUID = _PurchaseOrder.PurchaseOrderUUID
+{
+  key purchase_order_item_uuid as PurchaseOrderItemUUID,
+      purchase_order_uuid     as PurchaseOrderUUID,
+      item_number             as ItemNumber,
+      material                as Material,
+      material_description    as MaterialDescription,
+      @Semantics.quantity.unitOfMeasure: 'UnitOfMeasure'
+      quantity                as Quantity,
+      @Semantics.unitOfMeasure: true
+      unit_of_measure         as UnitOfMeasure,
+      @Semantics.amount.currencyCode: 'Currency'
+      net_price               as NetPrice,
+      @Semantics.currencyCode: true
+      currency                as Currency,
+      @Semantics.amount.currencyCode: 'Currency'
+      total_amount            as TotalAmount,
+      @Semantics.systemDateTime.localInstanceLastChangedAt: true
+      local_last_changed_at   as LocalLastChangedAt,
+      _PurchaseOrder
+}

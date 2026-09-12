@@ -1,0 +1,11 @@
+* text=auto
+*.md text eol=lf
+*.mmd text eol=lf
+*.json text eol=lf
+*.xml text eol=lf
+*.cds text eol=lf
+*.abap text eol=lf
+*.ddl text eol=lf
+*.ddls text eol=lf
+*.ts text eol=lf
+*.js text eol=lf

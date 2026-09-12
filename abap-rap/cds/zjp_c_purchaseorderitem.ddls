@@ -1,0 +1,20 @@
+@AccessControl.authorizationCheck: #NOT_REQUIRED
+@EndUserText.label: 'Procurement Hub: Purchase Order Item Projection'
+@Metadata.allowExtensions: true
+define view entity ZJP_C_PurchaseOrderItem
+  provider contract transactional_query
+  as projection on ZJP_I_PurchaseOrderItem
+{
+  key PurchaseOrderItemUUID,
+      PurchaseOrderUUID,
+      ItemNumber,
+      Material,
+      MaterialDescription,
+      Quantity,
+      UnitOfMeasure,
+      NetPrice,
+      Currency,
+      TotalAmount,
+      LocalLastChangedAt,
+      _PurchaseOrder : redirected to parent ZJP_C_PurchaseOrder
+}

@@ -1,0 +1,43 @@
+@AccessControl.authorizationCheck: #NOT_REQUIRED
+@EndUserText.label: 'Procurement Hub: Purchase Order'
+define root view entity ZJP_I_PurchaseOrder
+  as select from zjp_po_h
+  composition [0..*] of ZJP_I_PurchaseOrderItem as _Items
+{
+  key purchase_order_uuid     as PurchaseOrderUUID,
+      purchase_order_number   as PurchaseOrderNumber,
+      supplier                as Supplier,
+      supplier_name           as SupplierName,
+      company_code            as CompanyCode,
+      purchasing_organization as PurchasingOrganization,
+      purchasing_group        as PurchasingGroup,
+      @Semantics.currencyCode: true
+      currency                as Currency,
+      @Semantics.amount.currencyCode: 'Currency'
+      total_amount            as TotalAmount,
+      status                  as Status,
+      supplier_response       as SupplierResponse,
+      estimated_delivery_date as EstimatedDeliveryDate,
+      @Semantics.user.createdBy: true
+      created_by              as CreatedBy,
+      @Semantics.systemDateTime.createdAt: true
+      created_at              as CreatedAt,
+      @Semantics.user.lastChangedBy: true
+      last_changed_by         as LastChangedBy,
+      @Semantics.systemDateTime.lastChangedAt: true
+      last_changed_at         as LastChangedAt,
+      @Semantics.systemDateTime.localInstanceLastChangedAt: true
+      local_last_changed_at   as LocalLastChangedAt,
+      order_revision          as OrderRevision,
+      integration_status      as IntegrationStatus,
+      delivery_id             as DeliveryId,
+      last_error_code         as LastErrorCode,
+      last_error_message      as LastErrorMessage,
+      last_error_at           as LastErrorAt,
+      last_correlation_id     as LastCorrelationId,
+      last_response_id        as LastResponseId,
+      last_response_version   as LastResponseVersion,
+      rejection_origin       as RejectionOrigin,
+      rejection_reason       as RejectionReason,
+      _Items
+}

@@ -1,0 +1,31 @@
+# Local credentials and service bindings
+.env
+.env.*
+!.env.example
+.cdsrc-private.json
+default-env.json
+default-services.json
+service-key*.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Dependencies and generated output
+node_modules/
+gen/
+dist/
+coverage/
+@cds-models/
+*.tsbuildinfo
+*.log
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+
+# Local editor and OS files
+.idea/
+.DS_Store
+Thumbs.db
