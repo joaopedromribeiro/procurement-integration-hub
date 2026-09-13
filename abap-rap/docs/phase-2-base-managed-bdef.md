@@ -1,6 +1,6 @@
 # Phase 2 — base managed BDEF checkpoint
 
-Phase 2.1 is complete. The original compiler corrections below remain part of the baseline, now exercised by the [successful SAP EML test](phase-2-3-eml-runtime-evidence.md). Phase 1 remains complete. The current checkpoint is the [status-initialization plan](phase-2-4a-status-initialization-plan.md).
+Phase 2.1 is complete. The original compiler corrections below remain part of the baseline, now exercised by the [successful SAP EML test](phase-2-3-eml-runtime-evidence.md). Later checkpoints added Status and item determinations to the linked current BDEF; [Phase 2.4C header TotalAmount](phase-2-4c-header-total-determination.md) is active.
 
 ## Design
 
@@ -63,4 +63,4 @@ Open Declaration on persistent tables, mapped fields and associations should res
 
 Activation verifies the behavior contract, not actual CRUD execution. Data Preview remains a read tool. The [EML checkpoint](phase-2-eml-runtime-test.md) now supplies the create/read/update/delete exercise; its runtime results are now verified from learner-supplied SAP output. No projection behavior or OData service is provided by the base BDEF step.
 
-Current stop point: the [status-initialization plan](phase-2-4a-status-initialization-plan.md). The successful EML baseline and base BDEF source are unchanged in this planning update.
+Current stop point: [Phase 2.4C header TotalAmount](phase-2-4c-header-total-determination.md). The baseline contract above remains valid; the current linked BDEF also contains the later determination declarations.

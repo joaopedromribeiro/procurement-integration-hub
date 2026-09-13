@@ -13,6 +13,9 @@ etag master LocalLastChangedAt
 
   association _Items { create; }
 
+  determination initializeStatus on modify { create; }
+  validation validateSupplier on save { create; field Supplier; }
+
   field ( readonly, numbering : managed ) PurchaseOrderUUID;
   field ( readonly ) PurchaseOrderNumber, SupplierName, TotalAmount, Status,
                      SupplierResponse, EstimatedDeliveryDate,
@@ -65,6 +68,9 @@ etag master LocalLastChangedAt
   delete;
 
   association _PurchaseOrder;
+
+  determination calculateTotalAmount on modify { create; field Quantity, NetPrice; }
+  determination recalculateHeaderAfterDelete on modify { delete; }
 
   field ( readonly, numbering : managed ) PurchaseOrderItemUUID;
   field ( readonly ) PurchaseOrderUUID, TotalAmount, LocalLastChangedAt;

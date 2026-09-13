@@ -1,6 +1,6 @@
 # Architecture
 
-Design baseline: 2026-09-12. Phase 1 objects and Phase 2.1–2.3 managed RAP CRUD/composition have SAP execution evidence supplied by the learner. The [status-initialization plan](abap-rap/docs/phase-2-4a-status-initialization-plan.md) begins Phase 2.4; no determination code is present yet. Business rules and integrations remain proposed.
+The learner reports Phase 2.4C runtime-verified complete: header totals 1900 → 2650 → 2800 → 2400 → 0, successful relevant COMMIT ENTITIES calls (sy-subrc 0), and `PASS: header totals 1900/2650/2800/2400/0; cleanup complete.` The persisted-parent lookup still does not support uncommitted-item deletion. No independent SAP execution by the assistant is claimed. Current checkpoint: [Phase 2.5A Supplier validation](abap-rap/docs/phase-2-5a-supplier-validation.md), source-prepared; SAP verification pending.
 
 ## Phase 1 implementation boundary
 

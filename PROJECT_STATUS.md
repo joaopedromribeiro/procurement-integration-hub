@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-09-12.
+Last updated: 2026-09-13.
 
 ## Completed
 
@@ -20,27 +20,31 @@ Last updated: 2026-09-12.
 - Confirmed the configured GitHub remote and that local main tracks origin/main.
 - Phase 2.1–2.3: corrected managed BDEF, minimal behavior pool/stub and successful SAP EML CRUD/composition runtime test, supported by the learner's console output.
 
-The learner's Phase 1 activation report and Phase 2 console output are SAP execution evidence reviewed by the assistant. The assistant did not independently connect to SAP. ZJP_CL_PO_EML_TEST ran successfully, verifying managed CRUD, composition creation/cleanup, UUID numbering, transactional-buffer visibility and committed persistence. No determination, validation, technical draft, business action, projection behavior, service, CAP code or iFlow is implemented.
+The learner reports Phase 2.4C runtime-verified complete: header totals 1900 → 2650 → 2800 → 2400 → 0, successful relevant COMMIT ENTITIES calls (sy-subrc 0), and `PASS: header totals 1900/2650/2800/2400/0; cleanup complete.` The persisted-parent lookup still does not support uncommitted-item deletion. No independent SAP execution by the assistant is claimed. Phase 1 remains complete. Phase 2.5A Supplier validation is source-prepared and awaits SAP activation/runtime verification.
 
 ## Current phase
 
-**Phase 2.4A — determinations: status-initialization explanation and plan prepared.** Phases 0 and 1 remain complete. Phase 2.1 BDEF, 2.2 behavior pool/permissive authorization stub and 2.3 EML CRUD verification are complete on [SAP runtime evidence](abap-rap/docs/phase-2-3-eml-runtime-evidence.md). The [status-initialization plan](abap-rap/docs/phase-2-4a-status-initialization-plan.md) is the current review checkpoint. No determination code is added in this update; Phase 2 overall remains in progress.
+**Phase 2.5A — Supplier-required validation implemented; SAP verification pending.** Phases 0–1 and 2.1–2.4C are complete within their recorded scope. Only Supplier presence on save is added. See [Phase 2.5A](abap-rap/docs/phase-2-5a-supplier-validation.md).
 
 | Subphase | Status |
 | --- | --- |
 | 2.1 Behavior Definition | Complete for the current managed BO |
 | 2.2 Behavior pool / instance authorization stub | Complete; permissive study policy only |
 | 2.3 EML CRUD runtime verification | Complete; learner-supplied successful SAP console output |
-| 2.4 Determinations | Current: Status DRAFT plan only; item/header totals pending |
-| 2.5 Validations | Pending |
+| 2.4 Determinations | Complete: Status, item totals and scoped header aggregation runtime-verified |
+| 2.5 Validations | 2.5A Supplier presence source-prepared; other validations pending |
 | 2.6 Technical draft | Pending |
 | 2.7 Business actions | Pending |
 
 ## Next steps
 
-1. Review the Status DRAFT determination plan. Keep IntegrationStatus = NOT_REQUESTED as a documented proposal for a separate extension.
-2. After plan confirmation, implement only root status initialization and extend the EML test to verify DRAFT before/after commit and after a supplier update.
-3. Wait for successful status-runtime confirmation before item totals. Header totals, validations, draft and actions follow in that order; service and integration phases remain later.
+Phase 2.4C partial SAP evidence: create 1900, Quantity update 2650 and NetPrice update 2800 passed with persistence. The debugger confirmed different ME objects across delete precheck/determination: delete_context went from one row to empty (sy-subrc 4). The stateful bridge is withdrawn. The stateless correction reads only immutable parent identities from ZJP_PO_I for previously committed active items, then reads current amounts and updates totals through local-mode EML. No direct SQL writes or shared state are used. Delete totals 2400 and 0 subsequently passed in SAP; Phase 2.4C is complete within the documented committed-item scope. Uncommitted-item deletion and technical draft are explicitly unsupported by this lookup and need a model/runtime capability decision before expansion.
+
+[Phase 2.4B runtime evidence](abap-rap/docs/phase-2-4b-runtime-evidence.md), 2026-09-13: the learner verified 2 × 750 = 1500 before commit, 3 × 750 = 2250 after Quantity change, and 3 × 800 = 2400 after NetPrice change. Each value persisted after commit and the console ended `PASS: item totals 1500/2250/2400; status, CRUD and cleanup.`
+
+1. Apply the updated BDEF and Local Types source in ADT; syntax-check and activate ZJP_I_PURCHASEORDER and ZBP_I_PURCHASEORDER.
+2. Update, activate and run ZJP_CL_PO_EML_TEST. Confirm blank Supplier create/update fail at save with the expected message; the valid totals/deletion flow must still pass.
+3. Stop for learner runtime confirmation. IntegrationStatus, other validations, technical draft and business actions remain unimplemented.
 4. Record the exact ABAP/S/4HANA release when available; syntax support is verified by the target compiler.
 
 ## Architecture decisions
@@ -76,7 +80,7 @@ Additional compatibility lesson: the target-generated authorization request/resu
 
 ## Technical debt
 
-The base BDEF, behavior pool and EML consumer have successful SAP runtime evidence. Managed UUIDs and root audit maintenance are visible in the output. Status, display number, supplier name and total amounts remain initial/zero as expected before business derivation. Status initialization is planned, not implemented. The update/delete authorization stub remains permissive; negative permission cases and standalone root-create/CDS read authorization are not implemented. No business validation, DCL, display-number allocation, amount calculations, state-dependent editing restrictions or uniqueness enforcement exists yet.
+The base BDEF, behavior pool, EML consumer, initializeStatus and item calculation have successful SAP runtime evidence reported by the learner. Header aggregation is runtime-verified for committed-item deletion. Supplier presence validation is source-prepared only. Display number, supplier name and integration fields remain initial. The update/delete authorization stub remains permissive; negative permission cases and standalone root-create/CDS read authorization are not implemented. No other business validation, DCL, display-number allocation, state-dependent editing restrictions or uniqueness enforcement exists yet.
 
 Intentional scope limits remain EUR-only precision, synthetic master data, single-tenant supplier isolation, manual approval, no order revisions after submission, and no cancellation after delivery request. These are documented constraints, not hidden production capabilities.
 
@@ -108,4 +112,4 @@ Historical EML preparation checks passed: 22 Markdown files, 81 relative file-li
 
 Update this file after each phase with completed work, current phase, next steps, decisions, issues and debt. Record failed checks honestly and keep mocks separate from SAP execution evidence.
 
-Runtime-evidence documentation update: 24 Markdown files and 96 relative file-link targets checked; the EML guide still matches the working source. The supplied output contains three successful commit results and the final PASS marker. All ten ABAP/CDS source hashes are unchanged, including all six Phase 1 objects. The new determination artifact is a plan only.
+Historical runtime-evidence documentation update: 24 Markdown files and 96 relative file-link targets checked; the EML guide still matches the working source. The supplied output contains three successful commit results and the final PASS marker. All ten ABAP/CDS source hashes are unchanged, including all six Phase 1 objects. At that checkpoint the determination artifact was a plan only; implementation now follows.

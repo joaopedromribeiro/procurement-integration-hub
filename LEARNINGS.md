@@ -1,6 +1,6 @@
 # Learning journal
 
-This journal distinguishes design, source preparation and successful SAP execution. Phase 1 model activation and Phase 2 managed CRUD/composition are now evidenced by the learner’s SAP report and console output. The Status DRAFT determination is currently a plan only; no later feature is claimed.
+This journal distinguishes design, source preparation and successful SAP execution. Phase 1, managed CRUD/composition, Status initialization and item TotalAmount are evidenced by the learner's SAP reports. Header TotalAmount is runtime-verified for committed-item deletion. Supplier validation is the current source-prepared checkpoint.
 
 ## Phase 0 — architecture foundation
 
@@ -127,8 +127,36 @@ The [evidence record](abap-rap/docs/phase-2-3-eml-runtime-evidence.md) confirms 
 
 Root audit values were initial in the pre-save read and populated on save; the local last-change timestamp advanced on update. Status, PurchaseOrderNumber, SupplierName and totals were initial/zero by design. Do not classify absent business derivation as a failure or infer complete concurrency/security coverage from this run.
 
-## Phase 2.4A — determination concepts, plan only
+## Phase 2.4A — initializeStatus runtime-verified
 
-The [current plan](abap-rap/docs/phase-2-4a-status-initialization-plan.md) proposes initializeStatus on root creation during modify processing. A determination derives values; a validation checks acceptability. Internal EML reads the transaction buffer, then updates only blank Status values to DRAFT. The consumer commits. The method belongs in lhc_PurchaseOrder within the existing pool, and ADT generates its target-compatible signature.
+Practical compiler lesson: the EML read/update REPORTED tables were not directly append-compatible with the determination's REPORTED table in the target system. Similar component names do not guarantee identical generated RAP response types. The corrected handler declares a temporary table LIKE reported-purchaseorder, uses CORRESPONDING #( DEEP ... ) to map matching components into that target type, then appends it. The second assignment refreshes only the temporary table, so already forwarded read messages remain in the final response. Missing source-only components are not fabricated. The learner subsequently activated and runtime-verified this correction.
 
-Business Status DRAFT is distinct from technical RAP draft. NOT_REQUESTED is the proposed IntegrationStatus default because no delivery is queued, but it is deferred from this first change. Item and header totals follow only after status initialization passes a runtime test. Header aggregation must not rely on determination order, must include unsaved changes, and needs an explicit plan for identifying the parent after an item deletion. No determination code is written at this plan checkpoint.
+The [implementation notes](abap-rap/docs/phase-2-4a-status-initialization-plan.md) describe initializeStatus on root creation during modify processing. A determination derives values; a validation checks acceptability. Internal EML reads the transaction buffer, then updates only blank Status values to DRAFT. The consumer commits. The method belongs in lhc_PurchaseOrder within the existing pool, and ADT generates its target-compatible signature.
+
+Business Status DRAFT is distinct from technical RAP draft. NOT_REQUESTED is the proposed IntegrationStatus default because no delivery is queued, but it is deferred from this first change. Item and header totals follow only after status initialization passes a runtime test. Header aggregation must not rely on determination order, must include unsaved changes, and needs an explicit plan for identifying the parent after an item deletion. Only initializeStatus is implemented. It filters out roots with a noninitial Status and updates the remaining roots through EML in local mode; it does not commit.
+
+The root BDEF declares initializeStatus on modify with a create trigger while keeping Status readonly. The local method reads Status from the transactional buffer, skips populated statuses and updates only Status to DRAFT. The learner reports the extended EML test passed in SAP, verifying DRAFT before and after commit. Phase 2.4A is complete.
+
+## Phase 2.4B — item TotalAmount runtime-verified
+
+The item BDEF declares `calculateTotalAmount on modify { create; field Quantity, NetPrice; }`. A dedicated local item handler reads both inputs from the transactional buffer and updates only readonly TotalAmount through local-mode EML. Updating TotalAmount does not retrigger the determination because TotalAmount is not a trigger field.
+
+The learner verified 2 × 750 = 1500 in the RAP buffer before commit, 3 × 750 = 2250 after a Quantity change, and 3 × 800 = 2400 after a NetPrice change. Every value persisted after its commit. The console ended `PASS: item totals 1500/2250/2400; status, CRUD and cleanup.` This closes Phase 2.4B on [learner-supplied SAP runtime evidence](abap-rap/docs/phase-2-4b-runtime-evidence.md).
+
+## Phase 2.4C — header TotalAmount runtime-verified
+
+The business invariant is header TotalAmount = sum of current item TotalAmount values. Item create/input changes and item delete are child-level triggers because those operations change the aggregate. The implementation identifies affected roots through the composition associations and reads sibling inputs through EML in local mode, so uncommitted transactional values participate.
+
+RAP does not guarantee ordering among determinations. The create/update method therefore derives each rounded item total from Quantity × NetPrice and builds the root sum from those same derived values; it does not wait for another determination's TotalAmount update. Changed item totals and affected root totals are then written in one local-mode EML request. This makes the calculation repeatable and independent of determination order.
+
+The debugger established a second deletion lesson: RAP used different handler ME instances for precheck and determination. A populated instance attribute therefore did not survive, and READ TABLE returned sy-subrc 4. Handler instance lifetime is not transaction lifetime; replacing it with CLASS-DATA would introduce unmanaged shared state. The correction uses local variables and a read-only lookup of the committed item's immutable parent UUID, then EML for current sibling inputs and the root update. This respects the save boundary for previously committed active items, but cannot identify a newly created/uncommitted deleted item. That limitation is explicit; a broader solution needs parent identity in the key or verified target-supported change/before-image access. Error messages from determinations alone do not enforce a save veto.
+
+The extended console test creates totals 1500 and 400 with header 1900, then expects headers 2650 after Quantity change, 2800 after NetPrice change, 2400 after deleting one item and 0 after deleting the last item. It checks the RAP buffer before each commit and database persistence afterward. The learner reports Phase 2.4C runtime-verified complete: header totals 1900 → 2650 → 2800 → 2400 → 0, successful relevant COMMIT ENTITIES calls (sy-subrc 0), and `PASS: header totals 1900/2650/2800/2400/0; cleanup complete.` The persisted-parent lookup still does not support uncommitted-item deletion. No independent SAP execution by the assistant is claimed.
+
+## Phase 2.5A — Supplier required on save
+
+`validateSupplier on save { create; field Supplier; }` checks new roots and roots whose Supplier changes. A validation reads current data and reports failures; it does not derive a replacement value or commit. The root handler uses local-mode EML, returns the invalid key in FAILED and an error message tied to `%element-Supplier` in REPORTED. FAILED blocks saving; an error message by itself is not a substitute.
+
+This first rule checks presence only, not supplier master-data existence. It applies to active orders with business Status DRAFT too. Technical draft is still absent. A simple text message is used for this checkpoint; translation/message-class work is deferred.
+
+The EML test attempts a blank-Supplier create and a blank-Supplier update of the committed SUP001 order. MODIFY should succeed; COMMIT should fail with `Supplier is required.` The test rolls back immediately and checks no invalid create persisted and SUP001 survived the rejected update. Normal create/update/totals/deletion then prove the positive path still works. SAP activation and runtime verification of this new validation are pending.

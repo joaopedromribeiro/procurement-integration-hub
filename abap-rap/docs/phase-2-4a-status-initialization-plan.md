@@ -1,6 +1,6 @@
-# Phase 2.4A — initialize purchase-order status: explanation and implementation plan
+# Phase 2.4A — initializeStatus implementation and ADT check
 
-Phase 2.1–2.3 are complete on [learner-supplied SAP runtime evidence](phase-2-3-eml-runtime-evidence.md). This checkpoint follows the final instruction to begin with explanation and an implementation plan only. No BDEF, handler or test source is changed here. Determinations are not implemented yet; status initialization must be implemented and verified before progressing to item totals.
+Phase 2.1–2.3 retain their [verified SAP evidence](phase-2-3-eml-runtime-evidence.md). The learner reports initializeStatus and its extended EML test passed in SAP. Phase 2.4A is complete; Phase 2.4B also passed and [Phase 2.4C header TotalAmount](phase-2-4c-header-total-determination.md) is now active.
 
 ## What a determination does
 
@@ -12,7 +12,7 @@ A determination changes values: for example, it supplies DRAFT when Status is in
 
 Determinations must be idempotent: repeated execution for the same state should not keep changing the result. Do not depend on the order in which different determinations execute. See [SAP determinations](https://help.sap.com/docs/abap-cloud/abap-rap/determinations).
 
-## First implementation: Status only
+## Implemented: Status only
 
 | Decision | Plan |
 | --- | --- |
@@ -70,13 +70,15 @@ Deletion needs a target-system check before finalizing its trigger design. A del
 
 Required later tests include multiple items, quantity and price changes, deletion of one/last item, create-then-delete before commit, updates followed by deletion, multiple affected parents, and root deletion. These are future calculation tests; none is implemented in this checkpoint.
 
-## Planned ADT and runtime steps after this review
+## Apply the source and test in ADT
 
-1. Add only initializeStatus to the root section of Behavior Definition ZJP_I_PURCHASEORDER, with on-modify/create triggering.
-2. Use ADT Quick Fix to generate the matching method in lhc_PurchaseOrder within ZBP_I_PURCHASEORDER. Keep the target-generated signature. No new global class or child handler is needed.
-3. Implement the internal read, initial-status filtering and field-specific EML update described above. Keep commits in the consumer.
+Compatibility fix, 2026-09-13: direct appending of read_reported-purchaseorder and update_reported-purchaseorder failed target syntax checks because the generated tables are not directly compatible with this determination's reported-purchaseorder. The [updated Local Types source](../classes/zbp_i_purchaseorder.clas.locals_imp.abap) converts each through CORRESPONDING #( DEEP ... ) into a temporary table typed LIKE the destination, then appends it. This retains root messages from both calls. SAP's [determination example](https://github.com/SAP-samples/abap-platform-rap-opensap/blob/main/week3/unit6.md) also maps EML reports into the handler response using CORRESPONDING. Apply this correction and rerun syntax/activation checks; success is not yet confirmed.
+
+1. Copy the updated [BDEF](../behavior/zjp_i_purchaseorder.bdef) into Behavior Definition ZJP_I_PURCHASEORDER. It adds only initializeStatus on modify { create; } and keeps Status readonly.
+2. In ZBP_I_PURCHASEORDER, use ADT Quick Fix if necessary to generate the missing determination method. Apply the updated [Local Types source](../classes/zbp_i_purchaseorder.clas.locals_imp.abap) without duplicating the existing local class or methods. Keep the target-generated signature if the release requires a difference.
+3. The implementation uses a local-mode EML read, filters already populated statuses, updates only Status through local-mode EML and forwards root messages. Its DELETE filters an internal table; it does not delete database rows. No commit is added to the handler.
 4. Syntax-check and activate the BDEF and behavior pool together as required. Record any compiler diagnostic before changing the agreed design.
-5. Extend the existing ZJP_CL_PO_EML_TEST with status assertions, retaining its successful CRUD and cleanup checks. Do not set Status in the CREATE input; the determination must supply it.
+5. Apply the updated [ZJP_CL_PO_EML_TEST source](../classes/zjp_cl_po_eml_test.clas.abap), then activate and run it as ABAP Application (Console), normally F9. CREATE deliberately does not supply Status. The test now checks buffered/persisted DRAFT and preserves CRUD cleanup checks.
 
 | Planned assertion | Expected result |
 | --- | --- |
@@ -87,4 +89,4 @@ Required later tests include multiple items, quantity and price changes, deletio
 | IntegrationStatus, totals, display number | Still initial/zero at this narrow step |
 | Cleanup | Root and item removed through the existing EML deletion flow |
 
-Current actual status: plan prepared; no determination source or new runtime result exists. Stop for confirmation of this plan. After implementation, stop again for status-runtime confirmation before item total calculation. Validations, technical draft, business actions and all service/integration phases remain pending.
+Actual status: runtime-verified complete as reported by the learner. Status DRAFT was verified before and after commit. Item TotalAmount has since passed its runtime test; header TotalAmount is the current checkpoint. IntegrationStatus, validations, technical draft and actions remain pending.
