@@ -1,6 +1,6 @@
 # Architecture
 
-The learner reports Phase 2.4C runtime-verified complete: header totals 1900 → 2650 → 2800 → 2400 → 0, successful relevant COMMIT ENTITIES calls (sy-subrc 0), and `PASS: header totals 1900/2650/2800/2400/0; cleanup complete.` The persisted-parent lookup still does not support uncommitted-item deletion. No independent SAP execution by the assistant is claimed. Current checkpoint: [Phase 2.5A Supplier validation](abap-rap/docs/phase-2-5a-supplier-validation.md), source-prepared; SAP verification pending.
+Updated 2026-09-13. Phase 2.5A validateSupplier is runtime-verified complete: blank Supplier create/update are rejected at save, persistence remains unchanged, and the valid flow passes. Phase 2.4C header aggregation remains verified for previously committed item deletion; uncommitted-item deletion is unsupported by its persisted-parent lookup. Phase 2.5B has not started.
 
 ## Phase 1 implementation boundary
 

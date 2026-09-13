@@ -1,6 +1,6 @@
 # Learning journal
 
-This journal distinguishes design, source preparation and successful SAP execution. Phase 1, managed CRUD/composition, Status initialization and item TotalAmount are evidenced by the learner's SAP reports. Header TotalAmount is runtime-verified for committed-item deletion. Supplier validation is the current source-prepared checkpoint.
+This journal distinguishes design, source preparation and successful SAP execution. Phase 1, managed CRUD/composition, Status initialization, item/header totals and Supplier validation are evidenced by the learner's SAP reports. Header deletion aggregation remains limited to previously committed items.
 
 ## Phase 0 — architecture foundation
 
@@ -153,10 +153,12 @@ The debugger established a second deletion lesson: RAP used different handler ME
 
 The extended console test creates totals 1500 and 400 with header 1900, then expects headers 2650 after Quantity change, 2800 after NetPrice change, 2400 after deleting one item and 0 after deleting the last item. It checks the RAP buffer before each commit and database persistence afterward. The learner reports Phase 2.4C runtime-verified complete: header totals 1900 → 2650 → 2800 → 2400 → 0, successful relevant COMMIT ENTITIES calls (sy-subrc 0), and `PASS: header totals 1900/2650/2800/2400/0; cleanup complete.` The persisted-parent lookup still does not support uncommitted-item deletion. No independent SAP execution by the assistant is claimed.
 
-## Phase 2.5A — Supplier required on save
+## Phase 2.5A — Supplier required on save, runtime-verified
 
 `validateSupplier on save { create; field Supplier; }` checks new roots and roots whose Supplier changes. A validation reads current data and reports failures; it does not derive a replacement value or commit. The root handler uses local-mode EML, returns the invalid key in FAILED and an error message tied to `%element-Supplier` in REPORTED. FAILED blocks saving; an error message by itself is not a substitute.
 
 This first rule checks presence only, not supplier master-data existence. It applies to active orders with business Status DRAFT too. Technical draft is still absent. A simple text message is used for this checkpoint; translation/message-class work is deferred.
 
-The EML test attempts a blank-Supplier create and a blank-Supplier update of the committed SUP001 order. MODIFY should succeed; COMMIT should fail with `Supplier is required.` The test rolls back immediately and checks no invalid create persisted and SUP001 survived the rejected update. Normal create/update/totals/deletion then prove the positive path still works. SAP activation and runtime verification of this new validation are pending.
+The EML test attempts a blank-Supplier create and a blank-Supplier update of the committed SUP001 order. MODIFY reaches the save validation; COMMIT fails with nonzero sy-subrc and `Supplier is required.` The test rolls back immediately and confirms no invalid create persisted and SUP001 survived the rejected update. The normal create/update/totals/deletion regression flow also passes.
+
+Learner-reported SAP evidence ends with `PASS: Supplier validation rejects blank create/update; valid flow and cleanup pass.` Phase 2.5A is runtime-verified complete. Phase 2.5B has not started.

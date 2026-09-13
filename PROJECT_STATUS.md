@@ -20,11 +20,11 @@ Last updated: 2026-09-13.
 - Confirmed the configured GitHub remote and that local main tracks origin/main.
 - Phase 2.1–2.3: corrected managed BDEF, minimal behavior pool/stub and successful SAP EML CRUD/composition runtime test, supported by the learner's console output.
 
-The learner reports Phase 2.4C runtime-verified complete: header totals 1900 → 2650 → 2800 → 2400 → 0, successful relevant COMMIT ENTITIES calls (sy-subrc 0), and `PASS: header totals 1900/2650/2800/2400/0; cleanup complete.` The persisted-parent lookup still does not support uncommitted-item deletion. No independent SAP execution by the assistant is claimed. Phase 1 remains complete. Phase 2.5A Supplier validation is source-prepared and awaits SAP activation/runtime verification.
+The learner reports Phase 2.4C runtime-verified complete: header totals 1900 → 2650 → 2800 → 2400 → 0, successful relevant COMMIT ENTITIES calls (sy-subrc 0), and `PASS: header totals 1900/2650/2800/2400/0; cleanup complete.` The persisted-parent lookup still does not support uncommitted-item deletion. Phase 2.5A validateSupplier is also runtime-verified: blank Supplier create/update are rejected during save with `Supplier is required.`, negative commits return nonzero sy-subrc, persistence remains unchanged, and the valid regression flow passes. No independent SAP execution by the assistant is claimed.
 
 ## Current phase
 
-**Phase 2.5A — Supplier-required validation implemented; SAP verification pending.** Phases 0–1 and 2.1–2.4C are complete within their recorded scope. Only Supplier presence on save is added. See [Phase 2.5A](abap-rap/docs/phase-2-5a-supplier-validation.md).
+**Ready to start Phase 2.5B; no Phase 2.5B source has been added.** Phases 0–1 and 2.1–2.5A are complete within their recorded scope. See the [Phase 2.5A evidence](abap-rap/docs/phase-2-5a-supplier-validation.md).
 
 | Subphase | Status |
 | --- | --- |
@@ -32,7 +32,7 @@ The learner reports Phase 2.4C runtime-verified complete: header totals 1900 →
 | 2.2 Behavior pool / instance authorization stub | Complete; permissive study policy only |
 | 2.3 EML CRUD runtime verification | Complete; learner-supplied successful SAP console output |
 | 2.4 Determinations | Complete: Status, item totals and scoped header aggregation runtime-verified |
-| 2.5 Validations | 2.5A Supplier presence source-prepared; other validations pending |
+| 2.5 Validations | 2.5A validateSupplier runtime-verified; 2.5B not started |
 | 2.6 Technical draft | Pending |
 | 2.7 Business actions | Pending |
 
@@ -42,9 +42,9 @@ Phase 2.4C partial SAP evidence: create 1900, Quantity update 2650 and NetPrice 
 
 [Phase 2.4B runtime evidence](abap-rap/docs/phase-2-4b-runtime-evidence.md), 2026-09-13: the learner verified 2 × 750 = 1500 before commit, 3 × 750 = 2250 after Quantity change, and 3 × 800 = 2400 after NetPrice change. Each value persisted after commit and the console ended `PASS: item totals 1500/2250/2400; status, CRUD and cleanup.`
 
-1. Apply the updated BDEF and Local Types source in ADT; syntax-check and activate ZJP_I_PURCHASEORDER and ZBP_I_PURCHASEORDER.
-2. Update, activate and run ZJP_CL_PO_EML_TEST. Confirm blank Supplier create/update fail at save with the expected message; the valid totals/deletion flow must still pass.
-3. Stop for learner runtime confirmation. IntegrationStatus, other validations, technical draft and business actions remain unimplemented.
+1. Preserve the runtime-verified BDEF, behavior-pool and EML-test baseline.
+2. Start Phase 2.5B only after an explicit request identifies its single validation rule and test boundary.
+3. IntegrationStatus, other validations, technical draft and business actions remain unimplemented.
 4. Record the exact ABAP/S/4HANA release when available; syntax support is verified by the target compiler.
 
 ## Architecture decisions
@@ -80,7 +80,7 @@ Additional compatibility lesson: the target-generated authorization request/resu
 
 ## Technical debt
 
-The base BDEF, behavior pool, EML consumer, initializeStatus and item calculation have successful SAP runtime evidence reported by the learner. Header aggregation is runtime-verified for committed-item deletion. Supplier presence validation is source-prepared only. Display number, supplier name and integration fields remain initial. The update/delete authorization stub remains permissive; negative permission cases and standalone root-create/CDS read authorization are not implemented. No other business validation, DCL, display-number allocation, state-dependent editing restrictions or uniqueness enforcement exists yet.
+The base BDEF, behavior pool, EML consumer, initializeStatus, item/header calculations and Supplier presence validation have successful SAP runtime evidence reported by the learner. Header aggregation is verified for committed-item deletion; uncommitted-item deletion remains unsupported. Display number, supplier name and integration fields remain initial. The update/delete authorization stub remains permissive; negative permission cases and standalone root-create/CDS read authorization are not implemented. No other business validation, DCL, display-number allocation, state-dependent editing restrictions or uniqueness enforcement exists yet.
 
 Intentional scope limits remain EUR-only precision, synthetic master data, single-tenant supplier isolation, manual approval, no order revisions after submission, and no cancellation after delivery request. These are documented constraints, not hidden production capabilities.
 

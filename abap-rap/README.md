@@ -2,7 +2,7 @@
 
 Phase 1 is complete: the learner manually created and activated the two tables and four CDS entities in SAP S/4HANA using ADT/Eclipse. The [domain model guide](docs/phase-1-domain-model.md) includes the two confirmed compatibility corrections and synchronized source listings. Activation is learner-reported; managed CRUD/composition now also has Phase 2 SAP runtime evidence.
 
-The learner reports Phase 2.4C runtime-verified complete: header totals 1900 → 2650 → 2800 → 2400 → 0, successful relevant COMMIT ENTITIES calls (sy-subrc 0), and `PASS: header totals 1900/2650/2800/2400/0; cleanup complete.` The persisted-parent lookup still does not support uncommitted-item deletion. No independent SAP execution by the assistant is claimed. Current checkpoint: [Phase 2.5A Supplier validation](docs/phase-2-5a-supplier-validation.md), source-prepared; SAP verification pending.
+Current checkpoint: [Phase 2.5A Supplier validation](docs/phase-2-5a-supplier-validation.md) is runtime-verified complete. Blank Supplier create/update are rejected during save, persistence remains unchanged, and the valid regression flow passes. The persisted-parent lookup still does not support uncommitted-item deletion. The repository is ready for Phase 2.5B; no new validation has been added yet.
 
 | Folder | Planned content |
 | --- | --- |

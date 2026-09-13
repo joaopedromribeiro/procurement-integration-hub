@@ -1,6 +1,6 @@
 # Phase 2 — managed RAP runtime test with EML
 
-The learner reports Phase 2.4C runtime-verified complete: header totals 1900 → 2650 → 2800 → 2400 → 0, successful relevant COMMIT ENTITIES calls (sy-subrc 0), and `PASS: header totals 1900/2650/2800/2400/0; cleanup complete.` The persisted-parent lookup still does not support uncommitted-item deletion. No independent SAP execution by the assistant is claimed. The current test adds Phase 2.5A Supplier validation and awaits a new SAP run.
+The learner reports Phase 2.4C and Phase 2.5A runtime-verified complete. Header totals reached 1900 → 2650 → 2800 → 2400 → 0 with successful positive commits. Blank Supplier create/update were rejected during save with nonzero sy-subrc and `Supplier is required.`, persistence remained unchanged, and the valid regression flow passed. The persisted-parent lookup still does not support uncommitted-item deletion. No independent SAP execution by the assistant is claimed.
 
 ## ADT object
 
@@ -41,4 +41,4 @@ If the run stops, send the exact compiler diagnostic or STOP line, the relevant 
 
 See [Supplier validation](phase-2-5a-supplier-validation.md). The test first attempts a blank-Supplier create, then tries clearing Supplier on the committed SUP001 order. Both MODIFY requests should succeed and both saves must fail with a matching root FAILED key and field-specific `Supplier is required.` message. These intentional negative commits are expected to have nonzero sy-subrc. The helper rolls back before checking persistence and proceeding. Positive saves still require sy-subrc 0.
 
-The final line is now `PASS: Supplier validation rejects blank create/update; valid flow and cleanup pass.` The historical header-total PASS line is still printed immediately before it.
+The runtime-verified final line is `PASS: Supplier validation rejects blank create/update; valid flow and cleanup pass.` The header-total PASS line is printed immediately before it. Phase 2.5B has not started.

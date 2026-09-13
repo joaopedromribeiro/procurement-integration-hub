@@ -1,6 +1,6 @@
 # Phase 2.5A — Supplier required on save
 
-Phase 2.4C is runtime-verified complete for its documented committed-item deletion scope. Uncommitted-item deletion remains unsupported. The existing determination methods are preserved. This new validation is source-prepared; target SAP activation and runtime verification are pending.
+Phase 2.4C is runtime-verified complete for its documented committed-item deletion scope. Uncommitted-item deletion remains unsupported. Phase 2.5A validateSupplier is now runtime-verified complete in the learner's SAP system. The existing determination methods remain preserved.
 
 ## Rule and implementation
 
@@ -31,11 +31,20 @@ validation validateSupplier on save { create; field Supplier; }
 
 The negative helper checks the failure key and exact message with its Supplier field marker, then explicitly rolls back. Nonzero COMMIT results are expected only in the two negative cases. ROLLBACK does not undo earlier successful commits. If a test unexpectedly saves invalid data, the printed UUID identifies it for diagnosis; stop and correct the validation before rerunning.
 
-Expected final output:
+Runtime-verified evidence:
+
+- blank Supplier create was rejected at save;
+- blank Supplier update was rejected at save;
+- both negative commits returned nonzero sy-subrc;
+- both produced `Supplier is required.`;
+- persistence remained unchanged;
+- the valid regression flow still passed.
+
+Final output:
 
 ```text
 PASS: header totals 1900/2650/2800/2400/0; cleanup complete.
 PASS: Supplier validation rejects blank create/update; valid flow and cleanup pass.
 ```
 
-Set a breakpoint in validateSupplier to inspect keys, the buffered Supplier, FAILED and REPORTED. Stop after this checkpoint and report the result; no further validation or feature is implemented yet.
+This is learner-supplied SAP runtime evidence; the assistant did not independently connect to SAP. Phase 2.5A is complete. Phase 2.5B has not started.
