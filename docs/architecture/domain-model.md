@@ -1,8 +1,8 @@
 # Domain model
 
-Phase 0 logical model. Types and lengths below are proposed application choices, not activated ABAP definitions. Select released ABAP administrative data elements and currency/unit semantics against the target release in Phase 1.
+Phase 0 logical model with Phase 1 implementation updates. The learner has now activated the RAP persistence/CDS objects in SAP S/4HANA through ADT. The field definitions below describe the agreed model; behavior and integration rules remain future implementation.
 
-Phase 1 update: source for the full RAP header/item field set now exists under [abap-rap](../../abap-rap/README.md), using the ZJP_ prefix. The [ADT guide](../../abap-rap/docs/phase-1-domain-model.md) explains each object. No SAP activation is claimed. The logical nullable fields below map to ABAP initial values in non-null persistence columns; API null conversion is deferred. Monetary columns use DEC(19,2)/DEC(19,4) with currency annotations in CDS; quantity uses QUAN(13,3) with a local UNIT reference. Constraints such as required supplier, allowed states and uniqueness of display/item numbers remain behavior work, not implemented database checks. Draft tables remain Phase 2 work.
+Phase 1 update: source for the full RAP header/item field set exists under [abap-rap](../../abap-rap/README.md), using the ZJP_ prefix. The [ADT guide](../../abap-rap/docs/phase-1-domain-model.md) explains each object and records successful activation plus the root currency-marker and child provider-contract corrections. The logical nullable fields below map to ABAP initial values in non-null persistence columns; API null conversion is deferred. Monetary columns use DEC(19,2)/DEC(19,4) with amount-to-currency annotations in CDS; quantity uses QUAN(13,3) with a local UNIT reference. Constraints such as required supplier, allowed states and uniqueness of display/item numbers remain behavior work, not implemented database checks. Draft tables remain Phase 2 work.
 
 ## Ownership and relationships
 

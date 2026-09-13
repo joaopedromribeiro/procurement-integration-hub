@@ -1,6 +1,14 @@
 # Phase 1 — RAP persistence and domain model
 
-Status: source prepared locally; SAP activation and learner checks pending. Target confirmed by the learner: SAP S/4HANA with ABAP Cloud. Exact S/4HANA/ABAP release is still unknown. The sources use current ABAP Cloud conventions; the target system's ADT syntax and API-release checks are authoritative.
+Status: Phase 1 complete. The learner manually created and successfully activated all six objects in SAP S/4HANA using ADT/Eclipse, with the two compatibility adjustments below. This is learner-reported SAP activation evidence; separate data-preview, ATC and CRUD results have not been supplied. Exact S/4HANA/ABAP release is still unknown. The target SAP compiler is authoritative.
+
+## Compatibility adjustments confirmed during activation
+
+In ZJP_I_PurchaseOrder, the compiler rejected the standalone currency-code marker with the message: "Annotation Semantics.currencyCode is not allowed in view entities." The root source therefore exposes Currency normally and retains `@Semantics.amount.currencyCode: 'Currency'` on TotalAmount. Do not reintroduce the rejected marker in this root view. The amount-to-currency relationship is preserved.
+
+In ZJP_C_PurchaseOrderItem, the compiler rejected an explicit `provider contract transactional_query` with: "Provider contract not modifiable if view contains 'redirected to parent' associations." The working child declaration uses `as projection on ZJP_I_PurchaseOrderItem` without that provider-contract clause and retains `_PurchaseOrder : redirected to parent ZJP_C_PurchaseOrder`. The root projection retains its explicit transactional_query contract. Root and child declarations should not be made identical merely for visual consistency.
+
+The corresponding full listings below and their source files have been reconciled to these reported adjustments. The remaining four source files are unchanged; this is not a complete ADT export comparison. All six activations were reported successful. Future syntax questions will be resolved against the target compiler and the actual object source, rather than restoring a generic example.
 
 ## Before creating anything
 
@@ -158,7 +166,6 @@ define root view entity ZJP_I_PurchaseOrder
       company_code            as CompanyCode,
       purchasing_organization as PurchasingOrganization,
       purchasing_group        as PurchasingGroup,
-      @Semantics.currencyCode: true
       currency                as Currency,
       @Semantics.amount.currencyCode: 'Currency'
       total_amount            as TotalAmount,
@@ -331,7 +338,6 @@ Currency/quantity and administrative element annotations propagate from the base
 @EndUserText.label: 'Procurement Hub: Purchase Order Item Projection'
 @Metadata.allowExtensions: true
 define view entity ZJP_C_PurchaseOrderItem
-  provider contract transactional_query
   as projection on ZJP_I_PurchaseOrderItem
 {
   key PurchaseOrderItemUUID,
@@ -349,11 +355,11 @@ define view entity ZJP_C_PurchaseOrderItem
 }
 ```
 
-**Read the code:** `redirected to parent ZJP_C_PurchaseOrder` changes the navigation target to the projected parent. Redirecting only the root's child link would leave an inconsistent projection tree. The parent UUID is retained because the association depends on it. Currency and unit fields are retained because the amount/quantity semantics depend on them.
+**Read the code:** `redirected to parent ZJP_C_PurchaseOrder` changes the navigation target to the projected parent. Redirecting only the root's child link would leave an inconsistent projection tree. This child deliberately has no explicit provider-contract clause, as required by the learner's compiler for this redirected-parent projection. The parent UUID is retained because the association depends on it. Currency and unit fields are retained because the amount/quantity semantics depend on them.
 
 **Test now:** save both projections and activate them together through the inactive-object selection. Expected: both active; the root remains root, the child remains non-root, and both navigation targets are `ZJP_C_*`. Inspect annotation propagation in ADT and preview the projected fields. For creation-order issues, the same temporary-parent technique as Step 4 applies: temporarily omit `_Items` from the root projection, create the child, then restore and activate the pair.
 
-If your system rejects `provider contract transactional_query`, record the exact syntax message and release. Do not silently remove the contract or add a behavior definition. Compatibility must be resolved within the agreed domain-model scope.
+The activation issue in this system was resolved by removing only the child's explicit provider-contract declaration. Keep the root contract and both relationship redirections. Record any further release-specific diagnostic and adapt to the confirmed working syntax; adding behavior is not a workaround for a CDS compatibility error.
 
 ## What this phase does and does not enforce
 
@@ -375,15 +381,15 @@ If your system rejects `provider contract transactional_query`, record the exact
 | Check | Expected | Actual |
 | --- | --- | --- |
 | Target product/release recorded | S/4HANA, exact ABAP release | Product confirmed; release pending |
-| Both tables activate | Active; correct keys/scales | Pending |
-| Base view pair activates | Root/child cycle resolves | Pending |
-| Projection pair activates | Redirected composition/parent resolve | Pending |
-| Preview all six objects where supported | No rows in new installation; expected fields | Pending |
-| Currency/unit and audit references | Resolve to local elements | Pending |
-| ABAP Cloud checks | No unreleased dependency or unsupported syntax | Pending |
+| Both tables activate | Active; correct keys/scales | Successful activation reported by learner |
+| Base view pair activates | Root/child cycle resolves | Successful activation reported after root currency-marker adjustment |
+| Projection pair activates | Redirected composition/parent resolve | Successful activation reported after child provider-contract adjustment |
+| Preview all six objects where supported | No rows in new installation; expected fields | Not separately reported; no row counts claimed |
+| Currency/unit and audit references | Resolve to local elements | Sources activated; separate annotation inspection not reported |
+| ABAP Cloud checks | No unreleased dependency or unsupported syntax | Activation reported; separate ATC run not reported |
 | Objects outside the six-model-object scope | None | None created locally |
 
-Stop here after the model checks. Capture activation errors verbatim if any. Phase 1 is not marked SAP-validated until these checks succeed in your S/4HANA system. Do not use direct database inserts or start a behavior generator just to make an empty preview look more interesting.
+The learner's successful activation of all six objects satisfies the Phase 1 completion gate for moving into the behavior-architecture lesson. No additional Phase 1 runtime test is required before that conceptual step. The unreported preview/ATC checks remain optional evidence, not invented results. CRUD and row-navigation tests belong to the later EML step. Continue with [Phase 2, Step 1](phase-2-step-1-behavior-architecture.md); stop there until the learner confirms understanding.
 
 ## Review before Phase 2
 

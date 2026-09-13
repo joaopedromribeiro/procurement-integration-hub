@@ -2,7 +2,9 @@
 
 A guided SAP portfolio project connecting a custom procurement application to an external supplier portal.
 
-**Current milestone: Phase 1 — RAP persistence and domain model.** Six ZJP_ table/CDS source files and a guided ADT lesson are prepared. Activation and data-model checks in the learner's SAP S/4HANA system are pending. No RAP behavior, CAP application, deployed iFlows, security configuration, or event infrastructure has been implemented.
+**Current milestone: Phase 2.4A — status-initialization plan.** Phase 1 and Phase 2.1–2.3 are complete. ZJP_CL_PO_EML_TEST successfully executed managed CRUD, composition creation/cleanup, UUID numbering and commits in the learner’s SAP S/4HANA system. The supplied console output is recorded as [SAP runtime evidence](abap-rap/docs/phase-2-3-eml-runtime-evidence.md). Determination code has not been added.
+
+Published repository: [Procurement Integration Hub on GitHub](https://github.com/joaopedromribeiro/procurement-integration-hub). The local main branch tracks origin/main. New working-tree edits must be committed and pushed before they appear on GitHub.
 
 ## Project overview
 
@@ -34,8 +36,8 @@ All runtime components above are planned. Phase 5 connects the dispatcher and CA
 
 | Planned technology | Intended evidence | Status |
 | --- | --- | --- |
-| ABAP Cloud and CDS view entities | Activated tables and composed CDS model | Phase 1 sources prepared; SAP verification pending |
-| Managed RAP and EML | BO behavior, actions, validations and ABAP tests | Planned, phase 2 |
+| ABAP Cloud and CDS view entities | Activated tables and composed CDS model | Phase 1 complete; successful ADT activation reported by learner |
+| Managed RAP and EML | BO behavior and ABAP runtime checks | Managed CRUD/composition verified in SAP; determinations, validations, draft and actions pending |
 | OData V4, SAP Fiori Elements | Service metadata and buyer UI demonstration | Planned, phase 3 |
 | SAP CAP, Node.js, TypeScript, CDS, SQLite | Running portal API and handler tests | Planned, phase 4 |
 | REST, JSON | Direct round trip with receipts and supplier response | Planned, phase 5 |
@@ -89,7 +91,9 @@ Phase 9 will replace the delivery trigger with committed RAP business events, SA
 
 ## How to run
 
-There is no executable application yet. Follow the [Phase 1 ADT guide](abap-rap/docs/phase-1-domain-model.md) to create the two persistence tables, two base CDS entities and two projection entities manually, with a test after each step. The source files are not a serialized ABAP import package. No npm installation is needed.
+The six domain-model objects have been activated in the learner's SAP system; there is no transactional application or OData service yet. The [Phase 1 ADT guide](abap-rap/docs/phase-1-domain-model.md) contains the manual reproduction steps and confirmed compatibility fixes. The source files are not a serialized ABAP import package. No npm installation is needed.
+
+The current lesson is the [status-initialization plan](abap-rap/docs/phase-2-4a-status-initialization-plan.md). The previous [EML test](abap-rap/docs/phase-2-eml-runtime-test.md) passed in SAP. Review the first determination before implementation; after implementation, verify Status DRAFT before moving to item/header totals.
 
 The [Phase 0 review exercise](docs/phase-0-review.md) remains available as architecture background. The Phase 0 ZIP is an archived foundation snapshot and does not contain Phase 1 changes.
 
@@ -135,10 +139,10 @@ No runtime screenshots yet. Verified screenshots will be added under `docs/scree
 | 10 | API Management | Proxy authentication, throttling and routing verified |
 | 11 | Tests and portfolio presentation | Evidence-backed README, diagrams, screenshots and lessons |
 
-Phase 0 is complete. Phase 1 source preparation is complete, with learner activation/verification pending; later phases are unstarted. Testing and documentation accompany every phase; Phase 11 consolidates them.
+Phases 0 and 1 and Phase 2.1–2.3 are complete. Phase 2.4 determinations are next, starting with a Status DRAFT plan. Phase 2.5 validations, 2.6 draft and 2.7 actions remain pending. Phases 3–11 remain unstarted.
 
 ## Lessons learned
 
-See [LEARNINGS.md](LEARNINGS.md) for concepts studied versus practiced. [PROJECT_STATUS.md](PROJECT_STATUS.md) tracks progress, decisions, open issues, and technical debt. Current portfolio wording: “Designed the architecture and API contracts, and prepared the RAP persistence and CDS domain-model sources for a procurement integration learning project.” SAP execution claims will be added only with activation/test evidence.
+See [LEARNINGS.md](LEARNINGS.md) for studied and practiced concepts, and [PROJECT_STATUS.md](PROJECT_STATUS.md) for evidence and remaining work. Current portfolio wording: “Implemented a managed RAP purchase-order BO in SAP S/4HANA with header/item CDS composition and managed UUID numbering; verified CRUD, create-by-association, transactional buffering, EML commits and composition cleanup in the SAP runtime.” This does not claim determinations, validations, draft, business actions or integrations.
 
 Technical references are collected in [SAP sources](docs/architecture/references.md).

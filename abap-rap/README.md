@@ -1,6 +1,8 @@
 # ABAP RAP application
 
-Phase 1 contains two table definitions and four CDS definitions for manual creation in ADT. SAP activation is pending. Follow the [step-by-step domain model guide](docs/phase-1-domain-model.md): every object has complete source, an explanation, its ADT name and a verification checkpoint.
+Phase 1 is complete: the learner manually created and activated the two tables and four CDS entities in SAP S/4HANA using ADT/Eclipse. The [domain model guide](docs/phase-1-domain-model.md) includes the two confirmed compatibility corrections and synchronized source listings. Activation is learner-reported; managed CRUD/composition now also has Phase 2 SAP runtime evidence.
+
+Current lesson: [Phase 2.4A — status initialization plan](docs/phase-2-4a-status-initialization-plan.md). Phase 2.1 BDEF, 2.2 minimal pool/stub and 2.3 EML CRUD are complete on [learner-supplied SAP output](docs/phase-2-3-eml-runtime-evidence.md). No determination source is added at this planning checkpoint.
 
 | Folder | Planned content |
 | --- | --- |
@@ -13,6 +15,6 @@ Phase 1 contains two table definitions and four CDS definitions for manual creat
 
 Naming family selected by the learner: suggested package `ZJP_PIH`, tables `ZJP_PO_H` / `ZJP_PO_I`, base views `ZJP_I_PurchaseOrder` / `ZJP_I_PurchaseOrderItem`, and projections `ZJP_C_PurchaseOrder` / `ZJP_C_PurchaseOrderItem`. This supersedes the provisional Phase 0 names. Confirm object collisions before creation. Behavior pool and service objects are not created in this phase.
 
-The `.ddl` and `.ddls` files contain complete source for the corresponding ADT editors. They are hand-maintained files, not serialized abapGit objects. Select a supported serialization tool/package mapping against the actual system before a future export. No `.abapgit.xml` or automated import claim is made.
+The `.ddl`, `.ddls` and `.bdef` files contain source for the corresponding ADT editors. The behavior pool's `.clas.abap` and `.clas.locals_imp.abap` files go into the main class and Local Types areas of the same ADT class. These are hand-maintained files, not a complete serialized abapGit package. Select a supported serialization tool/package mapping against the actual system before a future export. No `.abapgit.xml` or automated import claim is made.
 
 Start from the [domain model](../docs/architecture/domain-model.md) and [environment prerequisites](../docs/environments.md). An SAP system is required for activation, RAP/EML execution, ATC and real OData validation.

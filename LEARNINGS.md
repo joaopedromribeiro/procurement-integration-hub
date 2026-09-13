@@ -1,6 +1,6 @@
 # Learning journal
 
-This file distinguishes concepts studied from hands-on implementation. Phase 0 contains architecture learning; no RAP or CAP runtime practice has occurred yet.
+This journal distinguishes design, source preparation and successful SAP execution. Phase 1 model activation and Phase 2 managed CRUD/composition are now evidenced by the learner’s SAP report and console output. The Status DRAFT determination is currently a plan only; no later feature is claimed.
 
 ## Phase 0 — architecture foundation
 
@@ -38,9 +38,9 @@ Explain this scenario without looking at the architecture: an approved order is 
 
 For each completed phase, add: what was built; why the chosen technology fits; important code concepts; test performed; expected and actual result; mistakes and corrections; alternatives considered; interview explanation; and evidence links. Explicitly mark tests run with mocks and tests run on SAP.
 
-## Phase 1 — persistence and CDS source preparation
+## Phase 1 — persistence and CDS implementation, completed
 
-Source authored and explained: ZJP_PO_H, ZJP_PO_I, ZJP_I_PurchaseOrder, ZJP_I_PurchaseOrderItem, ZJP_C_PurchaseOrder and ZJP_C_PurchaseOrderItem. Target: SAP S/4HANA with ABAP Cloud. Learner activation and runtime practice are pending; [the ADT lesson](abap-rap/docs/phase-1-domain-model.md) contains the complete sources and expected tests.
+The learner manually created and successfully activated ZJP_PO_H, ZJP_PO_I, ZJP_I_PurchaseOrder, ZJP_I_PurchaseOrderItem, ZJP_C_PurchaseOrder and ZJP_C_PurchaseOrderItem in SAP S/4HANA using ADT/Eclipse. The [ADT lesson](abap-rap/docs/phase-1-domain-model.md) contains the reconciled sources and activation record. Exact release is still unrecorded; the target SAP compiler is authoritative.
 
 | Concept | Learning point |
 | --- | --- |
@@ -57,8 +57,78 @@ Source authored and explained: ZJP_PO_H, ZJP_PO_I, ZJP_I_PurchaseOrder, ZJP_I_Pu
 | Access-control annotation | NOT_REQUIRED without DCL does not implement row-level authorization |
 | Activation dependencies | Mutually referencing CDS pairs need coordinated activation; an intermediate missing target is not a reason to discard the model |
 
-Expected tests: activate each table and both CDS pairs; inspect keys, scales, references and projection fields; preview zero rows in a new installation. Actual SAP results: pending. No calculated totals, CRUD operations, draft behavior or service tests were performed.
+Actual SAP result reported: all six objects activated successfully after two compatibility corrections. Preview row counts and separate ATC results were not reported. No calculated totals, CRUD operations, draft behavior, EML or service tests have been demonstrated yet.
 
-Interview explanation to practice: “I modeled purchase orders as a client-dependent UUID root with composed items, then exposed a consumer projection with redirected relationships. I separated structural semantics from the managed behavior that will enforce business rules.” Use this as an explanation of the authored design; qualify SAP hands-on claims until activation is recorded.
+### Practical compatibility lessons
 
-Phases 2–11 remain unstarted.
+1. The root base view's standalone currency-code annotation was rejected: "Annotation Semantics.currencyCode is not allowed in view entities." The working source exposes `currency as Currency` and preserves `@Semantics.amount.currencyCode: 'Currency'` on TotalAmount. Semantic intent is preserved using syntax accepted by the target compiler.
+2. The child projection's explicit transactional_query provider contract was rejected: "Provider contract not modifiable if view contains 'redirected to parent' associations." Removing that clause from the child allowed activation; the root projection keeps its explicit contract. Matching layers do not necessarily need identical declarations.
+3. `_PurchaseOrder : redirected to parent ZJP_C_PurchaseOrder` establishes the child's parent relationship within the projection layer. Removing the relationship to force activation would damage the model; adapting the provider-contract declaration preserves it.
+4. CDS annotation eligibility and supported declarations depend on the target entity type and ABAP release. General examples are starting points, not stronger evidence than the actual compiler. Record diagnostics and update both source and teaching material after a confirmed fix. Do not generalize this report into a claim about every SAP release.
+
+Interview explanation to practice: “I manually implemented and activated purchase-order persistence and a composed CDS domain model in SAP S/4HANA using ADT. I corrected incompatible annotation and projection-contract declarations against the target compiler while preserving currency semantics and parent-child navigation.” This describes Phase 1 experience, not managed behavior or integration implementation.
+
+## Phase 2, Step 1 — behavior architecture, explanation only
+
+The [current lesson](abap-rap/docs/phase-2-step-1-behavior-architecture.md) distinguishes the data model (fields/relationships), base Behavior Definition (transactional contract), behavior pool (custom ABAP logic), and projection behavior (consumer-specific reused operations). Root and child belong to one BO with behavior sections under one root-based BDEF.
+
+The exercise identifies which layer owns a field, an enabled operation, its custom validation and its projection exposure. No new ADT object, code activation or EML test belonged to that conceptual step. The learner has since authorized the base BDEF checkpoint below.
+
+## Phase 2 — base managed BDEF, compiler corrections recorded
+
+Prepared one Behavior Definition ZJP_I_PURCHASEORDER with both entities. The [BDEF guide](abap-rap/docs/phase-2-base-managed-bdef.md) explains the source and ADT checks. Key concepts: framework-managed standard persistence with a required behavior pool for instance authorization; explicit mappings from CDS aliases to table columns; root lock master and child dependency; child creation through the parent's composition; framework-generated readonly UUID keys; separate instance ETags even though locking is shared.
+
+Readonly totals, status and display numbers remain initial until later logic supplies them; readonly does not mean calculated. Activation alone cannot prove CRUD persistence or stale-ETag behavior. The original BDEF failed SAP compilation; the corrected BDEF/pool and CRUD flow now have SAP execution evidence; concurrency tests remain pending.
+
+### Practical compiler lessons
+
+1. `authorization master ( none )` is not supported in the learner's target release: the compiler expected global or instance. The earlier recommendation is withdrawn.
+2. With `strict ( 2 )`, every entity must explicitly participate in the authorization hierarchy. Removing authorization clauses failed too.
+3. The root now declares `authorization master ( instance )`.
+4. The child declares `authorization dependent by _PurchaseOrder`.
+5. The current BO requires an implementation class declaration: `managed implementation in class ZBP_I_PURCHASEORDER unique;`. Declaring instance authorization introduces an implementation requirement; it does not make standard managed CRUD handwritten code.
+6. The real SAP compiler is authoritative over generic RAP examples. Record the failed assumption and exact diagnostic, correct source and teaching material together, and do not claim successful activation before it is confirmed.
+
+### Behavior implementation architecture — understanding confirmed
+
+The [architecture lesson](abap-rap/docs/phase-2-behavior-implementation-architecture.md) explains the BDEF contract versus behavior-pool implementation. ZBP_I_PURCHASEORDER contains the root local handler and get_instance_authorizations. Its keys identify orders; requested permission flags select the decisions to return. Dependent item modifications use the parent's authorization rather than a separate child policy. For standard dependent item update/delete, the root's update authorization applies.
+
+RAP keeps the transaction buffer, standard saving, managed UUID numbering and declared locking; the custom handler supplies permission decisions. No INSERT/UPDATE/DELETE implementation or custom saver is needed. Instance authorization does not cover standalone root CREATE or CDS read access. An empty method is scaffolding, and an explicitly permissive study implementation would be a temporary learning stub, not a secured business service.
+
+Exercise: explain why deleting an item can require the root's update permission, while RAP still deletes the item through managed persistence. The learner confirmed understanding, authorized the minimal implementation and subsequently accepted its corrected activation baseline. The EML runtime checkpoint has passed; status-initialization planning is current.
+
+### Minimal behavior pool — activation baseline accepted
+
+The [current ADT lesson](abap-rap/docs/phase-2-minimal-behavior-pool.md) provides one global behavior-pool class and one root local handler as two source files for the same repository class. The empty global implementation is intentional; the local authorization method has an explicit implementation. No child callback or custom saver is needed.
+
+The handler uses a small READ ENTITIES in local mode to resolve existing keys from the BO's transactional view and forwards read failures/messages. It deduplicates successful identities, then returns the requested update and delete permissions as allowed under the agreed study policy. The local read avoids relying only on database state and is part of this callback, not a separate EML CRUD exercise.
+
+Concepts to explain: `%tky` correlates permission results with instances; `mk-on` is a request flag; `auth-allowed` is a permission decision; requested operations determine which response components are filled. Each existing identity gets one result, while missing identities must be reported as not found. A permissive stub supplies explicit results but checks no actual user roles or authorization objects.
+
+The minimal-class activation checkpoint is now accepted under the learner’s explicit assumption following the correction below. No independent SAP execution is claimed. The subsequent EML runtime checkpoint has passed, with Phase 1 unchanged.
+
+## Phase 2 — authorization component compatibility and EML runtime lesson
+
+The compiler rejected both REQUESTED_AUTHORIZATIONS-%ASSOC-_ITEMS and AUTHORIZATION_RESULT-%ASSOC-_ITEMS because the generated structures contain no such component in the target system. The working root handler now returns only supported %update and %delete decisions. Keep lhc_PurchaseOrder local in the behavior pool. Do not add a field simply because a generic RAP example has it: generated structures depend on release and behavior definition; the ADT compiler and autocomplete are authoritative.
+
+The earlier learner-directed activation assumption is now superseded by successful SAP EML runtime evidence.
+
+The [EML lesson](abap-rap/docs/phase-2-eml-runtime-test.md) now provides a normal console class ZJP_CL_PO_EML_TEST. Its requests use the base BO, with no service and no IN LOCAL MODE bypass in the consumer. Root CREATE plus CREATE BY association connects the new item with %cid_ref and %target; managed UUID assignment is retrieved from MAPPED. READ ENTITIES sees unsaved buffer state, while UUID-filtered SELECT verifies actual persistence.
+
+Learning points: %cid is request correlation, %tky is instance identity, FAILED identifies failures, and REPORTED carries messages of different severities. Check both modify responses and the separate save responses. The console consumer calls COMMIT ENTITIES after each mutation stage. ROLLBACK ENTITIES discards current uncommitted work and cannot undo prior commits.
+
+The run creates one header/item, reads them, commits, changes Supplier from SUP001 to SUP002, commits, deletes that generated root through EML and commits again. Table checks should show 0/0, 1/1, 1/1, then 0/0 header/item rows. Composition child cleanup is verified rather than assumed successful. Totals, business status and display number remain initial until their later logic.
+
+Actual EML result: successful on SAP, with supplied console output ending in PASS. Deep create alone does not validate every authorization path; concurrent locking, stale ETags and negative authorization cases remain untested.
+
+## Phase 2.3 — successful SAP runtime verification
+
+The [evidence record](abap-rap/docs/phase-2-3-eml-runtime-evidence.md) confirms header/item deep creation, generated UUIDs, buffered reads, committed persistence, Supplier SUP001 → SUP002 and root deletion with item cleanup. Three commits returned sy-subrc = 0. %cid, %cid_ref, %target, MAPPED and %tky were exercised, while FAILED/REPORTED remained empty on this successful path. This is SAP execution evidence, not only structural review.
+
+Root audit values were initial in the pre-save read and populated on save; the local last-change timestamp advanced on update. Status, PurchaseOrderNumber, SupplierName and totals were initial/zero by design. Do not classify absent business derivation as a failure or infer complete concurrency/security coverage from this run.
+
+## Phase 2.4A — determination concepts, plan only
+
+The [current plan](abap-rap/docs/phase-2-4a-status-initialization-plan.md) proposes initializeStatus on root creation during modify processing. A determination derives values; a validation checks acceptability. Internal EML reads the transaction buffer, then updates only blank Status values to DRAFT. The consumer commits. The method belongs in lhc_PurchaseOrder within the existing pool, and ADT generates its target-compatible signature.
+
+Business Status DRAFT is distinct from technical RAP draft. NOT_REQUESTED is the proposed IntegrationStatus default because no delivery is queued, but it is deferred from this first change. Item and header totals follow only after status initialization passes a runtime test. Header aggregation must not rely on determination order, must include unsaved changes, and needs an explicit plan for identifying the parent after an item deletion. No determination code is written at this plan checkpoint.

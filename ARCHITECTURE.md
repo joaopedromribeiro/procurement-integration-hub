@@ -1,10 +1,14 @@
 # Architecture
 
-Design baseline: 2026-09-12. Phase 1 adds local persistence/CDS source against this architecture; SAP activation is pending. All transactional and integration runtime behavior described below remains proposed.
+Design baseline: 2026-09-12. Phase 1 objects and Phase 2.1–2.3 managed RAP CRUD/composition have SAP execution evidence supplied by the learner. The [status-initialization plan](abap-rap/docs/phase-2-4a-status-initialization-plan.md) begins Phase 2.4; no determination code is present yet. Business rules and integrations remain proposed.
 
 ## Phase 1 implementation boundary
 
 The learner confirmed SAP S/4HANA with ABAP Cloud; exact release is pending. The six model objects are ZJP_PO_H, ZJP_PO_I, ZJP_I_PurchaseOrder, ZJP_I_PurchaseOrderItem, ZJP_C_PurchaseOrder and ZJP_C_PurchaseOrderItem. See the [step-by-step ADT guide](abap-rap/docs/phase-1-domain-model.md).
+
+All six objects were activated in ADT/Eclipse. Two confirmed compiler adjustments are part of the implementation baseline: the root base view exposes Currency without the rejected standalone currency-code marker and keeps the amount-to-currency reference; the child projection omits an explicit transactional_query provider contract while retaining its redirected-parent association. The root projection retains its provider contract. These are target-system findings; they do not establish syntax behavior for every SAP release.
+
+[Phase 2, Step 1](abap-rap/docs/phase-2-step-1-behavior-architecture.md) explains the behavior layers. The [base managed BDEF](abap-rap/docs/phase-2-base-managed-bdef.md) has both entities, complete mappings, root CRUD, child create-by-association/update/delete, master/dependent locks, managed UUIDs and individual LocalLastChangedAt ETags. Target compiler feedback requires explicit authorization under strict(2): root authorization master (instance), child authorization dependent by _PurchaseOrder. Its managed header names implementation class ZBP_I_PURCHASEORDER. The [current behavior-pool lesson](abap-rap/docs/phase-2-minimal-behavior-pool.md) supplies one root callback: a small internal EML read resolves existing instances, then only the target-supported update/delete permissions are allowed under a study-only policy. Managed RAP still owns standard persistence; the permissive policy is not production authorization. The EML CRUD run is now verified by learner-supplied SAP output. The current [EML lesson](abap-rap/docs/phase-2-eml-runtime-test.md) records the successful standalone consumer test, including cleanup. Projection behavior and all further features remain later work.
 
 The two tables implement the Phase 0 header/item field shape with client-aware UUID keys. Monetary storage uses explicit DEC scales, annotated as amounts in CDS; QUAN references the item's UNIT field. Optional domain values use ABAP initial values in non-null persistence columns; later adapters must map them deliberately to wire-level null/absence. Root and item views declare composition/parent navigation; both projections redirect those relationships within the consumer layer. Four delivery/response bookkeeping fields are omitted from the buyer projection.
 
@@ -12,7 +16,7 @@ Standard RAP administrative types and annotations are present, but automatic aud
 
 ## Scope and assumptions
 
-Build a custom procurement BO in an ABAP Cloud-capable system. Prefer SAP BTP ABAP environment for an independent learning landscape; an appropriately equipped S/4HANA system is an alternative. Confirm release and developer/communication permissions before writing release-specific syntax.
+Build a custom procurement BO in the learner's SAP S/4HANA study environment using ABAP Cloud. SAP BTP ABAP environment remains an alternative learning landscape. Exact release and future communication permissions still need recording before release-specific implementation.
 
 The initial business scope is one supplier and one currency per order, complete-order acceptance/rejection, manual approval, and synthetic master data. Taxes, freight, goods receipt, invoices, partial confirmation, changes after submission, standard MM integration, and cancellation after delivery are excluded. There is no multitenant SaaS requirement; multiple suppliers still require strict data isolation.
 
@@ -188,5 +192,7 @@ SAP supports [RAP business events](https://help.sap.com/docs/abap-cloud/abap-rap
 | ADR-013 | ZJP_ prefix for all six Phase 1 objects | Learner's naming preference replaces the earlier provisional ZPIH family |
 | ADR-014 | DEC monetary persistence with CDS currency semantics | Preserves explicit 19/2 totals and 19/4 unit prices for the EUR-only contract; CURR is a valid alternative with deliberate currency-decimal handling |
 | ADR-015 | ABAP initial values for absent optional persistence values | Avoids relying on SQL NULL in ABAP structures; API conversion remains an explicit later responsibility |
+| ADR-016 | Preserve target-compiler compatibility fixes | Remove the root currency marker and child's explicit provider contract exactly as required by the activated implementation; do not restore rejected generic syntax |
+| ADR-017 | Confirmation after every major Phase 2 step | Behavior architecture, design, CRUD, EML, draft, logic and actions are separate learning checkpoints |
 
 See [domain model](docs/architecture/domain-model.md), [API contracts](API_CONTRACTS.md), and [project status](PROJECT_STATUS.md) for associated rules and unresolved environment decisions.

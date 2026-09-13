@@ -1,0 +1,86 @@
+managed implementation in class ZBP_I_PURCHASEORDER unique;
+strict ( 2 );
+
+define behavior for ZJP_I_PurchaseOrder alias PurchaseOrder
+persistent table zjp_po_h
+lock master
+authorization master ( instance )
+etag master LocalLastChangedAt
+{
+  create;
+  update;
+  delete;
+
+  association _Items { create; }
+
+  field ( readonly, numbering : managed ) PurchaseOrderUUID;
+  field ( readonly ) PurchaseOrderNumber, SupplierName, TotalAmount, Status,
+                     SupplierResponse, EstimatedDeliveryDate,
+                     CreatedBy, CreatedAt, LastChangedBy, LastChangedAt,
+                     LocalLastChangedAt, OrderRevision, IntegrationStatus,
+                     DeliveryId, LastErrorCode, LastErrorMessage, LastErrorAt,
+                     LastCorrelationId, LastResponseId, LastResponseVersion,
+                     RejectionOrigin, RejectionReason;
+
+  mapping for zjp_po_h
+  {
+    PurchaseOrderUUID       = purchase_order_uuid;
+    PurchaseOrderNumber     = purchase_order_number;
+    Supplier                = supplier;
+    SupplierName            = supplier_name;
+    CompanyCode             = company_code;
+    PurchasingOrganization = purchasing_organization;
+    PurchasingGroup        = purchasing_group;
+    Currency                = currency;
+    TotalAmount             = total_amount;
+    Status                  = status;
+    SupplierResponse        = supplier_response;
+    EstimatedDeliveryDate   = estimated_delivery_date;
+    CreatedBy               = created_by;
+    CreatedAt               = created_at;
+    LastChangedBy           = last_changed_by;
+    LastChangedAt           = last_changed_at;
+    LocalLastChangedAt      = local_last_changed_at;
+    OrderRevision           = order_revision;
+    IntegrationStatus       = integration_status;
+    DeliveryId              = delivery_id;
+    LastErrorCode           = last_error_code;
+    LastErrorMessage        = last_error_message;
+    LastErrorAt             = last_error_at;
+    LastCorrelationId       = last_correlation_id;
+    LastResponseId          = last_response_id;
+    LastResponseVersion     = last_response_version;
+    RejectionOrigin         = rejection_origin;
+    RejectionReason         = rejection_reason;
+  }
+}
+
+define behavior for ZJP_I_PurchaseOrderItem alias PurchaseOrderItem
+persistent table zjp_po_i
+lock dependent by _PurchaseOrder
+authorization dependent by _PurchaseOrder
+etag master LocalLastChangedAt
+{
+  update;
+  delete;
+
+  association _PurchaseOrder;
+
+  field ( readonly, numbering : managed ) PurchaseOrderItemUUID;
+  field ( readonly ) PurchaseOrderUUID, TotalAmount, LocalLastChangedAt;
+
+  mapping for zjp_po_i
+  {
+    PurchaseOrderItemUUID = purchase_order_item_uuid;
+    PurchaseOrderUUID     = purchase_order_uuid;
+    ItemNumber            = item_number;
+    Material              = material;
+    MaterialDescription   = material_description;
+    Quantity              = quantity;
+    UnitOfMeasure         = unit_of_measure;
+    NetPrice              = net_price;
+    Currency              = currency;
+    TotalAmount           = total_amount;
+    LocalLastChangedAt    = local_last_changed_at;
+  }
+}

@@ -1,6 +1,6 @@
 # Environments, accounts and service access
 
-Phase 0 needs only a local editor and Git. For Phase 1, the learner has confirmed SAP S/4HANA with ABAP Cloud as the target. Exact release and development permissions have not been verified. No SAP account has been inspected or provisioned through this workspace. The rows below describe dependencies, not confirmed entitlements. Source review date: 2026-09-12.
+Phase 0 needs only a local editor and Git. For Phase 1, the learner manually created and activated all six domain-model objects in an SAP S/4HANA study environment using ADT/Eclipse and ABAP Cloud. Exact release remains unrecorded; this report establishes access for that model work, not future communication-administration permissions. No SAP account has been inspected or provisioned through this workspace. Later service dependencies below are not confirmed entitlements. Source review date: 2026-09-12.
 
 SAP BTP trial and free tier are different: trial is for limited personal evaluation, while free service plans belong to an enterprise account and have service-specific conditions. Region, provider, plan and quota affect availability; do not assume all listed services are free or available together. Check the cockpit and current service catalog before provisioning. See [SAP trial and free tier guidance](https://help.sap.com/docs/btp/sap-business-technology-platform/trial-accounts-and-free-tier).
 
@@ -44,8 +44,8 @@ SAP Integration Suite, advanced event mesh is a separate offering; it is not req
 | Item | Current value |
 | --- | --- |
 | ABAP product and release | SAP S/4HANA with ABAP Cloud confirmed by learner; exact release pending |
-| ABAP language version / package / namespace suffix | ABAP for Cloud Development target; suggested package ZJP_PIH; object prefix ZJP_; system setup verification pending |
-| Developer and communication administrator permissions | Unknown |
+| ABAP language version / package / namespace suffix | ABAP Cloud target; learner reports six ZJP_ objects created/activated in ADT; actual package name not reported |
+| Developer and communication administrator permissions | Development access demonstrated by reported activation; communication-administration permissions unknown |
 | OData V4 UI / Web API binding support | To verify in target system |
 | Released numbering and HTTP APIs | To verify before their implementation |
 | BTP account type, region, Cloud Foundry quota | Unknown |
@@ -53,7 +53,7 @@ SAP Integration Suite, advanced event mesh is a separate offering; it is not req
 | HANA Cloud / HDI access | Unknown; optional until cloud database deployment |
 | Event Mesh product and entitlement | Unknown; Phase 9 decision |
 | XSUAA / identity provider / destination access | Unknown |
-| GitHub remote | Not configured |
+| GitHub remote | origin points to [procurement-integration-hub](https://github.com/joaopedromribeiro/procurement-integration-hub); main tracks origin/main, confirmed from local Git configuration |
 
 Record non-secret environment facts here when available. Keep credentials, service keys, tokens, tenant-specific sensitive configuration and private destinations outside the repository.
 
