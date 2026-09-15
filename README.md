@@ -143,6 +143,6 @@ Phases 0 and 1 and Phase 2.1–2.6 are complete within their documented scope. [
 
 ## Lessons learned
 
-See [LEARNINGS.md](LEARNINGS.md) for studied and practiced concepts, and [PROJECT_STATUS.md](PROJECT_STATUS.md) for evidence and remaining work. Current portfolio wording: “Implemented a managed RAP purchase-order BO in SAP S/4HANA with header/item CDS composition and managed UUID numbering; verified CRUD, create-by-association, transactional buffering, EML commits and composition cleanup in the SAP runtime.” This does not claim determinations, validations, draft, business actions or integrations.
+See [LEARNINGS.md](LEARNINGS.md) for studied and practiced concepts, and [PROJECT_STATUS.md](PROJECT_STATUS.md) for evidence and remaining work. Current portfolio wording: “Implemented a managed RAP purchase-order BO in SAP S/4HANA with header/item CDS composition and managed UUID numbering; runtime-verified CRUD, EML, determinations, validations, technical RAP draft and ownership-protected item removal for active and draft instances.” Phase 2.7 business actions and integrations remain unimplemented.
 
 Technical references are collected in [SAP sources](docs/architecture/references.md).

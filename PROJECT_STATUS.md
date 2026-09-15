@@ -95,7 +95,7 @@ Phase 0 historical verification passed: 16 Markdown documents, 35 relative links
 
 Phase 1 SAP evidence: the learner reports manually creating and activating all six objects in ADT/Eclipse, with two documented compatibility fixes. No independent SAP run, data-preview row count, CRUD, draft or EML result is claimed here.
 
-The [GitHub repository](https://github.com/joaopedromribeiro/procurement-integration-hub) is published. Local Git configuration confirms main tracks origin/main. Current working-tree updates require a later commit/push to appear remotely; no commit or push was performed in this update.
+The [GitHub repository](https://github.com/joaopedromribeiro/procurement-integration-hub) is published. Phase 2.6 is committed and pushed to main (75c971b); local HEAD matches origin/main.
 
 The learner-supplied EML output supersedes the earlier activation assumption: all three commits returned sy-subrc = 0, create/read/update/delete succeeded and final header/item row counts were zero. FAILED/REPORTED were inspected on the successful path; deliberate error, warning, authorization-denial and concurrency cases are not covered.
 
