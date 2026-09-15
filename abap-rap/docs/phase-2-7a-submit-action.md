@@ -1,6 +1,6 @@
 # Phase 2.7A — Root business action `submit`
 
-Status: **SAP runtime-verified complete** for the active `DRAFT` → `SUBMITTED` transition, the re-submit and empty-order rejections, and the buffer-only and saved technical draft rejections. Phase 2.1–2.6 remain runtime-verified and were not changed to achieve this. Phase 2.7B is not started.
+Status: **SAP runtime-verified complete** for the active `DRAFT` → `SUBMITTED` transition, the re-submit and empty-order rejections, and the buffer-only and saved technical draft rejections. Phase 2.1–2.6 remain runtime-verified and were not changed to achieve this. Phase 2.7B has since added post-submission commercial immutability on top of this transition.
 
 ## Target baseline
 
@@ -15,7 +15,7 @@ This subphase implements one business transition only.
 | Root action `submit`, business `Status` `DRAFT` → `SUBMITTED` | `approve`, `reject`, `sendToSupplier`, `cancel` |
 | Active-instance rejection of technical draft calls | `Activate`-then-`submit` coverage |
 | At-least-one-item precondition | `PurchaseOrderNumber` allocation |
-| FAILED/REPORTED rejection contract | Commercial-field read-only enforcement after `SUBMITTED` |
+| FAILED/REPORTED rejection contract | Commercial-field enforcement after `SUBMITTED`, delivered by Phase 2.7B |
 | Active and draft EML regression additions | Projection/service exposure, DCL, UI |
 
 Phase 2.6 `removeItem`, the technical draft model, all determinations, all three validations and the authorization stub are unchanged.
@@ -29,7 +29,7 @@ Phase 2.6 `removeItem`, the technical draft model, all determinations, all three
 5. **Effect.** One local-mode EML `UPDATE FIELDS ( Status )` writing `'SUBMITTED'`. No other field is written. `Status` is `readonly` in the BDEF; `initializeStatus` already establishes that a readonly field is maintained this way.
 6. **No re-validation of content.** Supplier, Quantity and NetPrice keep their existing `on save` validations and trigger declarations. Every committed active root has passed `validateSupplier`; every committed active item has passed `validateQuantity` and `validateNetPrice`; the draft path additionally runs all three through `Prepare`. `submit` therefore checks transition state only and duplicates no business rule.
 7. **No `PurchaseOrderNumber`.** Submission is the intended future allocation point, but no number-range facility is confirmed on the target. The field stays initial and the regression asserts that it stays initial.
-8. **No commercial locking yet.** A `SUBMITTED` order is still editable and its items are still removable. This is a documented Phase 2.7A gap, not an implemented restriction.
+8. **No commercial locking in this subphase.** At the 2.7A checkpoint a `SUBMITTED` order was still editable and its items still removable. That was a documented gap, not an implemented restriction; [Phase 2.7B](phase-2-7b-post-submission-immutability.md) closed it.
 
 ```mermaid
 flowchart TD
@@ -149,7 +149,7 @@ Retain both classes as regression evidence. If a future change fails, return the
 
 Runtime verification covers the transition and its three rejections. It does not cover any of the following, and none of them may be presented as solved.
 
-- A `SUBMITTED` order is still editable, and `removeItem` still works on it. Commercial-field and item locking after submission belongs to a later subphase and needs its own runtime evidence.
+- Commercial-field and item locking after submission was out of scope here and was delivered separately by [Phase 2.7B](phase-2-7b-post-submission-immutability.md).
 - `PurchaseOrderNumber` remains initial for submitted orders.
 - No `approve`, `reject`, `sendToSupplier` or `cancel` transition exists; `SUBMITTED` is terminal within this subphase.
 - Authorization remains the permissive study stub; negative permission cases are not covered.

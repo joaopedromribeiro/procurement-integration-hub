@@ -8,6 +8,12 @@ CLASS lhc_PurchaseOrder DEFINITION
     METHODS submit FOR MODIFY
       IMPORTING keys FOR ACTION PurchaseOrder~submit.
 
+    METHODS precheck_update FOR PRECHECK
+      IMPORTING entities FOR UPDATE purchaseorder.
+
+    METHODS precheck_cba_items FOR PRECHECK
+      IMPORTING entities FOR CREATE purchaseorder\_items.
+
     METHODS validateSupplier FOR VALIDATE ON SAVE
       IMPORTING keys FOR PurchaseOrder~validateSupplier.
 
@@ -31,6 +37,9 @@ CLASS lhc_PurchaseOrderItem DEFINITION
 
     METHODS calculateTotalAmount FOR DETERMINE ON MODIFY
       IMPORTING keys FOR PurchaseOrderItem~calculateTotalAmount.
+
+    METHODS precheck_update FOR PRECHECK
+      IMPORTING entities FOR UPDATE PurchaseOrderItem.
 ENDCLASS.
 
 CLASS lhc_PurchaseOrderItem IMPLEMENTATION.
@@ -132,6 +141,70 @@ CLASS lhc_PurchaseOrderItem IMPLEMENTATION.
     reported = CORRESPONDING #( DEEP update_reported ).
   ENDMETHOD.
 
+
+  METHOD precheck_update.
+    DATA reported_orders LIKE reported-purchaseorder.
+    DATA reported_items LIKE reported-purchaseorderitem.
+    DATA commercial_entities LIKE entities.
+
+    " Only user-writable commercial item fields are guarded. The readonly
+    " TotalAmount written by calculateTotalAmount is not one of them.
+    LOOP AT entities INTO DATA(entity).
+      IF entity-%control-ItemNumber          <> if_abap_behv=>mk-on
+         AND entity-%control-Material            <> if_abap_behv=>mk-on
+         AND entity-%control-MaterialDescription <> if_abap_behv=>mk-on
+         AND entity-%control-Quantity            <> if_abap_behv=>mk-on
+         AND entity-%control-UnitOfMeasure       <> if_abap_behv=>mk-on
+         AND entity-%control-NetPrice            <> if_abap_behv=>mk-on
+         AND entity-%control-Currency            <> if_abap_behv=>mk-on.
+        CONTINUE.
+      ENDIF.
+      APPEND entity TO commercial_entities.
+    ENDLOOP.
+    CHECK commercial_entities IS NOT INITIAL.
+
+    " The item carries no status. Its owning root is the authority, and the
+    " parent is matched on UUID and %is_draft so an active instance and its
+    " draft are never combined.
+    READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+      ENTITY PurchaseOrderItem
+        FIELDS ( PurchaseOrderUUID )
+        WITH CORRESPONDING #( commercial_entities )
+        RESULT DATA(items)
+      ENTITY PurchaseOrderItem BY \_PurchaseOrder
+        FIELDS ( PurchaseOrderUUID Status )
+        WITH CORRESPONDING #( commercial_entities )
+        RESULT DATA(parent_orders)
+      FAILED DATA(read_failed)
+      REPORTED DATA(read_reported).
+    reported_orders = CORRESPONDING #( DEEP read_reported-purchaseorder ).
+    APPEND LINES OF reported_orders TO reported-purchaseorder.
+    reported_items = CORRESPONDING #( DEEP read_reported-purchaseorderitem ).
+    APPEND LINES OF reported_items TO reported-purchaseorderitem.
+
+    LOOP AT commercial_entities INTO DATA(checked_entity).
+      READ TABLE items INTO DATA(item)
+        WITH KEY %tky = checked_entity-%tky.
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
+
+      READ TABLE parent_orders INTO DATA(parent_order)
+        WITH KEY PurchaseOrderUUID = item-PurchaseOrderUUID
+                 %is_draft = item-%is_draft.
+      IF sy-subrc <> 0 OR parent_order-Status <> 'SUBMITTED'.
+        CONTINUE.
+      ENDIF.
+
+      APPEND VALUE #( %tky = checked_entity-%tky )
+        TO failed-purchaseorderitem.
+      APPEND VALUE #( %tky = checked_entity-%tky
+        %msg = new_message_with_text(
+          severity = if_abap_behv_message=>severity-error
+          text = 'Submitted order items cannot change.' ) )
+        TO reported-purchaseorderitem.
+    ENDLOOP.
+  ENDMETHOD.
 ENDCLASS.
 
 CLASS lhc_PurchaseOrder IMPLEMENTATION.
@@ -146,7 +219,7 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
       DO 1 TIMES.
         READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
           ENTITY PurchaseOrder
-            FIELDS ( PurchaseOrderUUID )
+            FIELDS ( PurchaseOrderUUID Status )
             WITH VALUE #( ( %tky = action_key-%tky ) )
             RESULT DATA(orders)
           ENTITY PurchaseOrder BY \_Items
@@ -162,6 +235,13 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
 
         IF read_failed IS NOT INITIAL OR lines( orders ) <> 1.
           error_text = 'Purchase Order could not be read; item was not removed.'.
+          EXIT.
+        ENDIF.
+
+        " Phase 2.7B: a submitted order may not lose items. Checked before
+        " ownership so the state of the order decides uniformly.
+        IF orders[ 1 ]-Status = 'SUBMITTED'.
+          error_text = 'Submitted orders cannot lose items.'.
           EXIT.
         ENDIF.
 
@@ -320,6 +400,87 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
     ENDLOOP.
   ENDMETHOD.
 
+
+  METHOD precheck_update.
+    DATA reported_orders LIKE reported-purchaseorder.
+    DATA commercial_entities LIKE entities.
+
+    " Only user-writable commercial fields are guarded. Requests that touch
+    " readonly fields alone - Status from submit, TotalAmount from the
+    " determinations - are left untouched by this rule.
+    LOOP AT entities INTO DATA(entity).
+      IF entity-%control-Supplier               <> if_abap_behv=>mk-on
+         AND entity-%control-CompanyCode            <> if_abap_behv=>mk-on
+         AND entity-%control-PurchasingOrganization <> if_abap_behv=>mk-on
+         AND entity-%control-PurchasingGroup        <> if_abap_behv=>mk-on
+         AND entity-%control-Currency               <> if_abap_behv=>mk-on.
+        CONTINUE.
+      ENDIF.
+      APPEND entity TO commercial_entities.
+    ENDLOOP.
+    CHECK commercial_entities IS NOT INITIAL.
+
+    " A precheck runs before the buffer changes, so this is the current
+    " business Status. %tky carries %is_draft, so a draft instance resolves
+    " against the draft row.
+    READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+      ENTITY PurchaseOrder
+        FIELDS ( Status )
+        WITH CORRESPONDING #( commercial_entities )
+        RESULT DATA(orders)
+      FAILED DATA(read_failed)
+      REPORTED DATA(read_reported).
+    reported_orders = CORRESPONDING #( DEEP read_reported-purchaseorder ).
+    APPEND LINES OF reported_orders TO reported-purchaseorder.
+
+    LOOP AT commercial_entities INTO DATA(checked_entity).
+      READ TABLE orders INTO DATA(order)
+        WITH KEY %tky = checked_entity-%tky.
+      " An unreadable instance is left to the framework's own handling.
+      IF sy-subrc <> 0 OR order-Status <> 'SUBMITTED'.
+        CONTINUE.
+      ENDIF.
+
+      APPEND VALUE #( %tky = checked_entity-%tky )
+        TO failed-purchaseorder.
+      APPEND VALUE #( %tky = checked_entity-%tky
+        %msg = new_message_with_text(
+          severity = if_abap_behv_message=>severity-error
+          text = 'Submitted orders cannot be changed.' ) )
+        TO reported-purchaseorder.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD precheck_cba_items.
+    DATA reported_orders LIKE reported-purchaseorder.
+
+    " Adding an item is a commercial change, so no %control filter applies.
+    " The request is addressed by the target root's key.
+    READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+      ENTITY PurchaseOrder
+        FIELDS ( Status )
+        WITH CORRESPONDING #( entities )
+        RESULT DATA(orders)
+      FAILED DATA(read_failed)
+      REPORTED DATA(read_reported).
+    reported_orders = CORRESPONDING #( DEEP read_reported-purchaseorder ).
+    APPEND LINES OF reported_orders TO reported-purchaseorder.
+
+    LOOP AT entities INTO DATA(entity).
+      READ TABLE orders INTO DATA(order) WITH KEY %tky = entity-%tky.
+      IF sy-subrc <> 0 OR order-Status <> 'SUBMITTED'.
+        CONTINUE.
+      ENDIF.
+
+      APPEND VALUE #( %tky = entity-%tky )
+        TO failed-purchaseorder.
+      APPEND VALUE #( %tky = entity-%tky
+        %msg = new_message_with_text(
+          severity = if_abap_behv_message=>severity-error
+          text = 'Items cannot be added after submission.' ) )
+        TO reported-purchaseorder.
+    ENDLOOP.
+  ENDMETHOD.
   METHOD validateSupplier.
     READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
       ENTITY PurchaseOrder

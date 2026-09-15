@@ -10,10 +10,10 @@ authorization master ( instance )
 etag master LocalLastChangedAt
 {
   create;
-  update;
+  update ( precheck );
   delete;
 
-  association _Items { create; with draft; }
+  association _Items { create ( precheck ); with draft; }
 
   action ( authorization : update ) removeItem parameter ZJP_A_RemoveItem;
   action ( authorization : update ) submit;
@@ -81,7 +81,7 @@ lock dependent by _PurchaseOrder
 authorization dependent by _PurchaseOrder
 etag master LocalLastChangedAt
 {
-  update;
+  update ( precheck );
   internal delete;
 
   association _PurchaseOrder { with draft; }

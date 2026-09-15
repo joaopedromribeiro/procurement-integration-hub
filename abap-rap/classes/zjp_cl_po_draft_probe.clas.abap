@@ -606,5 +606,207 @@ CLASS zjp_cl_po_draft_probe IMPLEMENTATION.
     ENDIF.
 
     out->write( 'PASS: removeItem saved and buffer-only draft deletion; totals and cleanup pass.' ).
+
+    " Probe 3, Phase 2.7B: a technical draft taken from a SUBMITTED order
+    " carries Status SUBMITTED on this target, so the precheck must reject
+    " commercial changes on the draft instance too.
+    DATA failed_lock_edit TYPE RESPONSE FOR FAILED ZJP_I_PurchaseOrder.
+    DATA reported_lock_edit TYPE RESPONSE FOR REPORTED ZJP_I_PurchaseOrder.
+    DATA failed_lock_discard TYPE RESPONSE FOR FAILED ZJP_I_PurchaseOrder.
+    DATA reported_lock_discard TYPE RESPONSE FOR REPORTED ZJP_I_PurchaseOrder.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        CREATE FIELDS ( Supplier CompanyCode Currency )
+        WITH VALUE #( ( %cid = 'LOCK_DRAFT_ROOT'
+                        Supplier = 'SUP008'
+                        CompanyCode = '1000'
+                        Currency = 'EUR' ) )
+        CREATE BY \_Items
+        FIELDS ( ItemNumber Material Quantity UnitOfMeasure NetPrice Currency )
+        WITH VALUE #( ( %cid_ref = 'LOCK_DRAFT_ROOT'
+          %target = VALUE #( ( %cid = 'LOCK_DRAFT_ITEM' ItemNumber = '00010'
+                               Material = 'MAT001' Quantity = 2
+                               UnitOfMeasure = 'EA' NetPrice = '750.00'
+                               Currency = 'EUR' ) ) ) )
+      MAPPED DATA(mapped_lock_draft)
+      FAILED DATA(failed_lock_draft_create)
+      REPORTED DATA(reported_lock_draft_create).
+    out->write( name = 'Submitted-draft fixture FAILED'
+                data = failed_lock_draft_create ).
+    IF failed_lock_draft_create IS NOT INITIAL
+       OR NOT line_exists( mapped_lock_draft-purchaseorder[
+            %cid = 'LOCK_DRAFT_ROOT' ] ).
+      ROLLBACK ENTITIES.
+      out->write( 'STOP: submitted-draft fixture creation failed.' ).
+      RETURN.
+    ENDIF.
+    DATA(lock_draft_uuid) = mapped_lock_draft-purchaseorder[
+      %cid = 'LOCK_DRAFT_ROOT' ]-PurchaseOrderUUID.
+    out->write( name = 'Submitted-draft root UUID - retain for cleanup'
+                data = lock_draft_uuid ).
+
+    COMMIT ENTITIES RESPONSE OF ZJP_I_PurchaseOrder
+      FAILED DATA(failed_lock_draft_save)
+      REPORTED DATA(reported_lock_draft_save).
+    DATA(lock_draft_subrc) = sy-subrc.
+    out->write( name = 'Submitted-draft fixture COMMIT sy-subrc'
+                data = lock_draft_subrc ).
+    IF lock_draft_subrc <> 0 OR failed_lock_draft_save IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      out->write( 'STOP: submitted-draft fixture commit failed.' ).
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = lock_draft_uuid ) )
+        RESULT DATA(lock_active_rows)
+      FAILED DATA(failed_lock_active_read).
+    IF failed_lock_active_read IS NOT INITIAL
+       OR lines( lock_active_rows ) <> 1.
+      ROLLBACK ENTITIES.
+      out->write( 'STOP: submitted-draft fixture could not be read.' ).
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE submit FROM VALUE #( ( %tky = lock_active_rows[ 1 ]-%tky ) )
+      FAILED DATA(failed_lock_draft_submit)
+      REPORTED DATA(reported_lock_draft_submit).
+    IF failed_lock_draft_submit IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      out->write( 'STOP: submit failed on the submitted-draft fixture.' ).
+      RETURN.
+    ENDIF.
+    COMMIT ENTITIES RESPONSE OF ZJP_I_PurchaseOrder
+      FAILED DATA(failed_lock_submit_save)
+      REPORTED DATA(reported_lock_submit_save).
+    DATA(lock_submit_subrc) = sy-subrc.
+    out->write( name = 'Submitted-draft submit COMMIT sy-subrc'
+                data = lock_submit_subrc ).
+    IF lock_submit_subrc <> 0.
+      ROLLBACK ENTITIES.
+      out->write( 'STOP: submit commit failed on the submitted-draft fixture.' ).
+      RETURN.
+    ENDIF.
+
+    " Edit is instance-generating and needs %cid; its input uses %key.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE Edit FROM VALUE #( (
+          %cid = 'LOCK_DRAFT_EDIT'
+          %key-PurchaseOrderUUID = lock_draft_uuid ) )
+      FAILED failed_lock_edit
+      REPORTED reported_lock_edit.
+    out->write( name = 'Submitted-order Edit FAILED' data = failed_lock_edit ).
+    out->write( name = 'Submitted-order Edit REPORTED' data = reported_lock_edit ).
+    IF failed_lock_edit IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      out->write( 'STOP: Edit on a SUBMITTED order failed; probe 3 cannot run.' ).
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = lock_draft_uuid
+                                   %is_draft = if_abap_behv=>mk-on ) )
+        RESULT DATA(lock_draft_rows)
+      ENTITY PurchaseOrder BY \_Items
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = lock_draft_uuid
+                                   %is_draft = if_abap_behv=>mk-on ) )
+        RESULT DATA(lock_draft_items)
+      FAILED DATA(failed_lock_draft_read).
+    out->write( name = 'Draft of a SUBMITTED order' data = lock_draft_rows ).
+    out->write( name = 'Draft items of a SUBMITTED order' data = lock_draft_items ).
+    IF failed_lock_draft_read IS NOT INITIAL
+       OR lines( lock_draft_rows ) <> 1 OR lines( lock_draft_items ) <> 1
+       OR lock_draft_rows[ 1 ]-Status <> 'SUBMITTED'.
+      ROLLBACK ENTITIES.
+      out->write( 'STOP: the draft of a submitted order must carry Status SUBMITTED.' ).
+      RETURN.
+    ENDIF.
+    DATA(lock_draft_key) = lock_draft_rows[ 1 ]-%tky.
+    DATA(lock_draft_item_key) = lock_draft_items[ 1 ]-%tky.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        UPDATE FIELDS ( Supplier )
+        WITH VALUE #( ( %tky = lock_draft_key Supplier = 'SUP999' ) )
+      FAILED DATA(failed_draft_root_update)
+      REPORTED DATA(reported_draft_root_update).
+    out->write( name = 'Draft root update FAILED - expect rejection'
+                data = failed_draft_root_update ).
+    out->write( name = 'Draft root update REPORTED'
+                data = reported_draft_root_update ).
+    DATA(draft_root_blocked) = xsdbool( line_exists(
+      failed_draft_root_update-purchaseorder[ %tky = lock_draft_key ] ) ).
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrderItem
+        UPDATE FIELDS ( Quantity )
+        WITH VALUE #( ( %tky = lock_draft_item_key Quantity = 99 ) )
+      FAILED DATA(failed_draft_item_update)
+      REPORTED DATA(reported_draft_item_update).
+    out->write( name = 'Draft item update FAILED - expect rejection'
+                data = failed_draft_item_update ).
+    out->write( name = 'Draft item update REPORTED'
+                data = reported_draft_item_update ).
+    DATA(draft_item_blocked) = xsdbool( line_exists(
+      failed_draft_item_update-purchaseorderitem[
+        %tky = lock_draft_item_key ] ) ).
+
+    ROLLBACK ENTITIES.
+    IF draft_root_blocked = abap_false OR draft_item_blocked = abap_false.
+      out->write( 'STOP: a SUBMITTED draft must reject root and item changes.' ).
+      RETURN.
+    ENDIF.
+    out->write( 'PASS: SUBMITTED draft rejected both root and item updates.' ).
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE Discard FROM VALUE #( (
+          %key-PurchaseOrderUUID = lock_draft_uuid ) )
+      FAILED failed_lock_discard
+      REPORTED reported_lock_discard.
+    out->write( name = 'Submitted-draft Discard FAILED' data = failed_lock_discard ).
+    IF failed_lock_discard IS INITIAL.
+      COMMIT ENTITIES RESPONSE OF ZJP_I_PurchaseOrder
+        FAILED DATA(failed_lock_discard_save)
+        REPORTED DATA(reported_lock_discard_save).
+      out->write( name = 'Submitted-draft Discard COMMIT sy-subrc' data = sy-subrc ).
+    ELSE.
+      ROLLBACK ENTITIES.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        DELETE FROM VALUE #( ( PurchaseOrderUUID = lock_draft_uuid ) )
+      FAILED DATA(failed_lock_draft_cleanup)
+      REPORTED DATA(reported_lock_draft_cleanup).
+    out->write( name = 'Submitted-draft cleanup FAILED'
+                data = failed_lock_draft_cleanup ).
+    IF failed_lock_draft_cleanup IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      out->write( 'STOP: submitted-draft cleanup failed; use the printed UUID.' ).
+      RETURN.
+    ENDIF.
+    COMMIT ENTITIES RESPONSE OF ZJP_I_PurchaseOrder
+      FAILED DATA(failed_lock_cleanup_save)
+      REPORTED DATA(reported_lock_cleanup_save).
+    out->write( name = 'Submitted-draft cleanup COMMIT sy-subrc' data = sy-subrc ).
+
+    SELECT COUNT(*) FROM zjp_po_h
+      WHERE purchase_order_uuid = @lock_draft_uuid INTO @DATA(lock_headers_left).
+    SELECT COUNT(*) FROM zjp_po_i
+      WHERE purchase_order_uuid = @lock_draft_uuid INTO @DATA(lock_items_left).
+    out->write( name = 'Submitted-draft remaining headers' data = lock_headers_left ).
+    out->write( name = 'Submitted-draft remaining items' data = lock_items_left ).
+    IF lock_headers_left <> 0 OR lock_items_left <> 0.
+      out->write( 'STOP: submitted-draft fixture rows remain.' ).
+      RETURN.
+    ENDIF.
+    out->write( 'PASS: Phase 2.7B draft immutability verified; cleanup complete.' ).
   ENDMETHOD.
 ENDCLASS.

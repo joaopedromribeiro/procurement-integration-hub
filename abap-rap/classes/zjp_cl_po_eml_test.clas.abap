@@ -57,6 +57,12 @@ CLASS zjp_cl_po_eml_test DEFINITION
                 expected_status       TYPE zjp_po_h-status OPTIONAL
                 expected_header_total TYPE zjp_po_h-total_amount OPTIONAL
       RETURNING VALUE(success) TYPE abap_bool.
+
+    METHODS test_submitted_immutability
+      RETURNING VALUE(success) TYPE abap_bool.
+
+    METHODS test_draft_still_editable
+      RETURNING VALUE(success) TYPE abap_bool.
 ENDCLASS.
 
 CLASS zjp_cl_po_eml_test IMPLEMENTATION.
@@ -595,6 +601,16 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     ENDIF.
 
     out->write( 'PASS: submit active DRAFT to SUBMITTED persisted; re-submit and empty-order rejections pass.' ).
+
+    IF test_submitted_immutability( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    IF test_draft_still_editable( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    out->write( 'PASS: Phase 2.7B rejects root, item, CBA and removeItem changes after SUBMITTED.' ).
   ENDMETHOD.
 
   METHOD test_supplier_required.
@@ -1539,6 +1555,345 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
       console->write( 'STOP: submit database verification failed; retain the test UUID.' ).
     ELSE.
       console->write( 'PASS: submit database checkpoint values are correct.' ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD test_submitted_immutability.
+    " Phase 2.7B fixture: two items, 2 x 750 + 4 x 100 = 1900, submitted.
+    DATA(root_text) = CONV string( 'Submitted orders cannot be changed.' ).
+    DATA(item_text) = CONV string( 'Submitted order items cannot change.' ).
+    DATA(cba_text) = CONV string( 'Items cannot be added after submission.' ).
+    DATA(remove_text) = CONV string( 'Submitted orders cannot lose items.' ).
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        CREATE FIELDS ( Supplier CompanyCode Currency )
+        WITH VALUE #( ( %cid = 'LOCK_ROOT'
+                        Supplier = 'SUP005'
+                        CompanyCode = '1000'
+                        Currency = 'EUR' ) )
+        CREATE BY \_Items
+        FIELDS ( ItemNumber Material Quantity UnitOfMeasure NetPrice Currency )
+        WITH VALUE #( ( %cid_ref = 'LOCK_ROOT'
+          %target = VALUE #( ( %cid = 'LOCK_ITEM_1' ItemNumber = '00010'
+                               Material = 'MAT001' Quantity = 2
+                               UnitOfMeasure = 'EA' NetPrice = '750.00'
+                               Currency = 'EUR' )
+                             ( %cid = 'LOCK_ITEM_2' ItemNumber = '00020'
+                               Material = 'MAT002' Quantity = 4
+                               UnitOfMeasure = 'EA' NetPrice = '100.00'
+                               Currency = 'EUR' ) ) ) )
+      MAPPED DATA(mapped_lock)
+      FAILED DATA(failed_lock_create)
+      REPORTED DATA(reported_lock_create).
+
+    console->write( name = 'Immutability fixture FAILED' data = failed_lock_create ).
+    console->write( name = 'Immutability fixture REPORTED' data = reported_lock_create ).
+    IF failed_lock_create IS NOT INITIAL
+       OR NOT line_exists( mapped_lock-purchaseorder[ %cid = 'LOCK_ROOT' ] ).
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: immutability fixture creation failed.' ).
+      RETURN.
+    ENDIF.
+
+    DATA(lock_uuid) =
+      mapped_lock-purchaseorder[ %cid = 'LOCK_ROOT' ]-PurchaseOrderUUID.
+    console->write( name = 'Immutability order UUID - retain for diagnosis'
+                    data = lock_uuid ).
+
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = lock_uuid ) )
+        RESULT DATA(lock_orders)
+      ENTITY PurchaseOrder BY \_Items
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = lock_uuid ) )
+        RESULT DATA(lock_items)
+      FAILED DATA(failed_lock_read).
+    IF failed_lock_read IS NOT INITIAL OR lines( lock_orders ) <> 1
+       OR lines( lock_items ) <> 2
+       OR NOT line_exists( lock_items[ ItemNumber = '00010' ] ).
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: immutability fixture could not be read.' ).
+      RETURN.
+    ENDIF.
+    DATA(lock_key) = lock_orders[ 1 ]-%tky.
+    DATA(lock_item_key) = lock_items[ ItemNumber = '00010' ]-%tky.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE submit FROM VALUE #( ( %tky = lock_key ) )
+      FAILED DATA(failed_lock_submit)
+      REPORTED DATA(reported_lock_submit).
+    IF failed_lock_submit IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: submit failed on the immutability fixture.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    IF check_submit_database( order_uuid = lock_uuid
+                              expected_headers = 1 expected_items = 2
+                              expected_status = 'SUBMITTED'
+                              expected_header_total = 1900 ) = abap_false.
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: immutability fixture is SUBMITTED with total 1900.' ).
+
+    " 1 - root Supplier.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        UPDATE FIELDS ( Supplier )
+        WITH VALUE #( ( %tky = lock_key Supplier = 'SUP999' ) )
+      FAILED DATA(failed_supplier)
+      REPORTED DATA(reported_supplier).
+    console->write( name = 'Root Supplier update FAILED' data = failed_supplier ).
+    console->write( name = 'Root Supplier update REPORTED' data = reported_supplier ).
+    DATA(supplier_blocked) = xsdbool(
+      line_exists( failed_supplier-purchaseorder[ %tky = lock_key ] ) ).
+    DATA(supplier_message) = abap_false.
+    LOOP AT reported_supplier-purchaseorder INTO DATA(supplier_line).
+      IF supplier_line-%msg IS BOUND.
+        IF supplier_line-%msg->if_message~get_text( ) = root_text.
+          supplier_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    " 2 - root Currency.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        UPDATE FIELDS ( Currency )
+        WITH VALUE #( ( %tky = lock_key Currency = 'USD' ) )
+      FAILED DATA(failed_currency)
+      REPORTED DATA(reported_currency).
+    console->write( name = 'Root Currency update FAILED' data = failed_currency ).
+    DATA(currency_blocked) = xsdbool(
+      line_exists( failed_currency-purchaseorder[ %tky = lock_key ] ) ).
+    ROLLBACK ENTITIES.
+
+    " 3 - item Quantity.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrderItem
+        UPDATE FIELDS ( Quantity )
+        WITH VALUE #( ( %tky = lock_item_key Quantity = 99 ) )
+      FAILED DATA(failed_quantity)
+      REPORTED DATA(reported_quantity).
+    console->write( name = 'Item Quantity update FAILED' data = failed_quantity ).
+    console->write( name = 'Item Quantity update REPORTED' data = reported_quantity ).
+    DATA(quantity_blocked) = xsdbool(
+      line_exists( failed_quantity-purchaseorderitem[ %tky = lock_item_key ] ) ).
+    DATA(quantity_message) = abap_false.
+    LOOP AT reported_quantity-purchaseorderitem INTO DATA(quantity_line).
+      IF quantity_line-%msg IS BOUND.
+        IF quantity_line-%msg->if_message~get_text( ) = item_text.
+          quantity_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    " 4 - item Material.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrderItem
+        UPDATE FIELDS ( Material )
+        WITH VALUE #( ( %tky = lock_item_key Material = 'MAT999' ) )
+      FAILED DATA(failed_material)
+      REPORTED DATA(reported_material).
+    console->write( name = 'Item Material update FAILED' data = failed_material ).
+    DATA(material_blocked) = xsdbool(
+      line_exists( failed_material-purchaseorderitem[ %tky = lock_item_key ] ) ).
+    ROLLBACK ENTITIES.
+
+    " 5 - create-by-association of a third item.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        CREATE BY \_Items
+        FIELDS ( ItemNumber Material Quantity UnitOfMeasure NetPrice Currency )
+        WITH VALUE #( ( %tky = lock_key
+          %target = VALUE #( ( %cid = 'LOCK_ITEM_3' ItemNumber = '00030'
+                               Material = 'MAT003' Quantity = 1
+                               UnitOfMeasure = 'EA' NetPrice = '50.00'
+                               Currency = 'EUR' ) ) ) )
+      FAILED DATA(failed_cba)
+      REPORTED DATA(reported_cba).
+    console->write( name = 'Create-by-association FAILED' data = failed_cba ).
+    console->write( name = 'Create-by-association REPORTED' data = reported_cba ).
+    DATA(cba_blocked) = xsdbool(
+      line_exists( failed_cba-purchaseorder[ %tky = lock_key ] ) ).
+    DATA(cba_message) = abap_false.
+    LOOP AT reported_cba-purchaseorder INTO DATA(cba_line).
+      IF cba_line-%msg IS BOUND.
+        IF cba_line-%msg->if_message~get_text( ) = cba_text.
+          cba_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    " 6 - removeItem.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE removeItem FROM VALUE #( (
+          %tky = lock_key
+          %param-PurchaseOrderItemUUID = lock_item_key-PurchaseOrderItemUUID ) )
+      FAILED DATA(failed_remove)
+      REPORTED DATA(reported_remove).
+    console->write( name = 'removeItem after submit FAILED' data = failed_remove ).
+    console->write( name = 'removeItem after submit REPORTED' data = reported_remove ).
+    DATA(remove_blocked) = xsdbool( line_exists(
+      failed_remove-purchaseorder[ %tky = lock_key
+        %op-%action-removeItem = if_abap_behv=>mk-on ] ) ).
+    DATA(remove_message) = abap_false.
+    LOOP AT reported_remove-purchaseorder INTO DATA(remove_line).
+      IF remove_line-%msg IS BOUND.
+        IF remove_line-%msg->if_message~get_text( ) = remove_text.
+          remove_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    IF supplier_blocked = abap_false OR supplier_message = abap_false
+       OR currency_blocked = abap_false
+       OR quantity_blocked = abap_false OR quantity_message = abap_false
+       OR material_blocked = abap_false
+       OR cba_blocked = abap_false OR cba_message = abap_false
+       OR remove_blocked = abap_false OR remove_message = abap_false.
+      console->write( 'STOP: a submitted-order mutation was not rejected.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: all six submitted-order mutations were rejected.' ).
+
+    IF check_submit_database( order_uuid = lock_uuid
+                              expected_headers = 1 expected_items = 2
+                              expected_status = 'SUBMITTED'
+                              expected_header_total = 1900 ) = abap_false.
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: the persisted submitted order is unchanged.' ).
+
+    " Root DELETE stays allowed in Phase 2.7B.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        DELETE FROM VALUE #( ( PurchaseOrderUUID = lock_uuid ) )
+      FAILED DATA(failed_lock_cleanup)
+      REPORTED DATA(reported_lock_cleanup).
+    console->write( name = 'Immutability cleanup FAILED' data = failed_lock_cleanup ).
+    IF failed_lock_cleanup IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: deleting the submitted order failed.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    success = check_submit_database( order_uuid = lock_uuid
+                                     expected_headers = 0 expected_items = 0 ).
+    IF success = abap_true.
+      console->write( 'PASS: a submitted root can still be deleted; cleanup done.' ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD test_draft_still_editable.
+    " Negative control: an order still in DRAFT keeps every commercial path.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        CREATE FIELDS ( Supplier CompanyCode Currency )
+        WITH VALUE #( ( %cid = 'OPEN_ROOT'
+                        Supplier = 'SUP006'
+                        CompanyCode = '1000'
+                        Currency = 'EUR' ) )
+        CREATE BY \_Items
+        FIELDS ( ItemNumber Material Quantity UnitOfMeasure NetPrice Currency )
+        WITH VALUE #( ( %cid_ref = 'OPEN_ROOT'
+          %target = VALUE #( ( %cid = 'OPEN_ITEM' ItemNumber = '00010'
+                               Material = 'MAT001' Quantity = 2
+                               UnitOfMeasure = 'EA' NetPrice = '750.00'
+                               Currency = 'EUR' ) ) ) )
+      MAPPED DATA(mapped_open)
+      FAILED DATA(failed_open_create)
+      REPORTED DATA(reported_open_create).
+    console->write( name = 'DRAFT control fixture FAILED' data = failed_open_create ).
+    IF failed_open_create IS NOT INITIAL
+       OR NOT line_exists( mapped_open-purchaseorder[ %cid = 'OPEN_ROOT' ] ).
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: DRAFT control fixture creation failed.' ).
+      RETURN.
+    ENDIF.
+    DATA(open_uuid) =
+      mapped_open-purchaseorder[ %cid = 'OPEN_ROOT' ]-PurchaseOrderUUID.
+    console->write( name = 'DRAFT control UUID' data = open_uuid ).
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = open_uuid ) )
+        RESULT DATA(open_orders)
+      ENTITY PurchaseOrder BY \_Items
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = open_uuid ) )
+        RESULT DATA(open_items)
+      FAILED DATA(failed_open_read).
+    IF failed_open_read IS NOT INITIAL OR lines( open_orders ) <> 1
+       OR lines( open_items ) <> 1.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: DRAFT control fixture could not be read.' ).
+      RETURN.
+    ENDIF.
+    DATA(open_key) = open_orders[ 1 ]-%tky.
+    DATA(open_item_key) = open_items[ 1 ]-%tky.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        UPDATE FIELDS ( Supplier )
+        WITH VALUE #( ( %tky = open_key Supplier = 'SUP007' ) )
+      ENTITY PurchaseOrderItem
+        UPDATE FIELDS ( Quantity )
+        WITH VALUE #( ( %tky = open_item_key Quantity = 3 ) )
+      FAILED DATA(failed_open_update)
+      REPORTED DATA(reported_open_update).
+    console->write( name = 'DRAFT control update FAILED - expect empty'
+                    data = failed_open_update ).
+    IF failed_open_update IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a DRAFT order must still accept commercial changes.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    IF check_submit_database( order_uuid = open_uuid
+                              expected_headers = 1 expected_items = 1
+                              expected_status = 'DRAFT'
+                              expected_header_total = 2250 ) = abap_false.
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: DRAFT order still accepts Supplier and Quantity changes.' ).
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        DELETE FROM VALUE #( ( PurchaseOrderUUID = open_uuid ) )
+      FAILED DATA(failed_open_cleanup)
+      REPORTED DATA(reported_open_cleanup).
+    IF failed_open_cleanup IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: DRAFT control cleanup failed.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    success = check_submit_database( order_uuid = open_uuid
+                                     expected_headers = 0 expected_items = 0 ).
+    IF success = abap_true.
+      console->write( 'PASS: DRAFT control fixture cleanup complete.' ).
     ENDIF.
   ENDMETHOD.
 ENDCLASS.
