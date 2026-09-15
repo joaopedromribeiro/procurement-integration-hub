@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-09-14.
+Last updated: 2026-09-15.
 
 ## Completed
 
@@ -19,10 +19,13 @@ Last updated: 2026-09-14.
 - Reconciled the root currency annotation and child projection provider-contract clause to the two working compiler adjustments; synchronized the Phase 1 guide's full listings.
 - Confirmed the configured GitHub remote and that local main tracks origin/main.
 - Phase 2.1–2.3: corrected managed BDEF, minimal behavior pool/stub and successful SAP EML CRUD/composition runtime test, supported by the learner's console output.
+- Phase 2.7A: root business action `submit`, business `Status` `DRAFT` → `SUBMITTED` on active instances only, runtime-verified on SAP with its draft, status and empty-order rejections and the full Phase 2.5/2.6 regression.
 
 The learner reports Phase 2.4C runtime-verified complete: header totals 1900 → 2650 → 2800 → 2400 → 0, successful relevant COMMIT ENTITIES calls (sy-subrc 0), and `PASS: header totals 1900/2650/2800/2400/0; cleanup complete.` The Phase 2.4C persisted-parent lookup did not support uncommitted-item deletion; Phase 2.6 replaces it with the runtime-verified root `removeItem` path for active and draft instances. Phase 2.5A validateSupplier is also runtime-verified: blank Supplier create/update are rejected during save with `Supplier is required.`, negative commits return nonzero sy-subrc, persistence remains unchanged, and the valid regression flow passes. No independent SAP execution by the assistant is claimed.
 
 ## Current phase
+
+**Phase 2.7A root action `submit` is SAP runtime-verified complete.** It moves business `Status` from `DRAFT` to `SUBMITTED` on active instances only, requires at least one current item, and duplicates no Supplier/Quantity/NetPrice logic. The learner's run confirms the active transition with the buffered total unchanged at 1500, `sy-subrc` 0 on commit, `SUBMITTED` persisted in ZJP_PO_H and `PurchaseOrderNumber` still initial. All three rejections returned their exact texts and changed nothing: `Only orders in status DRAFT can be submitted.` for a re-submit, `Submit requires at least one item.` for an order with no items, and `Submit is not allowed on a draft instance.` for both a buffer-only and a saved technical draft, whose totals stayed 1500 and 1900. The Phase 2.5 and 2.6 regressions still pass. See the [Phase 2.7A guide](abap-rap/docs/phase-2-7a-submit-action.md). Three gaps remain open by design: a `SUBMITTED` order is still commercially editable, `removeItem` still removes its items, and `PurchaseOrderNumber` is still not allocated. Phase 2.7B is not started.
 
 **Phase 2.6 technical RAP draft and `removeItem` are SAP runtime-verified complete.** Target: SAP_BASIS 758 SP01, S4CORE 108 SP01, ADT Core 3.60.3 / Business Object Tools 1.209.0. The supported item-deletion path is the root-bound `removeItem` operation for both active and draft instances. It preserves the complete root `%tky`, verifies that the requested item belongs to that exact root/draft instance, deletes through managed internal EML, and recalculates the header from surviving items, including zero after the last item. Standard child DELETE remains internal. The ownership-negative runtime test returned FAILED for `removeItem` plus `Item does not belong to this Purchase Order.`, while both roots, all items and totals remained unchanged.
 
@@ -36,7 +39,7 @@ The learner reports Phase 2.4C runtime-verified complete: header totals 1900 →
 | 2.4 Determinations | Complete: Status, item totals and scoped header aggregation runtime-verified |
 | 2.5 Validations | 2.5A Supplier and 2.5B Quantity runtime-verified; 2.5C NetPrice runtime-verified |
 | 2.6 Technical draft | Complete; technical draft and active/draft `removeItem` runtime-verified on SAP |
-| 2.7 Business actions | Pending |
+| 2.7 Business actions | 2.7A `submit` runtime-verified; 2.7B onward pending |
 
 ## Next steps
 
@@ -46,19 +49,21 @@ Phase 2.4C partial SAP evidence: create 1900, Quantity update 2650 and NetPrice 
 
 [Phase 2.4B runtime evidence](abap-rap/docs/phase-2-4b-runtime-evidence.md), 2026-09-13: the learner verified 2 × 750 = 1500 before commit, 3 × 750 = 2250 after Quantity change, and 3 × 800 = 2400 after NetPrice change. Each value persisted after commit and the console ended `PASS: item totals 1500/2250/2400; status, CRUD and cleanup.`
 
-1. Preserve the Phase 2.1–2.6 runtime-verified baseline and supported `removeItem` deletion boundary.
-2. Do not begin Phase 2.7 business actions until explicitly requested.
-3. Preserve the supplied version baseline: SAPK-75801INSAPBASIS, SAPK-10801INS4CORE, ADT Core 3.60.3, BO Tools 1.209.0, Eclipse 4.40.0.
+1. Preserve the Phase 2.1–2.7A runtime-verified baseline: the `removeItem` deletion boundary and the active-only `submit` transition with its three rejections.
+2. Do not begin Phase 2.7B or any post-submission editing restriction until explicitly requested. Making a `SUBMITTED` order read-only changes the runtime-verified `removeItem` path and needs its own evidence.
+3. Do not extend Phase 2.7 to approve, reject, sendToSupplier or cancel until explicitly requested.
+4. Leave `PurchaseOrderNumber` unallocated until a released number-range facility is confirmed on the target.
+5. Preserve the supplied version baseline: SAPK-75801INSAPBASIS, SAPK-10801INS4CORE, ADT Core 3.60.3, BO Tools 1.209.0, Eclipse 4.40.0.
 
 ## Architecture decisions
 
 The full register is in [ARCHITECTURE.md](ARCHITECTURE.md#architecture-decision-register). Key decisions: custom BO instead of standard MM posting; managed RAP and UUID composition; draft separated from business status; post-commit dispatch with synchronous HTTP first; RAP commercial ownership and CAP supplier-response ownership; standard CI mapping; explicit mock labels and evidence-based portfolio claims.
 
-Phase 1 refinements: ZJP_ naming replaces the provisional names; explicit DEC monetary storage carries CDS currency semantics; optional persistence values use ABAP initial values with later API conversion. The root/child buyer projection redirects both relationships and omits four bookkeeping fields. The subsequent EML run verifies managed writes and root audit maintenance. Concurrent locking and stale-ETag checks remain untested. Phase 2.6 technical draft and active/draft `removeItem` behavior have learner-supplied SAP runtime evidence.
+Phase 1 refinements: ZJP_ naming replaces the provisional names; explicit DEC monetary storage carries CDS currency semantics; optional persistence values use ABAP initial values with later API conversion. The root/child buyer projection redirects both relationships and omits four bookkeeping fields. The subsequent EML run verifies managed writes and root audit maintenance. Concurrent locking and stale-ETag checks remain untested. Phase 2.6 technical draft and active/draft `removeItem` behavior have learner-supplied SAP runtime evidence. The Phase 2.7A active-only `submit` transition is also runtime-verified.
 
 Compatibility baseline: remove the rejected standalone currency-code marker from ZJP_I_PurchaseOrder while preserving the amount reference. Omit the explicit transactional_query provider contract from ZJP_C_PurchaseOrderItem because of its redirected-parent association; retain the root contract. Preserve these working declarations rather than forcing identical root/child syntax.
 
-Current BDEF design: managed implementation in class ZBP_I_PURCHASEORDER unique, strict(2), full persistence mappings, root CRUD, child update/internal-delete with create-by-association, root lock master and child lock dependent, managed UUID keys and one local-instance ETag per entity. Root authorization master (instance) and child authorization dependent by _PurchaseOrder explicitly establish the required hierarchy. The behavior pool is required for instance authorization; standard managed CRUD still needs no handwritten persistence methods. Computed/status/audit/result fields are readonly; managed UUIDs and audit values have framework-driven population, while custom determinations derive status and totals. Phase 2.6 runtime-verifies root `removeItem` with authorization delegated to update, preserving the existing study-only authorization policy.
+Current BDEF design: managed implementation in class ZBP_I_PURCHASEORDER unique, strict(2), full persistence mappings, root CRUD, child update/internal-delete with create-by-association, root lock master and child lock dependent, managed UUID keys and one local-instance ETag per entity. Root authorization master (instance) and child authorization dependent by _PurchaseOrder explicitly establish the required hierarchy. The behavior pool is required for instance authorization; standard managed CRUD still needs no handwritten persistence methods. Computed/status/audit/result fields are readonly; managed UUIDs and audit values have framework-driven population, while custom determinations derive status and totals. Phase 2.6 runtime-verifies root `removeItem` with authorization delegated to update, preserving the existing study-only authorization policy. Phase 2.7A adds the parameterless root action `submit` under the same update-authorization delegation; the target accepted it under strict(2) in a with-draft BO and runtime-verified its transition and rejections.
 
 Compiler-driven lessons: (1) authorization master (none) was rejected in this target release; (2) strict(2) requires every entity to participate in the authorization hierarchy; (3) root now uses authorization master (instance); (4) child uses authorization dependent by _PurchaseOrder; (5) the current BO requires an implementation class declaration; (6) the real SAP compiler is authoritative over generic examples. The earlier expectation of activating this BDEF without a custom class is withdrawn. Exact diagnostics are recorded in the [BDEF guide](abap-rap/docs/phase-2-base-managed-bdef.md#compiler-feedback-and-correction).
 
@@ -85,6 +90,8 @@ Additional compatibility lesson: the target-generated authorization request/resu
 
 The base BDEF, behavior pool, EML consumer, initializeStatus, item/header calculations and Supplier presence validation have successful SAP runtime evidence reported by the learner. Quantity greater-than-zero and nonnegative NetPrice validations are SAP runtime-verified by learner-supplied 2026-09-14 output. The old header aggregation is verified for committed active-item deletion only. Its runtime-verified replacement removes the active-table dependency and supports active, saved-draft and buffer-only draft items. Display number, supplier name and integration fields remain initial. The update/delete authorization stub remains permissive; negative permission cases and standalone root-create/CDS read authorization are not implemented. No other business validation, DCL, display-number allocation, state-dependent editing restrictions or uniqueness enforcement exists yet.
 
+The Phase 2.7A `submit` action is SAP runtime-verified for its transition and its three rejections, but it deliberately leaves three gaps open. A `SUBMITTED` order is still commercially editable; `removeItem` still removes items from it, so a submitted order's total can still change; and `PurchaseOrderNumber` is still not allocated at submission, so submitted orders have no human-readable identity. None of these is implemented, and none may be reported as solved. Each needs its own subphase and its own runtime evidence, and post-submission locking in particular would change the runtime-verified `removeItem` path. `SUBMITTED` is terminal for now because approve, reject, sendToSupplier and cancel do not exist.
+
 Intentional scope limits remain EUR-only precision, synthetic master data, single-tenant supplier isolation, manual approval, no order revisions after submission, and no cancellation after delivery request. These are documented constraints, not hidden production capabilities.
 
 Pending engineering work includes machine-readable API schemas, runtime version pinning, real service contract tests, dispatch/reconciliation implementation, operational retention settings, HANA verification, and deployment evidence. They belong to future phases rather than being reported as completed or bypassed.
@@ -95,7 +102,7 @@ Phase 0 historical verification passed: 16 Markdown documents, 35 relative links
 
 Phase 1 SAP evidence: the learner reports manually creating and activating all six objects in ADT/Eclipse, with two documented compatibility fixes. No independent SAP run, data-preview row count, CRUD, draft or EML result is claimed here.
 
-The [GitHub repository](https://github.com/joaopedromribeiro/procurement-integration-hub) is published. Phase 2.6 is committed and pushed to main (75c971b); local HEAD matches origin/main.
+The [GitHub repository](https://github.com/joaopedromribeiro/procurement-integration-hub) is published. Phase 2.6 is committed and pushed to main (ef5883d); local HEAD matched origin/main at that point. The Phase 2.7A `submit` sources and documentation are runtime-verified but not yet committed.
 
 The learner-supplied EML output supersedes the earlier activation assumption: all three commits returned sy-subrc = 0, create/read/update/delete succeeded and final header/item row counts were zero. FAILED/REPORTED were inspected on the successful path; deliberate error, warning, authorization-denial and concurrency cases are not covered.
 
@@ -105,7 +112,7 @@ Historical correction checkpoint: 20 Markdown files, 68 relative file-link targe
 | --- | --- | --- |
 | Designed | Reviewed architecture, contracts or model | Phase 0 documents and Phase 1 refinements |
 | Source prepared | Authored source with local structural review | Six table/CDS definitions, base BDEF, corrected behavior pool, ZJP_CL_PO_EML_TEST and ADT guides |
-| Validated on SAP | Activated artifacts and actual runtime outcomes, provenance stated | Six Phase 1 objects; managed BO through Phase 2.6, including active/draft `removeItem`, verified by learner-supplied SAP output |
+| Validated on SAP | Activated artifacts and actual runtime outcomes, provenance stated | Six Phase 1 objects; managed BO through Phase 2.7A, including active/draft `removeItem` and the active-only `submit` transition with its draft, status and empty-order rejections, verified by learner-supplied SAP output |
 | Historical activation assumption | Superseded by execution evidence | The corrected BDEF/pool were exercised by the successful EML run |
 | Published | Repository available on GitHub | GitHub publication reported; origin and main tracking verified locally; no deployed app claimed |
 

@@ -5,6 +5,9 @@ CLASS lhc_PurchaseOrder DEFINITION
     METHODS removeItem FOR MODIFY
       IMPORTING keys FOR ACTION PurchaseOrder~removeItem.
 
+    METHODS submit FOR MODIFY
+      IMPORTING keys FOR ACTION PurchaseOrder~submit.
+
     METHODS validateSupplier FOR VALIDATE ON SAVE
       IMPORTING keys FOR PurchaseOrder~validateSupplier.
 
@@ -230,6 +233,85 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
           TO failed-purchaseorder.
         APPEND VALUE #( %tky = action_key-%tky
           %op-%action-removeItem = if_abap_behv=>mk-on
+          %msg = new_message_with_text(
+            severity = if_abap_behv_message=>severity-error
+            text = error_text ) )
+          TO reported-purchaseorder.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD submit.
+    DATA reported_orders LIKE reported-purchaseorder.
+    DATA reported_items LIKE reported-purchaseorderitem.
+
+    LOOP AT keys INTO DATA(action_key).
+      DATA(error_text) = CONV string( '' ).
+
+      " One invocation submits one active root; no state survives this method.
+      DO 1 TIMES.
+        " Reject technical draft instances before reading or changing anything.
+        IF action_key-%is_draft = if_abap_behv=>mk-on.
+          error_text = 'Submit is not allowed on a draft instance.'.
+          EXIT.
+        ENDIF.
+
+        READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+          ENTITY PurchaseOrder
+            FIELDS ( Status )
+            WITH VALUE #( ( %tky = action_key-%tky ) )
+            RESULT DATA(orders)
+          ENTITY PurchaseOrder BY \_Items
+            FIELDS ( PurchaseOrderUUID )
+            WITH VALUE #( ( %tky = action_key-%tky ) )
+            RESULT DATA(current_items)
+          FAILED DATA(read_failed)
+          REPORTED DATA(read_reported).
+        reported_orders = CORRESPONDING #( DEEP read_reported-purchaseorder ).
+        APPEND LINES OF reported_orders TO reported-purchaseorder.
+        reported_items = CORRESPONDING #( DEEP read_reported-purchaseorderitem ).
+        APPEND LINES OF reported_items TO reported-purchaseorderitem.
+
+        IF read_failed IS NOT INITIAL OR lines( orders ) <> 1.
+          error_text = 'Order could not be read; submit not performed.'.
+          EXIT.
+        ENDIF.
+
+        " Business Status, not the RAP draft flag, controls this transition.
+        IF orders[ 1 ]-Status <> 'DRAFT'.
+          error_text = 'Only orders in status DRAFT can be submitted.'.
+          EXIT.
+        ENDIF.
+
+        " Supplier, Quantity and NetPrice stay with their save validations.
+        IF current_items IS INITIAL.
+          error_text = 'Submit requires at least one item.'.
+          EXIT.
+        ENDIF.
+
+        MODIFY ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+          ENTITY PurchaseOrder
+            UPDATE FIELDS ( Status )
+            WITH VALUE #( ( %tky = action_key-%tky
+                            Status = 'SUBMITTED' ) )
+          FAILED DATA(update_failed)
+          REPORTED DATA(update_reported).
+        reported_orders = CORRESPONDING #( DEEP update_reported-purchaseorder ).
+        APPEND LINES OF reported_orders TO reported-purchaseorder.
+        reported_items = CORRESPONDING #( DEEP update_reported-purchaseorderitem ).
+        APPEND LINES OF reported_items TO reported-purchaseorderitem.
+        IF update_failed IS NOT INITIAL.
+          error_text = 'Status update failed; rollback this request.'.
+          EXIT.
+        ENDIF.
+      ENDDO.
+
+      IF error_text IS NOT INITIAL.
+        APPEND VALUE #( %tky = action_key-%tky
+                        %op-%action-submit = if_abap_behv=>mk-on )
+          TO failed-purchaseorder.
+        APPEND VALUE #( %tky = action_key-%tky
+          %op-%action-submit = if_abap_behv=>mk-on
           %msg = new_message_with_text(
             severity = if_abap_behv_message=>severity-error
             text = error_text ) )

@@ -43,6 +43,20 @@ CLASS zjp_cl_po_eml_test DEFINITION
                 expected_net_price    TYPE zjp_po_i-net_price OPTIONAL
                 expected_item_total   TYPE zjp_po_i-total_amount OPTIONAL
       RETURNING VALUE(success) TYPE abap_bool.
+
+    METHODS test_submit_active
+      RETURNING VALUE(success) TYPE abap_bool.
+
+    METHODS test_submit_requires_item
+      RETURNING VALUE(success) TYPE abap_bool.
+
+    METHODS check_submit_database
+      IMPORTING order_uuid            TYPE sysuuid_x16
+                expected_headers      TYPE i
+                expected_items        TYPE i
+                expected_status       TYPE zjp_po_h-status OPTIONAL
+                expected_header_total TYPE zjp_po_h-total_amount OPTIONAL
+      RETURNING VALUE(success) TYPE abap_bool.
 ENDCLASS.
 
 CLASS zjp_cl_po_eml_test IMPLEMENTATION.
@@ -571,6 +585,16 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     out->write( 'PASS: Quantity validation rejects zero create/negative update; valid flow and cleanup pass.' ).
     out->write( 'PASS: NetPrice rejects negative create/update; zero create/update, regression and cleanup pass.' ).
     out->write( 'PASS: removeItem active totals 2400/0; ownership, Phase 2.5 regression and cleanup pass.' ).
+
+    IF test_submit_active( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    IF test_submit_requires_item( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    out->write( 'PASS: submit active DRAFT to SUBMITTED persisted; re-submit and empty-order rejections pass.' ).
   ENDMETHOD.
 
   METHOD test_supplier_required.
@@ -1157,6 +1181,364 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
       console->write( 'STOP: database verification failed; retain the test UUID.' ).
     ELSE.
       console->write( 'PASS: database checkpoint values are correct.' ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD test_submit_active.
+    " Self-contained fixture; the Phase 2.5/2.6 flow above stays untouched.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        CREATE FIELDS ( Supplier CompanyCode PurchasingOrganization
+                        PurchasingGroup Currency )
+        WITH VALUE #( (
+          %cid = 'SUBMIT_ROOT'
+          Supplier = 'SUP003'
+          CompanyCode = '1000'
+          PurchasingOrganization = '1000'
+          PurchasingGroup = '001'
+          Currency = 'EUR' ) )
+        CREATE BY \_Items
+        FIELDS ( ItemNumber Material MaterialDescription Quantity
+                 UnitOfMeasure NetPrice Currency )
+        WITH VALUE #( (
+          %cid_ref = 'SUBMIT_ROOT'
+          %target = VALUE #( (
+            %cid = 'SUBMIT_ITEM'
+            ItemNumber = '00010'
+            Material = 'MAT001'
+            MaterialDescription = 'Submit study item'
+            Quantity = 2
+            UnitOfMeasure = 'EA'
+            NetPrice = '750.00'
+            Currency = 'EUR' ) ) ) )
+      MAPPED DATA(mapped_submit)
+      FAILED DATA(failed_submit_create)
+      REPORTED DATA(reported_submit_create).
+
+    console->write( name = 'Submit fixture MAPPED' data = mapped_submit ).
+    console->write( name = 'Submit fixture FAILED' data = failed_submit_create ).
+    console->write( name = 'Submit fixture REPORTED' data = reported_submit_create ).
+    IF failed_submit_create IS NOT INITIAL
+       OR NOT line_exists( mapped_submit-purchaseorder[ %cid = 'SUBMIT_ROOT' ] ).
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: submit fixture creation failed.' ).
+      RETURN.
+    ENDIF.
+
+    DATA(submit_uuid) =
+      mapped_submit-purchaseorder[ %cid = 'SUBMIT_ROOT' ]-PurchaseOrderUUID.
+    console->write( name = 'Submit test order UUID - retain for diagnosis'
+                    data = submit_uuid ).
+
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    IF check_submit_database( order_uuid = submit_uuid
+                              expected_headers = 1 expected_items = 1
+                              expected_status = 'DRAFT'
+                              expected_header_total = 1500 ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = submit_uuid ) )
+        RESULT DATA(draft_status_orders)
+      FAILED DATA(failed_draft_status_read).
+    IF failed_draft_status_read IS NOT INITIAL
+       OR lines( draft_status_orders ) <> 1
+       OR draft_status_orders[ 1 ]-Status <> 'DRAFT'
+       OR draft_status_orders[ 1 ]-%is_draft <> if_abap_behv=>mk-off.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: submit fixture must be an active order in Status DRAFT.' ).
+      RETURN.
+    ENDIF.
+    DATA(submit_key) = draft_status_orders[ 1 ]-%tky.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE submit FROM VALUE #( ( %tky = submit_key ) )
+      FAILED DATA(failed_submit)
+      REPORTED DATA(reported_submit).
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( %tky = submit_key ) )
+        RESULT DATA(submitted_orders)
+      ENTITY PurchaseOrder BY \_Items
+        ALL FIELDS WITH VALUE #( ( %tky = submit_key ) )
+        RESULT DATA(submitted_items)
+      FAILED DATA(failed_submitted_read).
+
+    console->write( name = 'Submit FAILED - expect empty' data = failed_submit ).
+    console->write( name = 'Submit REPORTED' data = reported_submit ).
+    console->write( name = 'Header after submit - before commit'
+                    data = submitted_orders ).
+    console->write( name = 'Items after submit - expect unchanged'
+                    data = submitted_items ).
+
+    IF failed_submit IS NOT INITIAL OR failed_submitted_read IS NOT INITIAL
+       OR lines( submitted_orders ) <> 1 OR lines( submitted_items ) <> 1
+       OR submitted_orders[ 1 ]-Status <> 'SUBMITTED'
+       OR submitted_orders[ 1 ]-TotalAmount <> 1500
+       OR submitted_items[ 1 ]-TotalAmount <> 1500.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: submit must set Status SUBMITTED and leave totals unchanged.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: submit set the buffered Status to SUBMITTED with total 1500.' ).
+
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    IF check_submit_database( order_uuid = submit_uuid
+                              expected_headers = 1 expected_items = 1
+                              expected_status = 'SUBMITTED'
+                              expected_header_total = 1500 ) = abap_false.
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: SUBMITTED status is persisted in ZJP_PO_H.' ).
+
+    " A second submit must be rejected because the order is no longer DRAFT.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE submit FROM VALUE #( ( %tky = submit_key ) )
+      FAILED DATA(failed_resubmit)
+      REPORTED DATA(reported_resubmit).
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( %tky = submit_key ) )
+        RESULT DATA(resubmit_orders)
+      FAILED DATA(failed_resubmit_read).
+
+    console->write( name = 'Re-submit FAILED - expect rejection'
+                    data = failed_resubmit ).
+    console->write( name = 'Re-submit REPORTED' data = reported_resubmit ).
+    console->write( name = 'Header after re-submit attempt' data = resubmit_orders ).
+
+    DATA(resubmit_failed_key) = xsdbool( line_exists(
+      failed_resubmit-purchaseorder[ %tky = submit_key
+        %op-%action-submit = if_abap_behv=>mk-on ] ) ).
+    DATA(expected_resubmit_text) =
+      CONV string( 'Only orders in status DRAFT can be submitted.' ).
+    DATA(resubmit_message) = abap_false.
+    LOOP AT reported_resubmit-purchaseorder INTO DATA(resubmit_line).
+      IF resubmit_line-%msg IS BOUND.
+        DATA(actual_resubmit_text) = resubmit_line-%msg->if_message~get_text( ).
+        IF resubmit_line-%tky = submit_key
+           AND resubmit_line-%op-%action-submit = if_abap_behv=>mk-on
+           AND actual_resubmit_text = expected_resubmit_text.
+          resubmit_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    IF resubmit_failed_key = abap_false OR resubmit_message = abap_false
+       OR failed_resubmit_read IS NOT INITIAL
+       OR lines( resubmit_orders ) <> 1
+       OR resubmit_orders[ 1 ]-Status <> 'SUBMITTED'
+       OR resubmit_orders[ 1 ]-TotalAmount <> 1500.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: re-submit rejection or unchanged-buffer assertion failed.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+    IF check_submit_database( order_uuid = submit_uuid
+                              expected_headers = 1 expected_items = 1
+                              expected_status = 'SUBMITTED'
+                              expected_header_total = 1500 ) = abap_false.
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: re-submit rejected; persisted SUBMITTED order unchanged.' ).
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        DELETE FROM VALUE #( ( PurchaseOrderUUID = submit_uuid ) )
+      FAILED DATA(failed_submit_cleanup)
+      REPORTED DATA(reported_submit_cleanup).
+    console->write( name = 'Submit cleanup FAILED' data = failed_submit_cleanup ).
+    console->write( name = 'Submit cleanup REPORTED' data = reported_submit_cleanup ).
+    IF failed_submit_cleanup IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: submit fixture cleanup failed; retain the printed UUID.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    success = check_submit_database( order_uuid = submit_uuid
+                                     expected_headers = 0 expected_items = 0 ).
+    IF success = abap_true.
+      console->write( 'PASS: submit fixture cleanup complete.' ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD test_submit_requires_item.
+    " An order without items must not reach SUBMITTED.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        CREATE FIELDS ( Supplier CompanyCode Currency )
+        WITH VALUE #( (
+          %cid = 'EMPTY_ROOT'
+          Supplier = 'SUP004'
+          CompanyCode = '1000'
+          Currency = 'EUR' ) )
+      MAPPED DATA(mapped_empty)
+      FAILED DATA(failed_empty_create)
+      REPORTED DATA(reported_empty_create).
+
+    console->write( name = 'Empty-order fixture MAPPED' data = mapped_empty ).
+    console->write( name = 'Empty-order fixture FAILED' data = failed_empty_create ).
+    console->write( name = 'Empty-order fixture REPORTED'
+                    data = reported_empty_create ).
+    IF failed_empty_create IS NOT INITIAL
+       OR NOT line_exists( mapped_empty-purchaseorder[ %cid = 'EMPTY_ROOT' ] ).
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: empty-order fixture creation failed.' ).
+      RETURN.
+    ENDIF.
+
+    DATA(empty_uuid) =
+      mapped_empty-purchaseorder[ %cid = 'EMPTY_ROOT' ]-PurchaseOrderUUID.
+    console->write( name = 'Empty-order UUID - retain for diagnosis'
+                    data = empty_uuid ).
+
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    IF check_submit_database( order_uuid = empty_uuid
+                              expected_headers = 1 expected_items = 0
+                              expected_status = 'DRAFT'
+                              expected_header_total = 0 ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = empty_uuid ) )
+        RESULT DATA(empty_orders)
+      FAILED DATA(failed_empty_read).
+    IF failed_empty_read IS NOT INITIAL OR lines( empty_orders ) <> 1.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: the empty-order fixture could not be read.' ).
+      RETURN.
+    ENDIF.
+    DATA(empty_key) = empty_orders[ 1 ]-%tky.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE submit FROM VALUE #( ( %tky = empty_key ) )
+      FAILED DATA(failed_empty_submit)
+      REPORTED DATA(reported_empty_submit).
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( %tky = empty_key ) )
+        RESULT DATA(empty_orders_after)
+      FAILED DATA(failed_empty_after_read).
+
+    console->write( name = 'Empty-order submit FAILED - expect rejection'
+                    data = failed_empty_submit ).
+    console->write( name = 'Empty-order submit REPORTED'
+                    data = reported_empty_submit ).
+    console->write( name = 'Header after empty-order submit attempt'
+                    data = empty_orders_after ).
+
+    DATA(empty_failed_key) = xsdbool( line_exists(
+      failed_empty_submit-purchaseorder[ %tky = empty_key
+        %op-%action-submit = if_abap_behv=>mk-on ] ) ).
+    DATA(expected_empty_text) = CONV string(
+      'Submit requires at least one item.' ).
+    DATA(empty_message) = abap_false.
+    LOOP AT reported_empty_submit-purchaseorder INTO DATA(empty_line).
+      IF empty_line-%msg IS BOUND.
+        DATA(actual_empty_text) = empty_line-%msg->if_message~get_text( ).
+        IF empty_line-%tky = empty_key
+           AND empty_line-%op-%action-submit = if_abap_behv=>mk-on
+           AND actual_empty_text = expected_empty_text.
+          empty_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    IF empty_failed_key = abap_false OR empty_message = abap_false
+       OR failed_empty_after_read IS NOT INITIAL
+       OR lines( empty_orders_after ) <> 1
+       OR empty_orders_after[ 1 ]-Status <> 'DRAFT'.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: submit must be rejected for an order without items.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+    IF check_submit_database( order_uuid = empty_uuid
+                              expected_headers = 1 expected_items = 0
+                              expected_status = 'DRAFT'
+                              expected_header_total = 0 ) = abap_false.
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: submit rejected without items; persisted Status stayed DRAFT.' ).
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        DELETE FROM VALUE #( ( PurchaseOrderUUID = empty_uuid ) )
+      FAILED DATA(failed_empty_cleanup)
+      REPORTED DATA(reported_empty_cleanup).
+    console->write( name = 'Empty-order cleanup FAILED' data = failed_empty_cleanup ).
+    console->write( name = 'Empty-order cleanup REPORTED'
+                    data = reported_empty_cleanup ).
+    IF failed_empty_cleanup IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: empty-order cleanup failed; retain the printed UUID.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    success = check_submit_database( order_uuid = empty_uuid
+                                     expected_headers = 0 expected_items = 0 ).
+    IF success = abap_true.
+      console->write( 'PASS: empty-order fixture cleanup complete.' ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD check_submit_database.
+    " Read-only verification; Phase 2.7A must not allocate PurchaseOrderNumber.
+    SELECT purchase_order_uuid, supplier, total_amount, status,
+           purchase_order_number
+      FROM zjp_po_h
+      WHERE purchase_order_uuid = @order_uuid
+      INTO TABLE @DATA(headers_db).
+
+    SELECT purchase_order_item_uuid, purchase_order_uuid, item_number,
+           total_amount
+      FROM zjp_po_i
+      WHERE purchase_order_uuid = @order_uuid
+      INTO TABLE @DATA(items_db).
+
+    console->write( name = 'ZJP_PO_H - submit test UUID' data = headers_db ).
+    console->write( name = 'ZJP_PO_I - submit test UUID' data = items_db ).
+
+    success = xsdbool( lines( headers_db ) = expected_headers
+                      AND lines( items_db ) = expected_items ).
+
+    IF success = abap_true AND expected_headers = 1.
+      DATA(persisted_item_sum) = CONV zjp_po_h-total_amount( 0 ).
+      LOOP AT items_db INTO DATA(item_db).
+        persisted_item_sum += item_db-total_amount.
+      ENDLOOP.
+
+      success = xsdbool( headers_db[ 1 ]-status = expected_status
+                        AND headers_db[ 1 ]-total_amount = expected_header_total
+                        AND persisted_item_sum = expected_header_total
+                        AND headers_db[ 1 ]-purchase_order_number IS INITIAL ).
+    ENDIF.
+
+    IF success = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: submit database verification failed; retain the test UUID.' ).
+    ELSE.
+      console->write( 'PASS: submit database checkpoint values are correct.' ).
     ENDIF.
   ENDMETHOD.
 ENDCLASS.

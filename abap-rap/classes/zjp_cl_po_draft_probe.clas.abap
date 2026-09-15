@@ -96,6 +96,57 @@ CLASS zjp_cl_po_draft_probe IMPLEMENTATION.
     out->write( name = 'Buffer-only known root %tky' data = buffer_root_key ).
     out->write( name = 'Buffer-only item %tky' data = buffer_item_key ).
 
+    " Phase 2.7A: submit is active-only and must reject this buffer-only draft.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE submit FROM VALUE #( ( %tky = buffer_root_key ) )
+      FAILED DATA(failed_buffer_submit)
+      REPORTED DATA(reported_buffer_submit).
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( %tky = buffer_root_key ) )
+        RESULT DATA(buffer_roots_after_submit)
+      FAILED DATA(failed_buffer_submit_read).
+
+    out->write( name = 'Buffer-only submit FAILED - expect rejection'
+                data = failed_buffer_submit ).
+    out->write( name = 'Buffer-only submit REPORTED'
+                data = reported_buffer_submit ).
+    out->write( name = 'Buffer-only root after submit attempt'
+                data = buffer_roots_after_submit ).
+
+    DATA(buffer_submit_failed_key) = xsdbool( line_exists(
+      failed_buffer_submit-purchaseorder[ %tky = buffer_root_key
+        %op-%action-submit = if_abap_behv=>mk-on ] ) ).
+    DATA(expected_draft_submit_text) =
+      CONV string( 'Submit is not allowed on a draft instance.' ).
+    DATA(buffer_submit_message) = abap_false.
+    LOOP AT reported_buffer_submit-purchaseorder INTO DATA(buffer_submit_line).
+      IF buffer_submit_line-%msg IS BOUND.
+        DATA(actual_buffer_submit_text) =
+          buffer_submit_line-%msg->if_message~get_text( ).
+        IF buffer_submit_line-%tky = buffer_root_key
+           AND buffer_submit_line-%op-%action-submit = if_abap_behv=>mk-on
+           AND actual_buffer_submit_text = expected_draft_submit_text.
+          buffer_submit_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    IF buffer_submit_failed_key = abap_false
+       OR buffer_submit_message = abap_false
+       OR failed_buffer_submit_read IS NOT INITIAL
+       OR lines( buffer_roots_after_submit ) <> 1
+       OR buffer_roots_after_submit[ 1 ]-%is_draft <> if_abap_behv=>mk-on
+       OR buffer_roots_after_submit[ 1 ]-Status <> 'DRAFT'
+       OR buffer_roots_after_submit[ 1 ]-TotalAmount <> 1500.
+      ROLLBACK ENTITIES.
+      out->write( 'STOP: submit must be rejected on a buffer-only draft without changing it.' ).
+      RETURN.
+    ENDIF.
+    out->write( 'PASS: submit rejected on buffer-only draft; Status DRAFT and total 1500 unchanged.' ).
+
     MODIFY ENTITIES OF ZJP_I_PurchaseOrder
       ENTITY PurchaseOrder
         EXECUTE removeItem FROM VALUE #( (
@@ -278,6 +329,63 @@ CLASS zjp_cl_po_draft_probe IMPLEMENTATION.
       RETURN.
     ENDIF.
     out->write( name = 'Saved draft known root %tky' data = saved_root_key ).
+
+    " Phase 2.7A: a saved draft is still a draft and must also be rejected.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE submit FROM VALUE #( ( %tky = saved_root_key ) )
+      FAILED DATA(failed_saved_submit)
+      REPORTED DATA(reported_saved_submit).
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( %tky = saved_root_key ) )
+        RESULT DATA(saved_roots_after_submit)
+      ENTITY PurchaseOrder BY \_Items
+        ALL FIELDS WITH VALUE #( ( %tky = saved_root_key ) )
+        RESULT DATA(saved_items_after_submit)
+      FAILED DATA(failed_saved_submit_read).
+
+    out->write( name = 'Saved draft submit FAILED - expect rejection'
+                data = failed_saved_submit ).
+    out->write( name = 'Saved draft submit REPORTED'
+                data = reported_saved_submit ).
+    out->write( name = 'Saved draft root after submit attempt'
+                data = saved_roots_after_submit ).
+    out->write( name = 'Saved draft items after submit attempt'
+                data = saved_items_after_submit ).
+
+    DATA(saved_submit_failed_key) = xsdbool( line_exists(
+      failed_saved_submit-purchaseorder[ %tky = saved_root_key
+        %op-%action-submit = if_abap_behv=>mk-on ] ) ).
+    DATA(expected_saved_submit_text) =
+      CONV string( 'Submit is not allowed on a draft instance.' ).
+    DATA(saved_submit_message) = abap_false.
+    LOOP AT reported_saved_submit-purchaseorder INTO DATA(saved_submit_line).
+      IF saved_submit_line-%msg IS BOUND.
+        DATA(actual_saved_submit_text) =
+          saved_submit_line-%msg->if_message~get_text( ).
+        IF saved_submit_line-%tky = saved_root_key
+           AND saved_submit_line-%op-%action-submit = if_abap_behv=>mk-on
+           AND actual_saved_submit_text = expected_saved_submit_text.
+          saved_submit_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    IF saved_submit_failed_key = abap_false
+       OR saved_submit_message = abap_false
+       OR failed_saved_submit_read IS NOT INITIAL
+       OR lines( saved_roots_after_submit ) <> 1
+       OR lines( saved_items_after_submit ) <> 2
+       OR saved_roots_after_submit[ 1 ]-%is_draft <> if_abap_behv=>mk-on
+       OR saved_roots_after_submit[ 1 ]-Status <> 'DRAFT'
+       OR saved_roots_after_submit[ 1 ]-TotalAmount <> 1900.
+      ROLLBACK ENTITIES.
+      out->write( 'STOP: submit must be rejected on a saved draft without changing it.' ).
+      RETURN.
+    ENDIF.
+    out->write( 'PASS: submit rejected on saved draft; Status DRAFT and total 1900 unchanged.' ).
 
     MODIFY ENTITIES OF ZJP_I_PurchaseOrder
       ENTITY PurchaseOrder

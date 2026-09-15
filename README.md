@@ -2,7 +2,7 @@
 
 A guided SAP portfolio project connecting a custom procurement application to an external supplier portal.
 
-**Current milestone: Phase 2.6 is SAP runtime-verified complete.** Technical RAP draft is enabled, and root-bound `removeItem` is the supported ownership-safe item deletion path for active and draft instances. It keeps business `Status = 'DRAFT'` distinct from RAP technical draft state. Phase 2.7 has not started.
+**Current milestone: Phase 2.7A is SAP runtime-verified complete.** Technical RAP draft is enabled, root-bound `removeItem` is the supported ownership-safe item deletion path for active and draft instances, and the root `submit` action moves business `Status` from `DRAFT` to `SUBMITTED` on active instances only, rejecting technical drafts, non-`DRAFT` orders and orders without items. It keeps business `Status = 'DRAFT'` distinct from RAP technical draft state. Submitted orders are still editable and carry no `PurchaseOrderNumber` yet; Phase 2.7B has not started.
 
 Published repository: [Procurement Integration Hub on GitHub](https://github.com/joaopedromribeiro/procurement-integration-hub). The local main branch tracks origin/main. New working-tree edits must be committed and pushed before they appear on GitHub.
 
@@ -139,10 +139,10 @@ No runtime screenshots yet. Verified screenshots will be added under `docs/scree
 | 10 | API Management | Proxy authentication, throttling and routing verified |
 | 11 | Tests and portfolio presentation | Evidence-backed README, diagrams, screenshots and lessons |
 
-Phases 0 and 1 and Phase 2.1–2.6 are complete within their documented scope. [Phase 2.6](abap-rap/docs/phase-2-6-technical-draft.md) is SAP runtime-verified, including active, saved-draft and buffer-only draft item removal, ownership rejection and total recalculation. Phase 2.7 business actions and Phases 3–11 remain unstarted.
+Phases 0 and 1 and Phase 2.1–2.7A are complete within their documented scope. [Phase 2.6](abap-rap/docs/phase-2-6-technical-draft.md) is SAP runtime-verified, including active, saved-draft and buffer-only draft item removal, ownership rejection and total recalculation. [Phase 2.7A](abap-rap/docs/phase-2-7a-submit-action.md) is SAP runtime-verified for the active `DRAFT` → `SUBMITTED` transition and its re-submit, empty-order and technical draft rejections. Post-submission editing restrictions, `PurchaseOrderNumber` allocation, the remaining Phase 2.7 business actions and Phases 3–11 remain unstarted.
 
 ## Lessons learned
 
-See [LEARNINGS.md](LEARNINGS.md) for studied and practiced concepts, and [PROJECT_STATUS.md](PROJECT_STATUS.md) for evidence and remaining work. Current portfolio wording: “Implemented a managed RAP purchase-order BO in SAP S/4HANA with header/item CDS composition and managed UUID numbering; runtime-verified CRUD, EML, determinations, validations, technical RAP draft and ownership-protected item removal for active and draft instances.” Phase 2.7 business actions and integrations remain unimplemented.
+See [LEARNINGS.md](LEARNINGS.md) for studied and practiced concepts, and [PROJECT_STATUS.md](PROJECT_STATUS.md) for evidence and remaining work. Current portfolio wording: “Implemented a managed RAP purchase-order BO in SAP S/4HANA with header/item CDS composition and managed UUID numbering; runtime-verified CRUD, EML, determinations, validations, technical RAP draft, ownership-protected item removal for active and draft instances, and an active-only submit transition with state and content preconditions.” Post-submission locking, display-number allocation, the remaining Phase 2.7 business actions and the integrations remain unimplemented.
 
 Technical references are collected in [SAP sources](docs/architecture/references.md).

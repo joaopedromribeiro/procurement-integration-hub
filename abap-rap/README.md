@@ -2,7 +2,7 @@
 
 Phase 1 is complete: the learner manually created and activated the two tables and four CDS entities in SAP S/4HANA using ADT/Eclipse. The [domain model guide](docs/phase-1-domain-model.md) includes the two confirmed compatibility corrections and synchronized source listings. Activation is learner-reported; managed CRUD/composition now also has Phase 2 SAP runtime evidence.
 
-Current checkpoint: [Phase 2.6](docs/phase-2-6-technical-draft.md) is SAP runtime-verified complete. Root-bound `removeItem` is the supported item deletion path for active and draft instances; it checks ownership, uses managed internal child DELETE and recalculates header totals. RAP technical draft identity remains distinct from business `Status = 'DRAFT'`. Phase 2.7 has not started.
+Current checkpoint: [Phase 2.7A](docs/phase-2-7a-submit-action.md) is SAP runtime-verified complete. The root action `submit` moves business `Status` from `DRAFT` to `SUBMITTED` on active instances only, rejecting technical draft instances, orders that are not in `DRAFT` and orders without items. It builds on [Phase 2.6](docs/phase-2-6-technical-draft.md), also SAP runtime-verified, where root-bound `removeItem` is the supported item deletion path for active and draft instances; it checks ownership, uses managed internal child DELETE and recalculates header totals. RAP technical draft identity remains distinct from business `Status = 'DRAFT'`. Phase 2.7B and later work are pending: submitted orders are still commercially editable, `removeItem` still removes their items, `PurchaseOrderNumber` is still not allocated, and no approve, reject, sendToSupplier or cancel transition exists.
 
 | Folder | Planned content |
 | --- | --- |

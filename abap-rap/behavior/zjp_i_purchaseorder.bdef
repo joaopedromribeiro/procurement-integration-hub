@@ -16,6 +16,7 @@ etag master LocalLastChangedAt
   association _Items { create; with draft; }
 
   action ( authorization : update ) removeItem parameter ZJP_A_RemoveItem;
+  action ( authorization : update ) submit;
 
   draft action Edit;
   draft action Activate;

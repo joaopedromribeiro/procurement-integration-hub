@@ -1,6 +1,6 @@
 # Phase 2.6 — Technical draft item removal
 
-Status: **SAP runtime-verified complete** for active, saved-draft and buffer-only draft item removal, total recalculation and ownership protection. Phase 2.7 is not started.
+Status: **SAP runtime-verified complete** for active, saved-draft and buffer-only draft item removal, total recalculation and ownership protection. Phase 2.7A `submit` is runtime-verified complete on top of this baseline; Phase 2.7B and later work are pending.
 
 ## Target evidence
 
@@ -102,4 +102,4 @@ In lhc_PurchaseOrder->removeItem, break at the managed DELETE, the surviving-ite
 
 Retain these tests as regression evidence. If a future change fails, return the first STOP/compiler diagnostic and printed UUIDs; rollback cannot undo earlier commits.
 
-Phase 2.5 regression remained successful. The learner confirms the technical action, ownership rejection, active/draft totals, saved-draft persistence and cleanup all passed in SAP. Phase 2.6 is complete within this documented scope; Phase 2.7 is not started.
+Phase 2.5 regression remained successful. The learner confirms the technical action, ownership rejection, active/draft totals, saved-draft persistence and cleanup all passed in SAP. Phase 2.6 is complete within this documented scope. Phase 2.7A `submit` has since been runtime-verified separately; Phase 2.7B and later work are pending.
