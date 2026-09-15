@@ -63,6 +63,28 @@ CLASS zjp_cl_po_eml_test DEFINITION
 
     METHODS test_draft_still_editable
       RETURNING VALUE(success) TYPE abap_bool.
+
+    METHODS test_approve_lifecycle
+      RETURNING VALUE(success) TYPE abap_bool.
+
+    METHODS test_reject_lifecycle
+      RETURNING VALUE(success) TYPE abap_bool.
+
+    METHODS create_decision_fixture
+      IMPORTING supplier          TYPE zjp_po_h-supplier
+      RETURNING VALUE(order_uuid) TYPE sysuuid_x16.
+
+    METHODS delete_decision_fixture
+      IMPORTING order_uuid     TYPE sysuuid_x16
+      RETURNING VALUE(success) TYPE abap_bool.
+
+    METHODS check_decision_database
+      IMPORTING order_uuid      TYPE sysuuid_x16
+                expected_status TYPE zjp_po_h-status
+                expected_total  TYPE zjp_po_h-total_amount
+                expected_origin TYPE zjp_po_h-rejection_origin OPTIONAL
+                expected_reason TYPE zjp_po_h-rejection_reason OPTIONAL
+      RETURNING VALUE(success) TYPE abap_bool.
 ENDCLASS.
 
 CLASS zjp_cl_po_eml_test IMPLEMENTATION.
@@ -611,6 +633,16 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     ENDIF.
 
     out->write( 'PASS: Phase 2.7B rejects root, item, CBA and removeItem changes after SUBMITTED.' ).
+
+    IF test_approve_lifecycle( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    IF test_reject_lifecycle( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    out->write( 'PASS: Phase 2.7C approve and reject transitions with lifecycle immutability.' ).
   ENDMETHOD.
 
   METHOD test_supplier_required.
@@ -1560,10 +1592,10 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
 
   METHOD test_submitted_immutability.
     " Phase 2.7B fixture: two items, 2 x 750 + 4 x 100 = 1900, submitted.
-    DATA(root_text) = CONV string( 'Submitted orders cannot be changed.' ).
-    DATA(item_text) = CONV string( 'Submitted order items cannot change.' ).
-    DATA(cba_text) = CONV string( 'Items cannot be added after submission.' ).
-    DATA(remove_text) = CONV string( 'Submitted orders cannot lose items.' ).
+    DATA(root_text) = CONV string( 'Only draft orders can be changed.' ).
+    DATA(item_text) = CONV string( 'Only draft order items can change.' ).
+    DATA(cba_text) = CONV string( 'Items can be added to draft orders only.' ).
+    DATA(remove_text) = CONV string( 'Only draft orders can lose items.' ).
 
     MODIFY ENTITIES OF ZJP_I_PurchaseOrder
       ENTITY PurchaseOrder
@@ -1894,6 +1926,490 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
                                      expected_headers = 0 expected_items = 0 ).
     IF success = abap_true.
       console->write( 'PASS: DRAFT control fixture cleanup complete.' ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD test_approve_lifecycle.
+    DATA(decided_text) = CONV string( 'Only submitted orders can be decided.' ).
+    DATA(root_text) = CONV string( 'Only draft orders can be changed.' ).
+    DATA(item_text) = CONV string( 'Only draft order items can change.' ).
+    DATA(cba_text) = CONV string( 'Items can be added to draft orders only.' ).
+    DATA(remove_text) = CONV string( 'Only draft orders can lose items.' ).
+
+    DATA(approve_uuid) = create_decision_fixture( 'SUP010' ).
+    IF approve_uuid IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = approve_uuid ) )
+        RESULT DATA(approve_orders)
+      ENTITY PurchaseOrder BY \_Items
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = approve_uuid ) )
+        RESULT DATA(approve_items)
+      FAILED DATA(failed_approve_read).
+    IF failed_approve_read IS NOT INITIAL OR lines( approve_orders ) <> 1
+       OR lines( approve_items ) <> 1.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: approve fixture could not be read.' ).
+      RETURN.
+    ENDIF.
+    DATA(approve_key) = approve_orders[ 1 ]-%tky.
+    DATA(approve_item_key) = approve_items[ 1 ]-%tky.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE approve FROM VALUE #( ( %tky = approve_key ) )
+      FAILED DATA(failed_approve)
+      REPORTED DATA(reported_approve).
+    console->write( name = 'approve FAILED - expect empty' data = failed_approve ).
+    console->write( name = 'approve REPORTED' data = reported_approve ).
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( %tky = approve_key ) )
+        RESULT DATA(approved_orders)
+      ENTITY PurchaseOrder BY \_Items
+        ALL FIELDS WITH VALUE #( ( %tky = approve_key ) )
+        RESULT DATA(approved_items)
+      FAILED DATA(failed_approved_read).
+    IF failed_approve IS NOT INITIAL OR failed_approved_read IS NOT INITIAL
+       OR lines( approved_orders ) <> 1 OR lines( approved_items ) <> 1
+       OR approved_orders[ 1 ]-Status <> 'APPROVED'
+       OR approved_orders[ 1 ]-TotalAmount <> 1500
+       OR approved_items[ 1 ]-TotalAmount <> 1500.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: approve must set APPROVED and leave totals unchanged.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    IF check_decision_database( order_uuid = approve_uuid
+                                expected_status = 'APPROVED'
+                                expected_total = 1500 ) = abap_false.
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: SUBMITTED to APPROVED persisted with total 1500.' ).
+
+    " A decided order cannot be decided again, in either direction.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE approve FROM VALUE #( ( %tky = approve_key ) )
+      FAILED DATA(failed_reapprove)
+      REPORTED DATA(reported_reapprove).
+    DATA(reapprove_blocked) = xsdbool( line_exists(
+      failed_reapprove-purchaseorder[ %tky = approve_key
+        %op-%action-approve = if_abap_behv=>mk-on ] ) ).
+    DATA(reapprove_message) = abap_false.
+    LOOP AT reported_reapprove-purchaseorder INTO DATA(reapprove_line).
+      IF reapprove_line-%msg IS BOUND.
+        IF reapprove_line-%msg->if_message~get_text( ) = decided_text.
+          reapprove_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE reject FROM VALUE #( (
+          %tky = approve_key
+          %param-RejectionReason = 'Late objection' ) )
+      FAILED DATA(failed_reject_approved)
+      REPORTED DATA(reported_reject_approved).
+    DATA(reject_approved_blocked) = xsdbool( line_exists(
+      failed_reject_approved-purchaseorder[ %tky = approve_key
+        %op-%action-reject = if_abap_behv=>mk-on ] ) ).
+    ROLLBACK ENTITIES.
+
+    " The Phase 2.7B invariant must now cover APPROVED, not just SUBMITTED.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        UPDATE FIELDS ( Supplier )
+        WITH VALUE #( ( %tky = approve_key Supplier = 'SUP999' ) )
+      FAILED DATA(failed_root_on_approved)
+      REPORTED DATA(reported_root_on_approved).
+    DATA(root_on_approved_blocked) = xsdbool( line_exists(
+      failed_root_on_approved-purchaseorder[ %tky = approve_key ] ) ).
+    DATA(root_on_approved_message) = abap_false.
+    LOOP AT reported_root_on_approved-purchaseorder INTO DATA(root_line).
+      IF root_line-%msg IS BOUND.
+        IF root_line-%msg->if_message~get_text( ) = root_text.
+          root_on_approved_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrderItem
+        UPDATE FIELDS ( Quantity )
+        WITH VALUE #( ( %tky = approve_item_key Quantity = 99 ) )
+      FAILED DATA(failed_item_on_approved)
+      REPORTED DATA(reported_item_on_approved).
+    DATA(item_on_approved_blocked) = xsdbool( line_exists(
+      failed_item_on_approved-purchaseorderitem[ %tky = approve_item_key ] ) ).
+    DATA(item_on_approved_message) = abap_false.
+    LOOP AT reported_item_on_approved-purchaseorderitem INTO DATA(item_line).
+      IF item_line-%msg IS BOUND.
+        IF item_line-%msg->if_message~get_text( ) = item_text.
+          item_on_approved_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        CREATE BY \_Items
+        FIELDS ( ItemNumber Material Quantity UnitOfMeasure NetPrice Currency )
+        WITH VALUE #( ( %tky = approve_key
+          %target = VALUE #( ( %cid = 'APPROVED_EXTRA' ItemNumber = '00090'
+                               Material = 'MAT009' Quantity = 1
+                               UnitOfMeasure = 'EA' NetPrice = '10.00'
+                               Currency = 'EUR' ) ) ) )
+      FAILED DATA(failed_cba_on_approved)
+      REPORTED DATA(reported_cba_on_approved).
+    DATA(cba_on_approved_blocked) = xsdbool( line_exists(
+      failed_cba_on_approved-purchaseorder[ %tky = approve_key ] ) ).
+    DATA(cba_on_approved_message) = abap_false.
+    LOOP AT reported_cba_on_approved-purchaseorder INTO DATA(cba_line).
+      IF cba_line-%msg IS BOUND.
+        IF cba_line-%msg->if_message~get_text( ) = cba_text.
+          cba_on_approved_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE removeItem FROM VALUE #( (
+          %tky = approve_key
+          %param-PurchaseOrderItemUUID =
+            approve_item_key-PurchaseOrderItemUUID ) )
+      FAILED DATA(failed_remove_on_approved)
+      REPORTED DATA(reported_remove_on_approved).
+    DATA(remove_on_approved_blocked) = xsdbool( line_exists(
+      failed_remove_on_approved-purchaseorder[ %tky = approve_key
+        %op-%action-removeItem = if_abap_behv=>mk-on ] ) ).
+    DATA(remove_on_approved_message) = abap_false.
+    LOOP AT reported_remove_on_approved-purchaseorder INTO DATA(remove_line).
+      IF remove_line-%msg IS BOUND.
+        IF remove_line-%msg->if_message~get_text( ) = remove_text.
+          remove_on_approved_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    IF reapprove_blocked = abap_false OR reapprove_message = abap_false
+       OR reject_approved_blocked = abap_false
+       OR root_on_approved_blocked = abap_false
+       OR root_on_approved_message = abap_false
+       OR item_on_approved_blocked = abap_false
+       OR item_on_approved_message = abap_false
+       OR cba_on_approved_blocked = abap_false
+       OR cba_on_approved_message = abap_false
+       OR remove_on_approved_blocked = abap_false
+       OR remove_on_approved_message = abap_false.
+      console->write( 'STOP: an APPROVED order accepted a decision or a change.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: APPROVED rejects re-decision and every commercial change.' ).
+
+    IF check_decision_database( order_uuid = approve_uuid
+                                expected_status = 'APPROVED'
+                                expected_total = 1500 ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    success = delete_decision_fixture( approve_uuid ).
+  ENDMETHOD.
+
+  METHOD test_reject_lifecycle.
+    DATA(decided_text) = CONV string( 'Only submitted orders can be decided.' ).
+    DATA(reason_text) = CONV string( 'Rejection reason is required.' ).
+    DATA(root_text) = CONV string( 'Only draft orders can be changed.' ).
+    DATA(reason_value) = CONV zjp_po_h-rejection_reason( 'Budget exceeded' ).
+
+    DATA(reject_uuid) = create_decision_fixture( 'SUP011' ).
+    IF reject_uuid IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = reject_uuid ) )
+        RESULT DATA(reject_orders)
+      ENTITY PurchaseOrder BY \_Items
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = reject_uuid ) )
+        RESULT DATA(reject_items)
+      FAILED DATA(failed_reject_read).
+    IF failed_reject_read IS NOT INITIAL OR lines( reject_orders ) <> 1
+       OR lines( reject_items ) <> 1.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: reject fixture could not be read.' ).
+      RETURN.
+    ENDIF.
+    DATA(reject_key) = reject_orders[ 1 ]-%tky.
+    DATA(reject_item_key) = reject_items[ 1 ]-%tky.
+
+    " An empty reason must be refused before anything is written.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE reject FROM VALUE #( (
+          %tky = reject_key
+          %param-RejectionReason = '' ) )
+      FAILED DATA(failed_empty_reason)
+      REPORTED DATA(reported_empty_reason).
+    console->write( name = 'Empty reason FAILED - expect rejection'
+                    data = failed_empty_reason ).
+    console->write( name = 'Empty reason REPORTED' data = reported_empty_reason ).
+    DATA(empty_reason_blocked) = xsdbool( line_exists(
+      failed_empty_reason-purchaseorder[ %tky = reject_key
+        %op-%action-reject = if_abap_behv=>mk-on ] ) ).
+    DATA(empty_reason_message) = abap_false.
+    LOOP AT reported_empty_reason-purchaseorder INTO DATA(reason_line).
+      IF reason_line-%msg IS BOUND.
+        IF reason_line-%msg->if_message~get_text( ) = reason_text.
+          empty_reason_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( %tky = reject_key ) )
+        RESULT DATA(after_empty_reason)
+      FAILED DATA(failed_after_empty).
+    DATA(empty_reason_unchanged) = xsdbool(
+      failed_after_empty IS INITIAL
+      AND lines( after_empty_reason ) = 1
+      AND after_empty_reason[ 1 ]-Status = 'SUBMITTED'
+      AND after_empty_reason[ 1 ]-RejectionOrigin IS INITIAL
+      AND after_empty_reason[ 1 ]-RejectionReason IS INITIAL ).
+    ROLLBACK ENTITIES.
+
+    IF empty_reason_blocked = abap_false OR empty_reason_message = abap_false
+       OR empty_reason_unchanged = abap_false.
+      console->write( 'STOP: an empty rejection reason was not refused cleanly.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: reject without a reason is refused and writes nothing.' ).
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE reject FROM VALUE #( (
+          %tky = reject_key
+          %param-RejectionReason = reason_value ) )
+      FAILED DATA(failed_reject)
+      REPORTED DATA(reported_reject).
+    console->write( name = 'reject FAILED - expect empty' data = failed_reject ).
+    console->write( name = 'reject REPORTED' data = reported_reject ).
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( %tky = reject_key ) )
+        RESULT DATA(rejected_orders)
+      FAILED DATA(failed_rejected_read).
+    console->write( name = 'Header after reject' data = rejected_orders ).
+    IF failed_reject IS NOT INITIAL OR failed_rejected_read IS NOT INITIAL
+       OR lines( rejected_orders ) <> 1
+       OR rejected_orders[ 1 ]-Status <> 'REJECTED'
+       OR rejected_orders[ 1 ]-RejectionOrigin <> 'APPROVER'
+       OR rejected_orders[ 1 ]-RejectionReason <> reason_value
+       OR rejected_orders[ 1 ]-TotalAmount <> 1500.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: reject must set REJECTED, APPROVER and the reason.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    IF check_decision_database( order_uuid = reject_uuid
+                                expected_status = 'REJECTED'
+                                expected_total = 1500
+                                expected_origin = 'APPROVER'
+                                expected_reason = reason_value ) = abap_false.
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: SUBMITTED to REJECTED persisted with origin APPROVER.' ).
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE approve FROM VALUE #( ( %tky = reject_key ) )
+      FAILED DATA(failed_approve_rejected)
+      REPORTED DATA(reported_approve_rejected).
+    DATA(approve_rejected_blocked) = xsdbool( line_exists(
+      failed_approve_rejected-purchaseorder[ %tky = reject_key
+        %op-%action-approve = if_abap_behv=>mk-on ] ) ).
+    DATA(approve_rejected_message) = abap_false.
+    LOOP AT reported_approve_rejected-purchaseorder INTO DATA(decided_line).
+      IF decided_line-%msg IS BOUND.
+        IF decided_line-%msg->if_message~get_text( ) = decided_text.
+          approve_rejected_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        UPDATE FIELDS ( Supplier )
+        WITH VALUE #( ( %tky = reject_key Supplier = 'SUP999' ) )
+      ENTITY PurchaseOrderItem
+        UPDATE FIELDS ( Quantity )
+        WITH VALUE #( ( %tky = reject_item_key Quantity = 99 ) )
+      FAILED DATA(failed_change_rejected)
+      REPORTED DATA(reported_change_rejected).
+    DATA(rejected_root_blocked) = xsdbool( line_exists(
+      failed_change_rejected-purchaseorder[ %tky = reject_key ] ) ).
+    DATA(rejected_item_blocked) = xsdbool( line_exists(
+      failed_change_rejected-purchaseorderitem[ %tky = reject_item_key ] ) ).
+    DATA(rejected_root_message) = abap_false.
+    LOOP AT reported_change_rejected-purchaseorder INTO DATA(rejected_line).
+      IF rejected_line-%msg IS BOUND.
+        IF rejected_line-%msg->if_message~get_text( ) = root_text.
+          rejected_root_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    IF approve_rejected_blocked = abap_false
+       OR approve_rejected_message = abap_false
+       OR rejected_root_blocked = abap_false
+       OR rejected_item_blocked = abap_false
+       OR rejected_root_message = abap_false.
+      console->write( 'STOP: a REJECTED order accepted a decision or a change.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: REJECTED rejects approve and every commercial change.' ).
+
+    IF check_decision_database( order_uuid = reject_uuid
+                                expected_status = 'REJECTED'
+                                expected_total = 1500
+                                expected_origin = 'APPROVER'
+                                expected_reason = reason_value ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    success = delete_decision_fixture( reject_uuid ).
+  ENDMETHOD.
+
+  METHOD create_decision_fixture.
+    " One active root with one item, 2 x 750 = 1500, submitted and committed.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        CREATE FIELDS ( Supplier CompanyCode Currency )
+        WITH VALUE #( ( %cid = 'DECISION_ROOT'
+                        Supplier = supplier
+                        CompanyCode = '1000'
+                        Currency = 'EUR' ) )
+        CREATE BY \_Items
+        FIELDS ( ItemNumber Material Quantity UnitOfMeasure NetPrice Currency )
+        WITH VALUE #( ( %cid_ref = 'DECISION_ROOT'
+          %target = VALUE #( ( %cid = 'DECISION_ITEM' ItemNumber = '00010'
+                               Material = 'MAT001' Quantity = 2
+                               UnitOfMeasure = 'EA' NetPrice = '750.00'
+                               Currency = 'EUR' ) ) ) )
+      MAPPED DATA(mapped_decision)
+      FAILED DATA(failed_decision_create)
+      REPORTED DATA(reported_decision_create).
+    console->write( name = 'Decision fixture FAILED' data = failed_decision_create ).
+    console->write( name = 'Decision fixture REPORTED'
+                    data = reported_decision_create ).
+    IF failed_decision_create IS NOT INITIAL
+       OR NOT line_exists( mapped_decision-purchaseorder[
+            %cid = 'DECISION_ROOT' ] ).
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: decision fixture creation failed.' ).
+      RETURN.
+    ENDIF.
+    DATA(fixture_uuid) = mapped_decision-purchaseorder[
+      %cid = 'DECISION_ROOT' ]-PurchaseOrderUUID.
+    console->write( name = 'Decision fixture UUID - retain for diagnosis'
+                    data = fixture_uuid ).
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = fixture_uuid ) )
+        RESULT DATA(fixture_orders)
+      FAILED DATA(failed_fixture_read).
+    IF failed_fixture_read IS NOT INITIAL OR lines( fixture_orders ) <> 1
+       OR fixture_orders[ 1 ]-Status <> 'DRAFT'.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: decision fixture must start in Status DRAFT.' ).
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE submit FROM VALUE #( ( %tky = fixture_orders[ 1 ]-%tky ) )
+      FAILED DATA(failed_fixture_submit)
+      REPORTED DATA(reported_fixture_submit).
+    IF failed_fixture_submit IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: submit failed on the decision fixture.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    order_uuid = fixture_uuid.
+  ENDMETHOD.
+
+  METHOD delete_decision_fixture.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        DELETE FROM VALUE #( ( PurchaseOrderUUID = order_uuid ) )
+      FAILED DATA(failed_decision_cleanup)
+      REPORTED DATA(reported_decision_cleanup).
+    console->write( name = 'Decision cleanup FAILED' data = failed_decision_cleanup ).
+    IF failed_decision_cleanup IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: decision fixture cleanup failed.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    success = check_submit_database( order_uuid = order_uuid
+                                     expected_headers = 0 expected_items = 0 ).
+    IF success = abap_true.
+      console->write( 'PASS: decision fixture cleanup complete.' ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD check_decision_database.
+    SELECT purchase_order_uuid, status, total_amount, rejection_origin,
+           rejection_reason, purchase_order_number
+      FROM zjp_po_h
+      WHERE purchase_order_uuid = @order_uuid
+      INTO TABLE @DATA(headers_db).
+    console->write( name = 'ZJP_PO_H - decision test UUID' data = headers_db ).
+
+    success = xsdbool( lines( headers_db ) = 1 ).
+    IF success = abap_true.
+      success = xsdbool(
+        headers_db[ 1 ]-status = expected_status
+        AND headers_db[ 1 ]-total_amount = expected_total
+        AND headers_db[ 1 ]-rejection_origin = expected_origin
+        AND headers_db[ 1 ]-rejection_reason = expected_reason
+        AND headers_db[ 1 ]-purchase_order_number IS INITIAL ).
+    ENDIF.
+
+    IF success = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: decision database verification failed.' ).
+    ELSE.
+      console->write( 'PASS: decision database checkpoint values are correct.' ).
     ENDIF.
   ENDMETHOD.
 ENDCLASS.

@@ -1,6 +1,6 @@
 # Phase 2.7B — Post-submission commercial immutability
 
-Status: **SAP runtime-verified complete** for root updates, item updates, create-by-association and `removeItem` on `SUBMITTED` orders, for both active and technical draft instances in the tested flows. Phase 2.1–2.7A remain runtime-verified and were not rewritten to achieve this. Approve, reject, sendToSupplier, cancel and `PurchaseOrderNumber` are not started.
+Status: **SAP runtime-verified complete** for root updates, item updates, create-by-association and `removeItem` on `SUBMITTED` orders, for both active and technical draft instances in the tested flows. Phase 2.1–2.7A remain runtime-verified and were not rewritten to achieve this. [Phase 2.7C](phase-2-7c-approve-reject.md) has since generalized this rule to every state after `DRAFT` and added the approve and reject transitions; `sendToSupplier`, `cancel` and `PurchaseOrderNumber` are not started.
 
 ## Target baseline
 
@@ -45,14 +45,14 @@ The `FOR UPDATE` line type on this target exposes `%cid_ref`, `%control`, `%data
 6. The status read happens in a precheck, before the buffer changes, so it is the **current** business status. `%tky` carries `%is_draft`, so a draft instance resolves against its own draft row.
 7. **Root `DELETE` stays allowed.** Removing a submitted order belongs to the cancel/lifecycle rules of a later subphase, and the Phase 2.7A regression depends on deleting its own submitted fixture.
 
-| Condition | Message text | Length |
-| --- | --- | --- |
-| Root commercial update on a submitted order | `Submitted orders cannot be changed.` | 35 |
-| Item commercial update on a submitted order | `Submitted order items cannot change.` | 36 |
-| Create-by-association on a submitted order | `Items cannot be added after submission.` | 39 |
-| `removeItem` on a submitted order | `Submitted orders cannot lose items.` | 35 |
+| Condition | Message text as reworded in Phase 2.7C |
+| --- | --- |
+| Root commercial update outside `DRAFT` | `Only draft orders can be changed.` |
+| Item commercial update outside `DRAFT` | `Only draft order items can change.` |
+| Create-by-association outside `DRAFT` | `Items can be added to draft orders only.` |
+| `removeItem` outside `DRAFT` | `Only draft orders can lose items.` |
 
-All four stay within the 50-character limit established in Phase 2.6, and all four were returned in full.
+At this checkpoint these messages named `SUBMITTED` directly. [Phase 2.7C](phase-2-7c-approve-reject.md) generalized the rule to every state after `DRAFT` and reworded all four accordingly; the texts above are the current ones. All were returned in full. The target truncated one 53-character text to 50 characters on the Phase 2.6 path, which is empirical, target- and path-specific behavior rather than a documented universal limit; returned text is verified in the console rather than assumed.
 
 ```mermaid
 flowchart TD
@@ -144,7 +144,7 @@ Runtime verification covers the four operations above on `SUBMITTED` orders. It 
 
 - `PurchaseOrderNumber` is still not allocated; submitted orders have no human-readable identity.
 - Root `DELETE` of a submitted order is still allowed by design; physical deletion rules and `cancel` belong to a later subphase.
-- No `approve`, `reject`, `sendToSupplier` or `cancel` transition exists; `SUBMITTED` remains terminal.
+- `approve` and `reject` were added by [Phase 2.7C](phase-2-7c-approve-reject.md); `sendToSupplier` and `cancel` remain unimplemented.
 - Authorization remains the permissive study stub; negative permission cases are not covered.
 - `Activate` over a `SUBMITTED` active instance is untested.
 - Precheck behavior for `IN LOCAL MODE` requests is undetermined; the design does not depend on it.

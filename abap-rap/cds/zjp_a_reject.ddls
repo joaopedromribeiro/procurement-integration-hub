@@ -1,0 +1,5 @@
+@EndUserText.label: 'Purchase order rejection parameter'
+define abstract entity ZJP_A_Reject
+{
+  RejectionReason : abap.char(255);
+}

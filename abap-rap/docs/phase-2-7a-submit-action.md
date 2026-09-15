@@ -60,7 +60,7 @@ Every rejection appends exactly one entry to `failed-purchaseorder` and one mess
 | No items | `Submit requires at least one item.` |
 | Nested status update failed | `Status update failed; rollback this request.` |
 
-Every message text is 46 characters or shorter. The Phase 2.6 lesson applies directly: `new_message_with_text` truncated a 53-character text to 50 characters on this target, and the console tests compare returned text exactly. Keep any future submit message within 50 characters rather than relaxing an assertion. If the console still shows a truncated text, shorten the constant in both the handler and the test to the same literal.
+Every message text is 46 characters or shorter. The Phase 2.6 observation applies directly: `new_message_with_text` truncated a 53-character text to 50 characters on that path, and the console tests compare returned text exactly. This is empirical, target- and path-specific behavior, not a documented universal limit. Keep messages short and verify the returned text in the console rather than relaxing an assertion; if a text comes back truncated, shorten the constant in both the handler and the test to the same literal.
 
 A rejection mutates nothing. An action is not a nested database transaction, so the caller must `ROLLBACK ENTITIES` on any FAILED and must not commit a partial request. `REPORTED` alone is not a save veto. No handler `COMMIT`/`ROLLBACK`, no SQL write, no handler-instance state.
 
@@ -151,6 +151,6 @@ Runtime verification covers the transition and its three rejections. It does not
 
 - Commercial-field and item locking after submission was out of scope here and was delivered separately by [Phase 2.7B](phase-2-7b-post-submission-immutability.md).
 - `PurchaseOrderNumber` remains initial for submitted orders.
-- No `approve`, `reject`, `sendToSupplier` or `cancel` transition exists; `SUBMITTED` is terminal within this subphase.
+- `approve` and `reject` were out of scope here and were added by [Phase 2.7C](phase-2-7c-approve-reject.md); `sendToSupplier` and `cancel` remain unimplemented.
 - Authorization remains the permissive study stub; negative permission cases are not covered.
 - `Activate`-then-`submit` is the documented draft path but is not exercised by these tests.

@@ -17,6 +17,8 @@ etag master LocalLastChangedAt
 
   action ( authorization : update ) removeItem parameter ZJP_A_RemoveItem;
   action ( authorization : update ) submit;
+  action ( authorization : update ) approve;
+  action ( authorization : update ) reject parameter ZJP_A_Reject;
 
   draft action Edit;
   draft action Activate;

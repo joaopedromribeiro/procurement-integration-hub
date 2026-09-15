@@ -8,6 +8,12 @@ CLASS lhc_PurchaseOrder DEFINITION
     METHODS submit FOR MODIFY
       IMPORTING keys FOR ACTION PurchaseOrder~submit.
 
+    METHODS approve FOR MODIFY
+      IMPORTING keys FOR ACTION PurchaseOrder~approve.
+
+    METHODS reject FOR MODIFY
+      IMPORTING keys FOR ACTION PurchaseOrder~reject.
+
     METHODS precheck_update FOR PRECHECK
       IMPORTING entities FOR UPDATE purchaseorder.
 
@@ -192,7 +198,16 @@ CLASS lhc_PurchaseOrderItem IMPLEMENTATION.
       READ TABLE parent_orders INTO DATA(parent_order)
         WITH KEY PurchaseOrderUUID = item-PurchaseOrderUUID
                  %is_draft = item-%is_draft.
-      IF sy-subrc <> 0 OR parent_order-Status <> 'SUBMITTED'.
+      " Unreadable parents are left to the framework's own handling.
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
+      " Business rule: item content is editable only while the owning root is
+      " in Status DRAFT. INITIAL is a transient technical state, not a
+      " business state, and must keep creation working. Every persisted state
+      " after DRAFT is immutable.
+      IF parent_order-Status IS INITIAL
+         OR parent_order-Status = 'DRAFT'.
         CONTINUE.
       ENDIF.
 
@@ -201,7 +216,7 @@ CLASS lhc_PurchaseOrderItem IMPLEMENTATION.
       APPEND VALUE #( %tky = checked_entity-%tky
         %msg = new_message_with_text(
           severity = if_abap_behv_message=>severity-error
-          text = 'Submitted order items cannot change.' ) )
+          text = 'Only draft order items can change.' ) )
         TO reported-purchaseorderitem.
     ENDLOOP.
   ENDMETHOD.
@@ -237,11 +252,12 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
           error_text = 'Purchase Order could not be read; item was not removed.'.
           EXIT.
         ENDIF.
-
-        " Phase 2.7B: a submitted order may not lose items. Checked before
+        " Commercial content is editable only while Status is DRAFT. INITIAL
+        " is a transient technical state, not a business state. Checked before
         " ownership so the state of the order decides uniformly.
-        IF orders[ 1 ]-Status = 'SUBMITTED'.
-          error_text = 'Submitted orders cannot lose items.'.
+        IF orders[ 1 ]-Status IS NOT INITIAL
+           AND orders[ 1 ]-Status <> 'DRAFT'.
+          error_text = 'Only draft orders can lose items.'.
           EXIT.
         ENDIF.
 
@@ -401,6 +417,154 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
   ENDMETHOD.
 
 
+
+  METHOD approve.
+    DATA reported_orders LIKE reported-purchaseorder.
+    DATA reported_items LIKE reported-purchaseorderitem.
+
+    LOOP AT keys INTO DATA(action_key).
+      DATA(error_text) = CONV string( '' ).
+
+      " One invocation decides one active root; no state survives this method.
+      DO 1 TIMES.
+        " Reject technical draft instances before reading or changing anything.
+        IF action_key-%is_draft = if_abap_behv=>mk-on.
+          error_text = 'Not allowed on a draft instance.'.
+          EXIT.
+        ENDIF.
+
+        READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+          ENTITY PurchaseOrder
+            FIELDS ( Status )
+            WITH VALUE #( ( %tky = action_key-%tky ) )
+            RESULT DATA(orders)
+          FAILED DATA(read_failed)
+          REPORTED DATA(read_reported).
+        reported_orders = CORRESPONDING #( DEEP read_reported-purchaseorder ).
+        APPEND LINES OF reported_orders TO reported-purchaseorder.
+        reported_items = CORRESPONDING #( DEEP read_reported-purchaseorderitem ).
+        APPEND LINES OF reported_items TO reported-purchaseorderitem.
+
+        IF read_failed IS NOT INITIAL OR lines( orders ) <> 1.
+          error_text = 'Order could not be read; no action taken.'.
+          EXIT.
+        ENDIF.
+
+        " Business Status is the transition authority. Content was validated
+        " before submission and is immutable afterwards, so nothing is
+        " revalidated here.
+        IF orders[ 1 ]-Status <> 'SUBMITTED'.
+          error_text = 'Only submitted orders can be decided.'.
+          EXIT.
+        ENDIF.
+
+        MODIFY ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+          ENTITY PurchaseOrder
+            UPDATE FIELDS ( Status )
+            WITH VALUE #( ( %tky = action_key-%tky
+                            Status = 'APPROVED' ) )
+          FAILED DATA(update_failed)
+          REPORTED DATA(update_reported).
+        reported_orders = CORRESPONDING #( DEEP update_reported-purchaseorder ).
+        APPEND LINES OF reported_orders TO reported-purchaseorder.
+        reported_items = CORRESPONDING #( DEEP update_reported-purchaseorderitem ).
+        APPEND LINES OF reported_items TO reported-purchaseorderitem.
+        IF update_failed IS NOT INITIAL.
+          error_text = 'Status update failed; rollback this request.'.
+          EXIT.
+        ENDIF.
+      ENDDO.
+
+      IF error_text IS NOT INITIAL.
+        APPEND VALUE #( %tky = action_key-%tky
+                        %op-%action-approve = if_abap_behv=>mk-on )
+          TO failed-purchaseorder.
+        APPEND VALUE #( %tky = action_key-%tky
+          %op-%action-approve = if_abap_behv=>mk-on
+          %msg = new_message_with_text(
+            severity = if_abap_behv_message=>severity-error
+            text = error_text ) )
+          TO reported-purchaseorder.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD reject.
+    DATA reported_orders LIKE reported-purchaseorder.
+    DATA reported_items LIKE reported-purchaseorderitem.
+
+    " Approver rejection only. Supplier-side rejection is a separate
+    " mechanism and sets RejectionOrigin to SUPPLIER in a later phase.
+    LOOP AT keys INTO DATA(action_key).
+      DATA(error_text) = CONV string( '' ).
+
+      DO 1 TIMES.
+        IF action_key-%is_draft = if_abap_behv=>mk-on.
+          error_text = 'Not allowed on a draft instance.'.
+          EXIT.
+        ENDIF.
+
+        READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+          ENTITY PurchaseOrder
+            FIELDS ( Status )
+            WITH VALUE #( ( %tky = action_key-%tky ) )
+            RESULT DATA(orders)
+          FAILED DATA(read_failed)
+          REPORTED DATA(read_reported).
+        reported_orders = CORRESPONDING #( DEEP read_reported-purchaseorder ).
+        APPEND LINES OF reported_orders TO reported-purchaseorder.
+        reported_items = CORRESPONDING #( DEEP read_reported-purchaseorderitem ).
+        APPEND LINES OF reported_items TO reported-purchaseorderitem.
+
+        IF read_failed IS NOT INITIAL OR lines( orders ) <> 1.
+          error_text = 'Order could not be read; no action taken.'.
+          EXIT.
+        ENDIF.
+
+        IF orders[ 1 ]-Status <> 'SUBMITTED'.
+          error_text = 'Only submitted orders can be decided.'.
+          EXIT.
+        ENDIF.
+
+        " Eligibility and lifecycle state decide before the parameter.
+        IF action_key-%param-RejectionReason IS INITIAL.
+          error_text = 'Rejection reason is required.'.
+          EXIT.
+        ENDIF.
+
+        MODIFY ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+          ENTITY PurchaseOrder
+            UPDATE FIELDS ( Status RejectionOrigin RejectionReason )
+            WITH VALUE #( ( %tky = action_key-%tky
+                            Status = 'REJECTED'
+                            RejectionOrigin = 'APPROVER'
+                            RejectionReason =
+                              action_key-%param-RejectionReason ) )
+          FAILED DATA(update_failed)
+          REPORTED DATA(update_reported).
+        reported_orders = CORRESPONDING #( DEEP update_reported-purchaseorder ).
+        APPEND LINES OF reported_orders TO reported-purchaseorder.
+        reported_items = CORRESPONDING #( DEEP update_reported-purchaseorderitem ).
+        APPEND LINES OF reported_items TO reported-purchaseorderitem.
+        IF update_failed IS NOT INITIAL.
+          error_text = 'Status update failed; rollback this request.'.
+          EXIT.
+        ENDIF.
+      ENDDO.
+
+      IF error_text IS NOT INITIAL.
+        APPEND VALUE #( %tky = action_key-%tky
+                        %op-%action-reject = if_abap_behv=>mk-on )
+          TO failed-purchaseorder.
+        APPEND VALUE #( %tky = action_key-%tky
+          %op-%action-reject = if_abap_behv=>mk-on
+          %msg = new_message_with_text(
+            severity = if_abap_behv_message=>severity-error
+            text = error_text ) )
+          TO reported-purchaseorder.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
   METHOD precheck_update.
     DATA reported_orders LIKE reported-purchaseorder.
     DATA commercial_entities LIKE entities.
@@ -436,8 +600,16 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
     LOOP AT commercial_entities INTO DATA(checked_entity).
       READ TABLE orders INTO DATA(order)
         WITH KEY %tky = checked_entity-%tky.
-      " An unreadable instance is left to the framework's own handling.
-      IF sy-subrc <> 0 OR order-Status <> 'SUBMITTED'.
+      " Unreadable instances are left to the framework's own handling.
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
+      " Business rule: commercial content is editable only while Status is
+      " DRAFT. INITIAL is a transient technical state, not a business state:
+      " a newly created root can be readable before initializeStatus has run,
+      " and creation must keep working. Every persisted state after DRAFT is
+      " immutable.
+      IF order-Status IS INITIAL OR order-Status = 'DRAFT'.
         CONTINUE.
       ENDIF.
 
@@ -446,7 +618,7 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
       APPEND VALUE #( %tky = checked_entity-%tky
         %msg = new_message_with_text(
           severity = if_abap_behv_message=>severity-error
-          text = 'Submitted orders cannot be changed.' ) )
+          text = 'Only draft orders can be changed.' ) )
         TO reported-purchaseorder.
     ENDLOOP.
   ENDMETHOD.
@@ -468,7 +640,16 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
 
     LOOP AT entities INTO DATA(entity).
       READ TABLE orders INTO DATA(order) WITH KEY %tky = entity-%tky.
-      IF sy-subrc <> 0 OR order-Status <> 'SUBMITTED'.
+      " Unreadable instances are left to the framework's own handling.
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
+      " Business rule: commercial content is editable only while Status is
+      " DRAFT. INITIAL is a transient technical state, not a business state:
+      " a newly created root can be readable before initializeStatus has run,
+      " and creation must keep working. Every persisted state after DRAFT is
+      " immutable.
+      IF order-Status IS INITIAL OR order-Status = 'DRAFT'.
         CONTINUE.
       ENDIF.
 
@@ -477,7 +658,7 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
       APPEND VALUE #( %tky = entity-%tky
         %msg = new_message_with_text(
           severity = if_abap_behv_message=>severity-error
-          text = 'Items cannot be added after submission.' ) )
+          text = 'Items can be added to draft orders only.' ) )
         TO reported-purchaseorder.
     ENDLOOP.
   ENDMETHOD.

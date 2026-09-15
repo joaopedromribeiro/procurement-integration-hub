@@ -757,12 +757,42 @@ CLASS zjp_cl_po_draft_probe IMPLEMENTATION.
       failed_draft_item_update-purchaseorderitem[
         %tky = lock_draft_item_key ] ) ).
 
+    " Phase 2.7C: approve and reject are active-only, exactly like submit.
+    " Run while the draft still exists, before the rollback below.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE approve FROM VALUE #( ( %tky = lock_draft_key ) )
+      FAILED DATA(failed_draft_approve)
+      REPORTED DATA(reported_draft_approve).
+    out->write( name = 'Draft approve FAILED - expect rejection'
+                data = failed_draft_approve ).
+    out->write( name = 'Draft approve REPORTED' data = reported_draft_approve ).
+    DATA(draft_approve_blocked) = xsdbool( line_exists(
+      failed_draft_approve-purchaseorder[ %tky = lock_draft_key
+        %op-%action-approve = if_abap_behv=>mk-on ] ) ).
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE reject FROM VALUE #( (
+          %tky = lock_draft_key
+          %param-RejectionReason = 'Draft decision attempt' ) )
+      FAILED DATA(failed_draft_reject)
+      REPORTED DATA(reported_draft_reject).
+    out->write( name = 'Draft reject FAILED - expect rejection'
+                data = failed_draft_reject ).
+    out->write( name = 'Draft reject REPORTED' data = reported_draft_reject ).
+    DATA(draft_reject_blocked) = xsdbool( line_exists(
+      failed_draft_reject-purchaseorder[ %tky = lock_draft_key
+        %op-%action-reject = if_abap_behv=>mk-on ] ) ).
+
     ROLLBACK ENTITIES.
-    IF draft_root_blocked = abap_false OR draft_item_blocked = abap_false.
-      out->write( 'STOP: a SUBMITTED draft must reject root and item changes.' ).
+    IF draft_root_blocked = abap_false OR draft_item_blocked = abap_false
+       OR draft_approve_blocked = abap_false
+       OR draft_reject_blocked = abap_false.
+      out->write( 'STOP: a SUBMITTED draft must reject changes and decisions.' ).
       RETURN.
     ENDIF.
-    out->write( 'PASS: SUBMITTED draft rejected both root and item updates.' ).
+    out->write( 'PASS: SUBMITTED draft rejected root and item updates plus approve and reject.' ).
 
     MODIFY ENTITIES OF ZJP_I_PurchaseOrder
       ENTITY PurchaseOrder
