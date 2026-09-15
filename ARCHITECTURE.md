@@ -1,10 +1,12 @@
 # Architecture
 
-Updated 2026-09-13. Phase 2.5A validateSupplier is runtime-verified complete: blank Supplier create/update are rejected at save, persistence remains unchanged, and the valid flow passes. Phase 2.4C header aggregation remains verified for previously committed item deletion; uncommitted-item deletion is unsupported by its persisted-parent lookup. Phase 2.5B has not started.
+Updated 2026-09-14. Phase 2.5A validateSupplier, Phase 2.5B validateQuantity and Phase 2.5C validateNetPrice are SAP runtime-verified complete on learner-supplied evidence. NetPrice < 0 is rejected at save, while zero-price create/update is valid. Quantity must be greater than 0 on item create and Quantity change; rejected saves preserve persistence. Phase 2.4C header aggregation remains verified for previously committed item deletion; uncommitted-item deletion is unsupported by its persisted-parent lookup.
 
 ## Phase 1 implementation boundary
 
-The learner confirmed SAP S/4HANA with ABAP Cloud; exact release is pending. The six model objects are ZJP_PO_H, ZJP_PO_I, ZJP_I_PurchaseOrder, ZJP_I_PurchaseOrderItem, ZJP_C_PurchaseOrder and ZJP_C_PurchaseOrderItem. See the [step-by-step ADT guide](abap-rap/docs/phase-1-domain-model.md).
+The learner confirmed SAP S/4HANA with ABAP Cloud. The exact Phase 2.6 target is SAP_BASIS 758 SP0001 / S4CORE 108 SP0001, ADT Core 3.60.3 / Business Object Tools 1.209.0, Eclipse 4.40.0. The six model objects are ZJP_PO_H, ZJP_PO_I, ZJP_I_PurchaseOrder, ZJP_I_PurchaseOrderItem, ZJP_C_PurchaseOrder and ZJP_C_PurchaseOrderItem. See the [step-by-step ADT guide](abap-rap/docs/phase-1-domain-model.md).
+
+Phase 2.6 decision after target ADT and active/draft runtime inspection: preserve PurchaseOrderItemUUID as the sole child entity key. Known-root navigation after deletion is verified for active, saved-draft and buffer-only draft instances; deleted-child navigation fails. A technical root removeItem action now checks ownership, invokes managed internal child DELETE, navigates the surviving collection using complete root %tky including %is_draft, and updates root TotalAmount through local EML. It replaces the active-table parent lookup and restricts external child deletion. No direct draft-table access or callback state is used. The action, ownership protection and corrected active/draft totals are SAP runtime-verified; see the [Phase 2.6 guide](abap-rap/docs/phase-2-6-technical-draft.md).
 
 All six objects were activated in ADT/Eclipse. Two confirmed compiler adjustments are part of the implementation baseline: the root base view exposes Currency without the rejected standalone currency-code marker and keeps the amount-to-currency reference; the child projection omits an explicit transactional_query provider contract while retaining its redirected-parent association. The root projection retains its provider contract. These are target-system findings; they do not establish syntax behavior for every SAP release.
 
@@ -194,5 +196,6 @@ SAP supports [RAP business events](https://help.sap.com/docs/abap-cloud/abap-rap
 | ADR-015 | ABAP initial values for absent optional persistence values | Avoids relying on SQL NULL in ABAP structures; API conversion remains an explicit later responsibility |
 | ADR-016 | Preserve target-compiler compatibility fixes | Remove the root currency marker and child's explicit provider contract exactly as required by the activated implementation; do not restore rejected generic syntax |
 | ADR-017 | Confirmation after every major Phase 2 step | Behavior architecture, design, CRUD, EML, draft, logic and actions are separate learning checkpoints |
+| ADR-018 | Root-known technical `removeItem`; internal child DELETE | SAP runtime verifies ownership-safe deletion and recalculation for active, saved-draft and buffer-only draft instances while preserving the child key and draft discriminator without SQL or shared state |
 
 See [domain model](docs/architecture/domain-model.md), [API contracts](API_CONTRACTS.md), and [project status](PROJECT_STATUS.md) for associated rules and unresolved environment decisions.

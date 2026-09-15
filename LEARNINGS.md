@@ -40,7 +40,7 @@ For each completed phase, add: what was built; why the chosen technology fits; i
 
 ## Phase 1 — persistence and CDS implementation, completed
 
-The learner manually created and successfully activated ZJP_PO_H, ZJP_PO_I, ZJP_I_PurchaseOrder, ZJP_I_PurchaseOrderItem, ZJP_C_PurchaseOrder and ZJP_C_PurchaseOrderItem in SAP S/4HANA using ADT/Eclipse. The [ADT lesson](abap-rap/docs/phase-1-domain-model.md) contains the reconciled sources and activation record. Exact release is still unrecorded; the target SAP compiler is authoritative.
+The learner manually created and successfully activated ZJP_PO_H, ZJP_PO_I, ZJP_I_PurchaseOrder, ZJP_I_PurchaseOrderItem, ZJP_C_PurchaseOrder and ZJP_C_PurchaseOrderItem in SAP S/4HANA using ADT/Eclipse. The [ADT lesson](abap-rap/docs/phase-1-domain-model.md) contains the reconciled sources and activation record. The exact release was subsequently recorded during Phase 2.6; the target SAP compiler remains authoritative.
 
 | Concept | Learning point |
 | --- | --- |
@@ -161,4 +161,62 @@ This first rule checks presence only, not supplier master-data existence. It app
 
 The EML test attempts a blank-Supplier create and a blank-Supplier update of the committed SUP001 order. MODIFY reaches the save validation; COMMIT fails with nonzero sy-subrc and `Supplier is required.` The test rolls back immediately and confirms no invalid create persisted and SUP001 survived the rejected update. The normal create/update/totals/deletion regression flow also passes.
 
-Learner-reported SAP evidence ends with `PASS: Supplier validation rejects blank create/update; valid flow and cleanup pass.` Phase 2.5A is runtime-verified complete. Phase 2.5B has not started.
+Learner-reported SAP evidence ends with `PASS: Supplier validation rejects blank create/update; valid flow and cleanup pass.` Phase 2.5A is runtime-verified complete.
+
+## Phase 2.5B — Quantity greater than zero on save, runtime-verified
+
+`validateQuantity on save { create; field Quantity; }` checks new items and existing items whose Quantity changes. The item handler reads current transactional values through local-mode EML. For Quantity less than or equal to 0 it adds the item key to FAILED and reports `Quantity must be greater than 0.` against `%element-Quantity`. The FAILED entry vetoes persistence; the validation does not replace the value or commit.
+
+The EML test uses Quantity 0 on deep create and -1 on update. Each MODIFY is expected to reach the save validation, each COMMIT is expected to fail, and an explicit rollback is followed by direct persistence checks. The invalid create must leave no root or item, while the rejected update must preserve Quantity 2, item total 1500 and header total 1900. The existing successful Quantity 3 update, totals, Supplier validation and committed-item cleanup remain in the positive regression flow.
+
+The [Phase 2.5B guide](abap-rap/docs/phase-2-5b-quantity-validation.md) records the learner's successful SAP run on 2026-09-14. Both Quantity negative commits returned 4 with the exact message, unchanged persistence checks passed, and the valid regression/cleanup passed. Phase 2.5C had not started at that checkpoint; its source preparation is recorded below.
+
+The same attachment begins with a failed run: the zero-Quantity create committed with sy-subrc 0 and persisted rows remained after rollback. The change between runs was not supplied, so no activation or implementation cause is inferred. Rollback cannot undo a successful commit; cleanup of that earlier UUID is separate from the later run's successful cleanup.
+
+The negative update test also compares full, primary-key-ordered persistence snapshots before and after the failed save and rollback. This checks sibling and audit fields as well as the expected amounts. Read-only SELECT is justified here to verify database state independently of the RAP buffer; EML remains the only mutation interface.
+
+## Phase 2.5C — Nonnegative NetPrice, runtime-verified
+
+The item save validation validateNetPrice follows the runtime-verified Quantity pattern: local-mode EML read, invalid key in FAILED, exact error text in REPORTED with the NetPrice field marker. The condition is NetPrice < 0; zero and an initial numeric price remain valid. This protects the second input to Quantity × NetPrice without modifying the existing determinations.
+
+The EML extension tests negative-price create/update with full persistence comparisons and a separate zero-price fixture. Committed price transitions 0 → 750 → 0 prove both zero creation and a real update to zero. Buffer and database totals are checked at each positive stage; the fixture is committed before EML cleanup. The original Supplier, Quantity and header-total regression flow is preserved.
+
+The [Phase 2.5C guide](abap-rap/docs/phase-2-5c-net-price-validation.md) records the successful learner-supplied SAP run. Negative NetPrice create/update returned commit sy-subrc 4 with the exact message and unchanged persistence. Zero-price creation and committed prices 0 → 750 → 0 passed buffer/database checks. Supplier/Quantity regression, header totals 1900/2650/2800/2400/0, and both fixture cleanups passed. No Phase 2.6 or later behavior is implemented.
+
+Compiler lesson: the target rejected integer literal 750 in the elementary PRICES table constructor as incompatible with the NetPrice row type. The correction explicitly converts both 750 and 0 using CONV zjp_po_i-net_price before constructing the table. Do not assume an elementary table constructor accepts the same implicit conversions as an assignment to a structured field. The subsequent successful SAP console run verifies the corrected test; no validation logic changed.
+
+## Phase 2.6 — Technical draft investigation history
+
+Business Status DRAFT is not technical draft identity. A technical draft can exist without any active persistence row. The current delete determination therefore cannot derive every draft item's parent from ZJP_PO_I, and a parent UUID alone does not carry the technical draft discriminator.
+
+Draft enablement needs review of aggregate identity/grouping, delete parent lookup, total ETag, draft preparation/activation validations, and generated EML types. Creating draft tables alone does not solve these issues. The target is SAP_BASIS 758 SP0001 / S4CORE 108 SP0001, ADT Core 3.60.3 / BO Tools 1.209.0, Eclipse 4.40.0. The learner now reports zero syntax errors for the draft-enabled BDEF, including total ETag, lifecycle operations, child validations in Prepare and draft associations. At that historical checkpoint, the [Phase 2.6 guide](abap-rap/docs/phase-2-6-technical-draft.md) specified the remaining delete runtime probe. Subsequent evidence and the runtime-verified solution are recorded below.
+
+The generated draft model preserves the current key: ZJP_PO_ID has PurchaseOrderItemUUID as its entity key and PurchaseOrderUUID as a non-key field. Both draft tables include generated %admin data. The previous proposal to add the parent UUID to the child key is withdrawn. Draft support does not itself require that model change, and changing identity is not a substitute for investigating deletion semantics.
+
+The target authorization request exposes %update, %delete and %action-Edit. Prepare is a draft determine action and is not exposed under requested_authorizations-%action in this system. Do not reintroduce %action-Prepare or %assoc-_Items from generic examples. The future draft implementation must handle the supported Edit permission and check its generated result component in ADT.
+
+Target runtime disproved the deleted-child candidate: both child READ and child BY _PurchaseOrder return no rows after delete, with one failed PurchaseOrderItem entry and no reported message. The old navigation fails with NOT_FOUND even for the active BO. Do not implement post-delete child navigation.
+
+The active consumer-side probe establishes the useful direction: capture the complete root %tky before deleting a child, then navigate root BY _Items after DELETE and before COMMIT. For one deletion it returned only item 00010; for the last deletion it returned an empty item collection while the root remained readable. FAILED and REPORTED were empty, %is_draft was off, and the header totals remained 2400 then 0 under the existing active implementation.
+
+ZJP_CL_PO_DRAFT_PROBE first applied that pattern diagnostically to a saved two-item draft and to a draft-only item created and deleted before its first COMMIT. It preserved the generated single child key and used %tky/%is_draft rather than rebuilding technical identity. That probe established navigation behavior; the subsequent `removeItem` implementation and runtime evidence below establish corrected aggregation.
+
+## Phase 2.6 — Known-root technical removal, runtime-verified
+
+The learner verified the same post-delete root navigation for active, saved-draft and buffer-only draft data. Full root %tky remains usable after its child has disappeared; root BY _Items returns surviving items or an empty collection. This supplies the missing parent context without changing the child key. The old handler still reported the committed-parent diagnostic and left draft totals stale at 1500 / 1900; navigation success alone was not aggregate correctness.
+
+The technical root action removeItem now owns both managed deletion and recalculation. Its abstract CDS parameter carries only the item UUID; the action's implicit root %tky supplies the parent and draft identity. The handler checks membership in the root's buffered composition before deletion, uses the returned child %tky for internal DELETE, navigates from the preserved root after deletion, sums surviving item totals and updates readonly root TotalAmount via local-mode EML. Zero surviving items explicitly means zero total.
+
+Declaring child DELETE internal prevents external consumers from bypassing the aggregate-maintaining operation. This is a Phase 2.6 technical operation, not a Submit/Approve/Send business action. The action delegates authorization to root update; the existing study-only permission stub is unchanged. RAP still performs locks and persistence. No direct SQL lookup, draft-table access, handler-instance bridge or CLASS-DATA is needed.
+
+The existing create/input-change calculation now groups by full %tky and separates siblings by %is_draft as well as parent UUID. Arithmetic and determination triggers are unchanged; Supplier, Quantity, NetPrice, initializeStatus and authorization method bodies are preserved. An active UUID and its draft UUID represent different transactional instances.
+
+Nested EML failure does not imply automatic rollback of earlier successful changes inside an action. All stages check FAILED and forward REPORTED; any failed action requires caller rollback before commit. A foreign item is rejected before any mutation. The active regression checks this boundary, while the draft test checks totals before and after saving each removal.
+
+Target lessons retained: draft root CREATE and CBA are separate calls; CBA uses the mapped full draft parent key and explicit draft targets. Discard uses the target-generated %key signature with implicit draft selection, and separately declared FAILED/REPORTED responses. Do not mechanically exchange %key and %tky.
+
+These are implementation decisions and locally reviewed sources. Only the earlier navigation probes and Phase 2.5 baseline have SAP evidence. The learner's SAP run verifies the `removeItem` action, internal DELETE boundary, draft-aware grouping and active/draft runtime assertions. Active removal reaches totals 2400 then 0; buffer-only draft removal reaches 1500 then 0; saved-draft removal reaches 1900, 1500 and 0 with persistence checks and cleanup. Phase 2.6 is complete; Phase 2.7 is not started.
+
+The ownership-negative test also establishes that rejection is side-effect-free: FAILED identifies `removeItem` on the requested active root, REPORTED contains `Item does not belong to this Purchase Order.`, and both roots, all three items and totals remain unchanged. The earlier 53-character text was truncated to 50 characters by `new_message_with_text` on this target; keeping the business message within that limit preserves exact testable wording.
+
+Technical RAP draft remains separate from business `Status = 'DRAFT'`. `%is_draft` and draft persistence describe an editing instance; the business status describes the procurement lifecycle. The runtime tests preserve and check both concepts rather than treating one as the other.

@@ -2,7 +2,7 @@
 
 Phase 1 is complete: the learner manually created and activated the two tables and four CDS entities in SAP S/4HANA using ADT/Eclipse. The [domain model guide](docs/phase-1-domain-model.md) includes the two confirmed compatibility corrections and synchronized source listings. Activation is learner-reported; managed CRUD/composition now also has Phase 2 SAP runtime evidence.
 
-Current checkpoint: [Phase 2.5A Supplier validation](docs/phase-2-5a-supplier-validation.md) is runtime-verified complete. Blank Supplier create/update are rejected during save, persistence remains unchanged, and the valid regression flow passes. The persisted-parent lookup still does not support uncommitted-item deletion. The repository is ready for Phase 2.5B; no new validation has been added yet.
+Current checkpoint: [Phase 2.6](docs/phase-2-6-technical-draft.md) is SAP runtime-verified complete. Root-bound `removeItem` is the supported item deletion path for active and draft instances; it checks ownership, uses managed internal child DELETE and recalculates header totals. RAP technical draft identity remains distinct from business `Status = 'DRAFT'`. Phase 2.7 has not started.
 
 | Folder | Planned content |
 | --- | --- |

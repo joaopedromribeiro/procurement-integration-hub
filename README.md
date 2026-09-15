@@ -2,7 +2,7 @@
 
 A guided SAP portfolio project connecting a custom procurement application to an external supplier portal.
 
-**Current milestone: Phase 2.5A runtime-verified; ready for Phase 2.5B.** Blank Supplier create/update are rejected during save with field-specific errors and unchanged persistence. The valid totals/deletion regression flow passes. The persisted-parent lookup still does not support uncommitted-item deletion. Phase 2.5B has not started.
+**Current milestone: Phase 2.6 is SAP runtime-verified complete.** Technical RAP draft is enabled, and root-bound `removeItem` is the supported ownership-safe item deletion path for active and draft instances. It keeps business `Status = 'DRAFT'` distinct from RAP technical draft state. Phase 2.7 has not started.
 
 Published repository: [Procurement Integration Hub on GitHub](https://github.com/joaopedromribeiro/procurement-integration-hub). The local main branch tracks origin/main. New working-tree edits must be committed and pushed before they appear on GitHub.
 
@@ -37,7 +37,7 @@ All runtime components above are planned. Phase 5 connects the dispatcher and CA
 | Planned technology | Intended evidence | Status |
 | --- | --- | --- |
 | ABAP Cloud and CDS view entities | Activated tables and composed CDS model | Phase 1 complete; successful ADT activation reported by learner |
-| Managed RAP and EML | BO behavior and ABAP runtime checks | CRUD/composition, Status, item/header totals and Supplier validation verified in SAP |
+| Managed RAP and EML | BO behavior and ABAP runtime checks | CRUD/composition, validations, determinations, technical draft and ownership-safe active/draft `removeItem` verified in SAP |
 | OData V4, SAP Fiori Elements | Service metadata and buyer UI demonstration | Planned, phase 3 |
 | SAP CAP, Node.js, TypeScript, CDS, SQLite | Running portal API and handler tests | Planned, phase 4 |
 | REST, JSON | Direct round trip with receipts and supplier response | Planned, phase 5 |
@@ -93,7 +93,7 @@ Phase 9 will replace the delivery trigger with committed RAP business events, SA
 
 The six domain-model objects have been activated in the learner's SAP system; there is no transactional application or OData service yet. The [Phase 1 ADT guide](abap-rap/docs/phase-1-domain-model.md) contains the manual reproduction steps and confirmed compatibility fixes. The source files are not a serialized ABAP import package. No npm installation is needed.
 
-The [Phase 2.5A guide](abap-rap/docs/phase-2-5a-supplier-validation.md) records the successful positive/negative SAP runtime evidence. The repository is ready for Phase 2.5B; no 2.5B source exists yet.
+The [Phase 2.5A guide](abap-rap/docs/phase-2-5a-supplier-validation.md) records the successful Supplier-validation evidence. The [Phase 2.5B guide](abap-rap/docs/phase-2-5b-quantity-validation.md) contains the Quantity-validation source and SAP runtime test procedure; the successful SAP execution evidence is recorded.
 
 The [Phase 0 review exercise](docs/phase-0-review.md) remains available as architecture background. The Phase 0 ZIP is an archived foundation snapshot and does not contain Phase 1 changes.
 
@@ -139,7 +139,7 @@ No runtime screenshots yet. Verified screenshots will be added under `docs/scree
 | 10 | API Management | Proxy authentication, throttling and routing verified |
 | 11 | Tests and portfolio presentation | Evidence-backed README, diagrams, screenshots and lessons |
 
-Phases 0 and 1 and Phase 2.1–2.5A are complete within their documented scope. Phase 2.5B is ready to start. Later validations, draft and actions remain pending. Phases 3–11 remain unstarted.
+Phases 0 and 1 and Phase 2.1–2.6 are complete within their documented scope. [Phase 2.6](abap-rap/docs/phase-2-6-technical-draft.md) is SAP runtime-verified, including active, saved-draft and buffer-only draft item removal, ownership rejection and total recalculation. Phase 2.7 business actions and Phases 3–11 remain unstarted.
 
 ## Lessons learned
 

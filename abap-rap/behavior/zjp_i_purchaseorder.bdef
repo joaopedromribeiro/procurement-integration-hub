@@ -1,9 +1,11 @@
 managed implementation in class ZBP_I_PURCHASEORDER unique;
 strict ( 2 );
+with draft;
 
 define behavior for ZJP_I_PurchaseOrder alias PurchaseOrder
 persistent table zjp_po_h
-lock master
+draft table zjp_po_hd
+lock master total etag LastChangedAt
 authorization master ( instance )
 etag master LocalLastChangedAt
 {
@@ -11,7 +13,20 @@ etag master LocalLastChangedAt
   update;
   delete;
 
-  association _Items { create; }
+  association _Items { create; with draft; }
+
+  action ( authorization : update ) removeItem parameter ZJP_A_RemoveItem;
+
+  draft action Edit;
+  draft action Activate;
+  draft action Discard;
+  draft action Resume;
+  draft determine action Prepare
+  {
+    validation validateSupplier;
+    validation PurchaseOrderItem~validateQuantity;
+    validation PurchaseOrderItem~validateNetPrice;
+  }
 
   determination initializeStatus on modify { create; }
   validation validateSupplier on save { create; field Supplier; }
@@ -60,17 +75,19 @@ etag master LocalLastChangedAt
 
 define behavior for ZJP_I_PurchaseOrderItem alias PurchaseOrderItem
 persistent table zjp_po_i
+draft table zjp_po_id
 lock dependent by _PurchaseOrder
 authorization dependent by _PurchaseOrder
 etag master LocalLastChangedAt
 {
   update;
-  delete;
+  internal delete;
 
-  association _PurchaseOrder;
+  association _PurchaseOrder { with draft; }
 
   determination calculateTotalAmount on modify { create; field Quantity, NetPrice; }
-  determination recalculateHeaderAfterDelete on modify { delete; }
+  validation validateQuantity on save { create; field Quantity; }
+  validation validateNetPrice on save { create; field NetPrice; }
 
   field ( readonly, numbering : managed ) PurchaseOrderItemUUID;
   field ( readonly ) PurchaseOrderUUID, TotalAmount, LocalLastChangedAt;

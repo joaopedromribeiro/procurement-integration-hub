@@ -1,0 +1,5 @@
+@EndUserText.label: 'Purchase order item removal parameter'
+define abstract entity ZJP_A_RemoveItem
+{
+  PurchaseOrderItemUUID : sysuuid_x16;
+}

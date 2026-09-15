@@ -218,3 +218,11 @@ On exhausted outbound failures, preserve ERROR, the last safe message and the im
 | Old delivery-date response arrives after newer one | No date regression; duplicate success or explicit conflict |
 
 These cases define later tests. Phase 0 validates document consistency only.
+
+## Phase 2.6 internal EML contract — runtime-verified
+
+The root-bound technical removeItem operation accepts PurchaseOrderItemUUID through abstract parameter ZJP_A_RemoveItem and requires the complete root %tky, including %is_draft, as instance identity. It returns no action result; callers read the root/composition afterward. The handler verifies membership in that exact root/draft instance before deleting, then updates the total from surviving buffered items. Call sequentially for multiple removals from one root.
+
+Standard child DELETE is internal to the behavior implementation; external EML uses removeItem. Root DELETE remains the whole-composition cleanup operation. Callers must inspect FAILED/REPORTED and roll back failed requests before committing. Missing/foreign items are rejected without mutation; this operation is not an idempotent deletion receipt API.
+
+This Phase 2.6 technical BO contract is SAP runtime-verified for active, saved-draft and buffer-only draft instances, including ownership rejection without side effects. It defines no OData URL, external procurement message, UI projection or Phase 2.7 business action. Future buyer UI exposure must preserve this deletion boundary; integration clients do not edit technical drafts. See the [implementation and tests](abap-rap/docs/phase-2-6-technical-draft.md).

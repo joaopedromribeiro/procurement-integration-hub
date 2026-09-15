@@ -47,4 +47,4 @@ PASS: header totals 1900/2650/2800/2400/0; cleanup complete.
 PASS: Supplier validation rejects blank create/update; valid flow and cleanup pass.
 ```
 
-This is learner-supplied SAP runtime evidence; the assistant did not independently connect to SAP. Phase 2.5A is complete. Phase 2.5B has not started.
+This is learner-supplied SAP runtime evidence; the assistant did not independently connect to SAP. Phase 2.5A is complete. [Phase 2.5B](phase-2-5b-quantity-validation.md) is now SAP runtime-verified complete.
