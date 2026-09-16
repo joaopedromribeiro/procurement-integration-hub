@@ -11,7 +11,7 @@ etag master LocalLastChangedAt
 {
   create;
   update ( precheck );
-  delete;
+  delete ( precheck );
 
   association _Items { create ( precheck ); with draft; }
 
@@ -19,6 +19,7 @@ etag master LocalLastChangedAt
   action ( authorization : update ) submit;
   action ( authorization : update ) approve;
   action ( authorization : update ) reject parameter ZJP_A_Reject;
+  action ( authorization : update ) cancel;
 
   draft action Edit;
   draft action Activate;

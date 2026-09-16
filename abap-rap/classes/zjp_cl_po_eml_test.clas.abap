@@ -7,6 +7,11 @@ CLASS zjp_cl_po_eml_test DEFINITION
   PRIVATE SECTION.
     DATA console TYPE REF TO if_oo_adt_classrun_out.
 
+    " UUIDs of the terminal lifecycle fixtures created by THIS execution.
+    " Collected so the final summary can select by exact key instead of by
+    " Status or Supplier, which would also pick up residue from earlier runs.
+    DATA lifecycle_uuids TYPE STANDARD TABLE OF sysuuid_x16 WITH EMPTY KEY.
+
     METHODS test_supplier_required
       IMPORTING existing_uuid TYPE sysuuid_x16 OPTIONAL
       RETURNING VALUE(success) TYPE abap_bool.
@@ -56,6 +61,18 @@ CLASS zjp_cl_po_eml_test DEFINITION
                 expected_items        TYPE i
                 expected_status       TYPE zjp_po_h-status OPTIONAL
                 expected_header_total TYPE zjp_po_h-total_amount OPTIONAL
+                " Initial means the row must still carry no number, which is
+                " the correct expectation for every order that has not been
+                " through a successful submit.
+                expected_number       TYPE zjp_po_h-purchase_order_number OPTIONAL
+      RETURNING VALUE(success) TYPE abap_bool.
+
+    METHODS read_order_number
+      IMPORTING order_uuid          TYPE sysuuid_x16
+      RETURNING VALUE(order_number) TYPE zjp_po_h-purchase_order_number.
+
+    METHODS check_number_format
+      IMPORTING order_number   TYPE zjp_po_h-purchase_order_number
       RETURNING VALUE(success) TYPE abap_bool.
 
     METHODS test_submitted_immutability
@@ -70,13 +87,26 @@ CLASS zjp_cl_po_eml_test DEFINITION
     METHODS test_reject_lifecycle
       RETURNING VALUE(success) TYPE abap_bool.
 
+    METHODS test_cancel_lifecycle
+      RETURNING VALUE(success) TYPE abap_bool.
+
+    METHODS create_open_fixture
+      IMPORTING supplier          TYPE zjp_po_h-supplier
+      RETURNING VALUE(order_uuid) TYPE sysuuid_x16.
+
     METHODS create_decision_fixture
       IMPORTING supplier          TYPE zjp_po_h-supplier
       RETURNING VALUE(order_uuid) TYPE sysuuid_x16.
 
-    METHODS delete_decision_fixture
-      IMPORTING order_uuid     TYPE sysuuid_x16
-      RETURNING VALUE(success) TYPE abap_bool.
+    METHODS expect_delete_rejected
+      IMPORTING order_uuid      TYPE sysuuid_x16
+                expected_status TYPE zjp_po_h-status
+                expected_items  TYPE i
+                expected_total  TYPE zjp_po_h-total_amount
+                expected_number TYPE zjp_po_h-purchase_order_number OPTIONAL
+      RETURNING VALUE(success)  TYPE abap_bool.
+
+    METHODS print_lifecycle_summary.
 
     METHODS check_decision_database
       IMPORTING order_uuid      TYPE sysuuid_x16
@@ -84,6 +114,7 @@ CLASS zjp_cl_po_eml_test DEFINITION
                 expected_total  TYPE zjp_po_h-total_amount
                 expected_origin TYPE zjp_po_h-rejection_origin OPTIONAL
                 expected_reason TYPE zjp_po_h-rejection_reason OPTIONAL
+                expected_number TYPE zjp_po_h-purchase_order_number OPTIONAL
       RETURNING VALUE(success) TYPE abap_bool.
 ENDCLASS.
 
@@ -643,6 +674,16 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     ENDIF.
 
     out->write( 'PASS: Phase 2.7C approve and reject transitions with lifecycle immutability.' ).
+
+    IF test_cancel_lifecycle( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    out->write( 'PASS: Phase 2.7D-1 cancel lifecycle verified.' ).
+    out->write( 'PASS: Phase 2.7D-2 root DELETE is limited to DRAFT.' ).
+    out->write( 'PASS: PurchaseOrderNumber is allocated on submit only.' ).
+
+    print_lifecycle_summary( ).
   ENDMETHOD.
 
   METHOD test_supplier_required.
@@ -1339,13 +1380,22 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     IF save_changes( ) = abap_false.
       RETURN.
     ENDIF.
+    DATA(submit_number) = read_order_number( submit_uuid ).
+    console->write( name = 'Allocated PurchaseOrderNumber' data = submit_number ).
+    IF check_number_format( submit_number ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: submit did not allocate PO plus eight digits.' ).
+      RETURN.
+    ENDIF.
     IF check_submit_database( order_uuid = submit_uuid
                               expected_headers = 1 expected_items = 1
                               expected_status = 'SUBMITTED'
-                              expected_header_total = 1500 ) = abap_false.
+                              expected_header_total = 1500
+                              expected_number = submit_number ) = abap_false.
       RETURN.
     ENDIF.
     console->write( 'PASS: SUBMITTED status is persisted in ZJP_PO_H.' ).
+    console->write( 'PASS: submit allocated PurchaseOrderNumber as PO + 8 digits.' ).
 
     " A second submit must be rejected because the order is no longer DRAFT.
     MODIFY ENTITIES OF ZJP_I_PurchaseOrder
@@ -1392,33 +1442,27 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
       RETURN.
     ENDIF.
     ROLLBACK ENTITIES.
+    " A refused second submit must not draw or replace a number.
     IF check_submit_database( order_uuid = submit_uuid
                               expected_headers = 1 expected_items = 1
                               expected_status = 'SUBMITTED'
-                              expected_header_total = 1500 ) = abap_false.
+                              expected_header_total = 1500
+                              expected_number = submit_number ) = abap_false.
       RETURN.
     ENDIF.
     console->write( 'PASS: re-submit rejected; persisted SUBMITTED order unchanged.' ).
+    console->write( 'PASS: a refused re-submit kept the original PO number.' ).
 
-    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
-      ENTITY PurchaseOrder
-        DELETE FROM VALUE #( ( PurchaseOrderUUID = submit_uuid ) )
-      FAILED DATA(failed_submit_cleanup)
-      REPORTED DATA(reported_submit_cleanup).
-    console->write( name = 'Submit cleanup FAILED' data = failed_submit_cleanup ).
-    console->write( name = 'Submit cleanup REPORTED' data = reported_submit_cleanup ).
-    IF failed_submit_cleanup IS NOT INITIAL.
-      ROLLBACK ENTITIES.
-      console->write( 'STOP: submit fixture cleanup failed; retain the printed UUID.' ).
-      RETURN.
-    ENDIF.
-    IF save_changes( ) = abap_false.
-      RETURN.
-    ENDIF.
-    success = check_submit_database( order_uuid = submit_uuid
-                                     expected_headers = 0 expected_items = 0 ).
+    " Phase 2.7D-2 replaced this teardown. Deleting the SUBMITTED fixture is
+    " no longer valid behavior, so the assertion is inverted and the row is
+    " left behind on purpose.
+    success = expect_delete_rejected( order_uuid = submit_uuid
+                                      expected_status = 'SUBMITTED'
+                                      expected_items = 1
+                                      expected_total = 1500
+                                      expected_number = submit_number ).
     IF success = abap_true.
-      console->write( 'PASS: submit fixture cleanup complete.' ).
+      console->write( 'PASS: SUBMITTED root DELETE rejected; fixture retained.' ).
     ENDIF.
   ENDMETHOD.
 
@@ -1550,6 +1594,27 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     ENDIF.
   ENDMETHOD.
 
+  METHOD read_order_number.
+    " Read-only. The allocated number is environmental, so the tests capture
+    " whatever this run drew and compare later lifecycle states against that
+    " captured value instead of asserting a literal like PO00000002.
+    SELECT SINGLE purchase_order_number
+      FROM zjp_po_h
+      WHERE purchase_order_uuid = @order_uuid
+      INTO @order_number.
+  ENDMETHOD.
+
+  METHOD check_number_format.
+    " Approved business format: 'PO' plus exactly eight digits, left aligned
+    " in the CHAR(20) field. Checked structurally, never against a literal.
+    success = xsdbool( order_number(2) = 'PO'
+                       AND order_number+2(8) CO '0123456789'
+                       AND order_number+10 IS INITIAL ).
+    IF success = abap_false.
+      console->write( name = 'Unexpected PurchaseOrderNumber' data = order_number ).
+    ENDIF.
+  ENDMETHOD.
+
   METHOD check_submit_database.
     " Read-only verification; Phase 2.7A must not allocate PurchaseOrderNumber.
     SELECT purchase_order_uuid, supplier, total_amount, status,
@@ -1579,7 +1644,8 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
       success = xsdbool( headers_db[ 1 ]-status = expected_status
                         AND headers_db[ 1 ]-total_amount = expected_header_total
                         AND persisted_item_sum = expected_header_total
-                        AND headers_db[ 1 ]-purchase_order_number IS INITIAL ).
+                        AND headers_db[ 1 ]-purchase_order_number
+                              = expected_number ).
     ENDIF.
 
     IF success = abap_false.
@@ -1668,10 +1734,18 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     IF save_changes( ) = abap_false.
       RETURN.
     ENDIF.
+    DATA(lock_number) = read_order_number( lock_uuid ).
+    console->write( name = 'Immutability fixture PO number' data = lock_number ).
+    IF check_number_format( lock_number ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: submit did not allocate PO plus eight digits.' ).
+      RETURN.
+    ENDIF.
     IF check_submit_database( order_uuid = lock_uuid
                               expected_headers = 1 expected_items = 2
                               expected_status = 'SUBMITTED'
-                              expected_header_total = 1900 ) = abap_false.
+                              expected_header_total = 1900
+                              expected_number = lock_number ) = abap_false.
       RETURN.
     ENDIF.
     console->write( 'PASS: immutability fixture is SUBMITTED with total 1900.' ).
@@ -1802,33 +1876,26 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     ENDIF.
     console->write( 'PASS: all six submitted-order mutations were rejected.' ).
 
+    " Every rejected mutation must also leave the allocated number alone.
     IF check_submit_database( order_uuid = lock_uuid
                               expected_headers = 1 expected_items = 2
                               expected_status = 'SUBMITTED'
-                              expected_header_total = 1900 ) = abap_false.
+                              expected_header_total = 1900
+                              expected_number = lock_number ) = abap_false.
       RETURN.
     ENDIF.
     console->write( 'PASS: the persisted submitted order is unchanged.' ).
+    console->write( 'PASS: rejected mutations left the PO number untouched.' ).
 
-    " Root DELETE stays allowed in Phase 2.7B.
-    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
-      ENTITY PurchaseOrder
-        DELETE FROM VALUE #( ( PurchaseOrderUUID = lock_uuid ) )
-      FAILED DATA(failed_lock_cleanup)
-      REPORTED DATA(reported_lock_cleanup).
-    console->write( name = 'Immutability cleanup FAILED' data = failed_lock_cleanup ).
-    IF failed_lock_cleanup IS NOT INITIAL.
-      ROLLBACK ENTITIES.
-      console->write( 'STOP: deleting the submitted order failed.' ).
-      RETURN.
-    ENDIF.
-    IF save_changes( ) = abap_false.
-      RETURN.
-    ENDIF.
-    success = check_submit_database( order_uuid = lock_uuid
-                                     expected_headers = 0 expected_items = 0 ).
+    " Root DELETE was allowed here in Phase 2.7B and is rejected from Phase
+    " 2.7D-2 onwards. This two-item fixture is deliberate residue.
+    success = expect_delete_rejected( order_uuid = lock_uuid
+                                      expected_status = 'SUBMITTED'
+                                      expected_items = 2
+                                      expected_total = 1900
+                                      expected_number = lock_number ).
     IF success = abap_true.
-      console->write( 'PASS: a submitted root can still be deleted; cleanup done.' ).
+      console->write( 'PASS: SUBMITTED two-item root DELETE rejected; kept.' ).
     ENDIF.
   ENDMETHOD.
 
@@ -1926,6 +1993,7 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
                                      expected_headers = 0 expected_items = 0 ).
     IF success = abap_true.
       console->write( 'PASS: DRAFT control fixture cleanup complete.' ).
+      console->write( 'PASS: DRAFT root DELETE succeeds and removes its items.' ).
     ENDIF.
   ENDMETHOD.
 
@@ -1938,6 +2006,15 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
 
     DATA(approve_uuid) = create_decision_fixture( 'SUP010' ).
     IF approve_uuid IS INITIAL.
+      RETURN.
+    ENDIF.
+    " The fixture is already SUBMITTED, so submit has drawn its number.
+    " Every later state must show exactly this captured value.
+    DATA(approve_number) = read_order_number( approve_uuid ).
+    console->write( name = 'Fixture SUP010 PO number' data = approve_number ).
+    IF check_number_format( approve_number ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: submit did not allocate PO plus eight digits.' ).
       RETURN.
     ENDIF.
 
@@ -1988,7 +2065,8 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     ENDIF.
     IF check_decision_database( order_uuid = approve_uuid
                                 expected_status = 'APPROVED'
-                                expected_total = 1500 ) = abap_false.
+                                expected_total = 1500
+                                expected_number = approve_number ) = abap_false.
       RETURN.
     ENDIF.
     console->write( 'PASS: SUBMITTED to APPROVED persisted with total 1500.' ).
@@ -2122,11 +2200,20 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
 
     IF check_decision_database( order_uuid = approve_uuid
                                 expected_status = 'APPROVED'
-                                expected_total = 1500 ) = abap_false.
+                                expected_total = 1500
+                                expected_number = approve_number ) = abap_false.
       RETURN.
     ENDIF.
 
-    success = delete_decision_fixture( approve_uuid ).
+    " Phase 2.7D-2: an APPROVED order can no longer be deleted.
+    success = expect_delete_rejected( order_uuid = approve_uuid
+                                      expected_status = 'APPROVED'
+                                      expected_items = 1
+                                      expected_total = 1500
+                                      expected_number = approve_number ).
+    IF success = abap_true.
+      console->write( 'PASS: APPROVED root DELETE rejected; fixture retained.' ).
+    ENDIF.
   ENDMETHOD.
 
   METHOD test_reject_lifecycle.
@@ -2137,6 +2224,15 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
 
     DATA(reject_uuid) = create_decision_fixture( 'SUP011' ).
     IF reject_uuid IS INITIAL.
+      RETURN.
+    ENDIF.
+    " The fixture is already SUBMITTED, so submit has drawn its number.
+    " Every later state must show exactly this captured value.
+    DATA(reject_number) = read_order_number( reject_uuid ).
+    console->write( name = 'Fixture SUP011 PO number' data = reject_number ).
+    IF check_number_format( reject_number ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: submit did not allocate PO plus eight digits.' ).
       RETURN.
     ENDIF.
 
@@ -2233,7 +2329,8 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
                                 expected_status = 'REJECTED'
                                 expected_total = 1500
                                 expected_origin = 'APPROVER'
-                                expected_reason = reason_value ) = abap_false.
+                                expected_reason = reason_value
+                                expected_number = reject_number ) = abap_false.
       RETURN.
     ENDIF.
     console->write( 'PASS: SUBMITTED to REJECTED persisted with origin APPROVER.' ).
@@ -2293,11 +2390,556 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
                                 expected_status = 'REJECTED'
                                 expected_total = 1500
                                 expected_origin = 'APPROVER'
-                                expected_reason = reason_value ) = abap_false.
+                                expected_reason = reason_value
+                                expected_number = reject_number ) = abap_false.
       RETURN.
     ENDIF.
 
-    success = delete_decision_fixture( reject_uuid ).
+    " Phase 2.7D-2: a REJECTED order can no longer be deleted.
+    success = expect_delete_rejected( order_uuid = reject_uuid
+                                      expected_status = 'REJECTED'
+                                      expected_items = 1
+                                      expected_total = 1500
+                                      expected_number = reject_number ).
+    IF success = abap_true.
+      console->write( 'PASS: REJECTED root DELETE rejected; fixture retained.' ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD test_cancel_lifecycle.
+    DATA(open_text) = CONV string( 'Only open orders can be cancelled.' ).
+    DATA(submit_text) =
+      CONV string( 'Only orders in status DRAFT can be submitted.' ).
+    DATA(decided_text) = CONV string( 'Only submitted orders can be decided.' ).
+    DATA(root_text) = CONV string( 'Only draft orders can be changed.' ).
+    DATA(item_text) = CONV string( 'Only draft order items can change.' ).
+    DATA(cba_text) = CONV string( 'Items can be added to draft orders only.' ).
+    DATA(remove_text) = CONV string( 'Only draft orders can lose items.' ).
+    DATA(reason_value) = CONV zjp_po_h-rejection_reason( 'Cancel guard fixture' ).
+
+    " Case 1: an active order in business Status DRAFT is cancellable. This
+    " is a committed active instance, not a RAP technical draft.
+    DATA(open_uuid) = create_open_fixture( 'SUP012' ).
+    IF open_uuid IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = open_uuid ) )
+        RESULT DATA(open_orders)
+      ENTITY PurchaseOrder BY \_Items
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = open_uuid ) )
+        RESULT DATA(open_items)
+      FAILED DATA(failed_open_read).
+    IF failed_open_read IS NOT INITIAL OR lines( open_orders ) <> 1
+       OR lines( open_items ) <> 1.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: cancel fixture could not be read.' ).
+      RETURN.
+    ENDIF.
+    DATA(open_key) = open_orders[ 1 ]-%tky.
+    DATA(open_item_key) = open_items[ 1 ]-%tky.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE cancel FROM VALUE #( ( %tky = open_key ) )
+      FAILED DATA(failed_cancel)
+      REPORTED DATA(reported_cancel).
+    console->write( name = 'cancel FAILED - expect empty' data = failed_cancel ).
+    console->write( name = 'cancel REPORTED' data = reported_cancel ).
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( %tky = open_key ) )
+        RESULT DATA(cancelled_orders)
+      ENTITY PurchaseOrder BY \_Items
+        ALL FIELDS WITH VALUE #( ( %tky = open_key ) )
+        RESULT DATA(cancelled_items)
+      FAILED DATA(failed_cancelled_read).
+    IF failed_cancel IS NOT INITIAL OR failed_cancelled_read IS NOT INITIAL
+       OR lines( cancelled_orders ) <> 1 OR lines( cancelled_items ) <> 1
+       OR cancelled_orders[ 1 ]-Status <> 'CANCELLED'
+       OR cancelled_orders[ 1 ]-TotalAmount <> 1500
+       OR cancelled_items[ 1 ]-TotalAmount <> 1500
+       OR cancelled_orders[ 1 ]-PurchaseOrderNumber IS NOT INITIAL
+       OR cancelled_orders[ 1 ]-RejectionOrigin IS NOT INITIAL
+       OR cancelled_orders[ 1 ]-RejectionReason IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: cancel must set CANCELLED and change nothing else.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    IF check_decision_database( order_uuid = open_uuid
+                                expected_status = 'CANCELLED'
+                                expected_total = 1500 ) = abap_false.
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: DRAFT to CANCELLED persisted with total 1500.' ).
+    " This fixture never went through submit, so it never drew a number. The
+    " buffer assertion above already required PurchaseOrderNumber to stay
+    " initial, and check_decision_database was called without an expected
+    " number, which asserts the same thing on the persisted row.
+    console->write( 'PASS: a cancelled DRAFT carries no PurchaseOrderNumber.' ).
+
+    " Case 2: CANCELLED is terminal, so every further decision is refused.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE cancel FROM VALUE #( ( %tky = open_key ) )
+      FAILED DATA(failed_recancel)
+      REPORTED DATA(reported_recancel).
+    DATA(recancel_blocked) = xsdbool( line_exists(
+      failed_recancel-purchaseorder[ %tky = open_key
+        %op-%action-cancel = if_abap_behv=>mk-on ] ) ).
+    DATA(recancel_message) = abap_false.
+    LOOP AT reported_recancel-purchaseorder INTO DATA(recancel_line).
+      IF recancel_line-%msg IS BOUND.
+        IF recancel_line-%msg->if_message~get_text( ) = open_text.
+          recancel_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE submit FROM VALUE #( ( %tky = open_key ) )
+      FAILED DATA(failed_submit_cancelled)
+      REPORTED DATA(reported_submit_cancelled).
+    DATA(submit_on_cancelled) = xsdbool( line_exists(
+      failed_submit_cancelled-purchaseorder[ %tky = open_key
+        %op-%action-submit = if_abap_behv=>mk-on ] ) ).
+    DATA(submit_cancelled_msg) = abap_false.
+    LOOP AT reported_submit_cancelled-purchaseorder INTO DATA(submit_line).
+      IF submit_line-%msg IS BOUND.
+        IF submit_line-%msg->if_message~get_text( ) = submit_text.
+          submit_cancelled_msg = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE approve FROM VALUE #( ( %tky = open_key ) )
+      FAILED DATA(failed_approve_cancelled)
+      REPORTED DATA(reported_approve_cancelled).
+    DATA(approve_on_cancelled) = xsdbool( line_exists(
+      failed_approve_cancelled-purchaseorder[ %tky = open_key
+        %op-%action-approve = if_abap_behv=>mk-on ] ) ).
+    DATA(approve_cancelled_msg) = abap_false.
+    LOOP AT reported_approve_cancelled-purchaseorder INTO DATA(approve_line).
+      IF approve_line-%msg IS BOUND.
+        IF approve_line-%msg->if_message~get_text( ) = decided_text.
+          approve_cancelled_msg = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE reject FROM VALUE #( (
+          %tky = open_key
+          %param-RejectionReason = 'Late objection' ) )
+      FAILED DATA(failed_reject_cancelled)
+      REPORTED DATA(reported_reject_cancelled).
+    DATA(reject_on_cancelled) = xsdbool( line_exists(
+      failed_reject_cancelled-purchaseorder[ %tky = open_key
+        %op-%action-reject = if_abap_behv=>mk-on ] ) ).
+    DATA(reject_cancelled_msg) = abap_false.
+    LOOP AT reported_reject_cancelled-purchaseorder INTO DATA(reject_line).
+      IF reject_line-%msg IS BOUND.
+        IF reject_line-%msg->if_message~get_text( ) = decided_text.
+          reject_cancelled_msg = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    IF recancel_blocked = abap_false OR recancel_message = abap_false
+       OR submit_on_cancelled = abap_false
+       OR submit_cancelled_msg = abap_false
+       OR approve_on_cancelled = abap_false
+       OR approve_cancelled_msg = abap_false
+       OR reject_on_cancelled = abap_false
+       OR reject_cancelled_msg = abap_false.
+      console->write( 'STOP: a CANCELLED order accepted a decision.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: CANCELLED refuses re-cancel, submit, approve and reject.' ).
+
+    " Case 3: the Phase 2.7C invariant must already cover CANCELLED. No
+    " CANCELLED-specific branch was added to any precheck or to removeItem.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        UPDATE FIELDS ( Supplier )
+        WITH VALUE #( ( %tky = open_key Supplier = 'SUP999' ) )
+      FAILED DATA(failed_root_cancelled)
+      REPORTED DATA(reported_root_cancelled).
+    DATA(root_on_cancelled) = xsdbool( line_exists(
+      failed_root_cancelled-purchaseorder[ %tky = open_key ] ) ).
+    DATA(root_cancelled_msg) = abap_false.
+    LOOP AT reported_root_cancelled-purchaseorder INTO DATA(root_line).
+      IF root_line-%msg IS BOUND.
+        IF root_line-%msg->if_message~get_text( ) = root_text.
+          root_cancelled_msg = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrderItem
+        UPDATE FIELDS ( Quantity )
+        WITH VALUE #( ( %tky = open_item_key Quantity = 99 ) )
+      FAILED DATA(failed_item_cancelled)
+      REPORTED DATA(reported_item_cancelled).
+    DATA(item_on_cancelled) = xsdbool( line_exists(
+      failed_item_cancelled-purchaseorderitem[ %tky = open_item_key ] ) ).
+    DATA(item_cancelled_msg) = abap_false.
+    LOOP AT reported_item_cancelled-purchaseorderitem INTO DATA(item_line).
+      IF item_line-%msg IS BOUND.
+        IF item_line-%msg->if_message~get_text( ) = item_text.
+          item_cancelled_msg = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        CREATE BY \_Items
+        FIELDS ( ItemNumber Material Quantity UnitOfMeasure NetPrice Currency )
+        WITH VALUE #( ( %tky = open_key
+          %target = VALUE #( ( %cid = 'CANCELLED_EXTRA' ItemNumber = '00090'
+                               Material = 'MAT009' Quantity = 1
+                               UnitOfMeasure = 'EA' NetPrice = '10.00'
+                               Currency = 'EUR' ) ) ) )
+      FAILED DATA(failed_cba_cancelled)
+      REPORTED DATA(reported_cba_cancelled).
+    DATA(cba_on_cancelled) = xsdbool( line_exists(
+      failed_cba_cancelled-purchaseorder[ %tky = open_key ] ) ).
+    DATA(cba_cancelled_msg) = abap_false.
+    LOOP AT reported_cba_cancelled-purchaseorder INTO DATA(cba_line).
+      IF cba_line-%msg IS BOUND.
+        IF cba_line-%msg->if_message~get_text( ) = cba_text.
+          cba_cancelled_msg = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE removeItem FROM VALUE #( (
+          %tky = open_key
+          %param-PurchaseOrderItemUUID =
+            open_item_key-PurchaseOrderItemUUID ) )
+      FAILED DATA(failed_remove_cancelled)
+      REPORTED DATA(reported_remove_cancelled).
+    DATA(remove_on_cancelled) = xsdbool( line_exists(
+      failed_remove_cancelled-purchaseorder[ %tky = open_key
+        %op-%action-removeItem = if_abap_behv=>mk-on ] ) ).
+    DATA(remove_cancelled_msg) = abap_false.
+    LOOP AT reported_remove_cancelled-purchaseorder INTO DATA(remove_line).
+      IF remove_line-%msg IS BOUND.
+        IF remove_line-%msg->if_message~get_text( ) = remove_text.
+          remove_cancelled_msg = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    IF root_on_cancelled = abap_false OR root_cancelled_msg = abap_false
+       OR item_on_cancelled = abap_false OR item_cancelled_msg = abap_false
+       OR cba_on_cancelled = abap_false OR cba_cancelled_msg = abap_false
+       OR remove_on_cancelled = abap_false
+       OR remove_cancelled_msg = abap_false.
+      console->write( 'STOP: a CANCELLED order accepted a commercial change.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: CANCELLED rejects every commercial change.' ).
+
+    IF check_decision_database( order_uuid = open_uuid
+                                expected_status = 'CANCELLED'
+                                expected_total = 1500 ) = abap_false.
+      RETURN.
+    ENDIF.
+    " Phase 2.7D-2: a CANCELLED order can no longer be deleted.
+    IF expect_delete_rejected( order_uuid = open_uuid
+                               expected_status = 'CANCELLED'
+                               expected_items = 1
+                               expected_total = 1500 ) = abap_false.
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: CANCELLED root DELETE rejected; fixture retained.' ).
+
+    " Case 4: SUBMITTED to CANCELLED.
+    DATA(submitted_uuid) = create_decision_fixture( 'SUP013' ).
+    IF submitted_uuid IS INITIAL.
+      RETURN.
+    ENDIF.
+    " The fixture is already SUBMITTED, so submit has drawn its number.
+    " Every later state must show exactly this captured value.
+    DATA(submitted_number) = read_order_number( submitted_uuid ).
+    console->write( name = 'Fixture SUP013 PO number' data = submitted_number ).
+    IF check_number_format( submitted_number ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: submit did not allocate PO plus eight digits.' ).
+      RETURN.
+    ENDIF.
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = submitted_uuid ) )
+        RESULT DATA(submitted_orders)
+      FAILED DATA(failed_submitted_read).
+    IF failed_submitted_read IS NOT INITIAL OR lines( submitted_orders ) <> 1
+       OR submitted_orders[ 1 ]-Status <> 'SUBMITTED'.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: the cancel fixture must start in SUBMITTED.' ).
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE cancel FROM VALUE #( ( %tky = submitted_orders[ 1 ]-%tky ) )
+      FAILED DATA(failed_submitted_cancel)
+      REPORTED DATA(reported_submitted_cancel).
+    console->write( name = 'SUBMITTED cancel FAILED - expect empty'
+                    data = failed_submitted_cancel ).
+    IF failed_submitted_cancel IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a SUBMITTED order must accept cancel.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    IF check_decision_database( order_uuid = submitted_uuid
+                                expected_status = 'CANCELLED'
+                                expected_total = 1500
+                                expected_number = submitted_number ) = abap_false.
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: SUBMITTED to CANCELLED persisted with total 1500.' ).
+    IF expect_delete_rejected( order_uuid = submitted_uuid
+                               expected_status = 'CANCELLED'
+                               expected_items = 1
+                               expected_total = 1500
+                               expected_number = submitted_number ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    " Case 5: APPROVED to CANCELLED. No delivery-request guard exists in
+    " Phase 2 because nothing can set IntegrationStatus or DeliveryId.
+    DATA(approved_uuid) = create_decision_fixture( 'SUP014' ).
+    IF approved_uuid IS INITIAL.
+      RETURN.
+    ENDIF.
+    " The fixture is already SUBMITTED, so submit has drawn its number.
+    " Every later state must show exactly this captured value.
+    DATA(approved_number) = read_order_number( approved_uuid ).
+    console->write( name = 'Fixture SUP014 PO number' data = approved_number ).
+    IF check_number_format( approved_number ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: submit did not allocate PO plus eight digits.' ).
+      RETURN.
+    ENDIF.
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = approved_uuid ) )
+        RESULT DATA(to_approve_orders)
+      FAILED DATA(failed_to_approve_read).
+    IF failed_to_approve_read IS NOT INITIAL OR lines( to_approve_orders ) <> 1.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: the approve-then-cancel fixture failed to read.' ).
+      RETURN.
+    ENDIF.
+    DATA(approved_key) = to_approve_orders[ 1 ]-%tky.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE approve FROM VALUE #( ( %tky = approved_key ) )
+      FAILED DATA(failed_pre_approve)
+      REPORTED DATA(reported_pre_approve).
+    IF failed_pre_approve IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: approve failed on the cancel fixture.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE cancel FROM VALUE #( ( %tky = approved_key ) )
+      FAILED DATA(failed_approved_cancel)
+      REPORTED DATA(reported_approved_cancel).
+    console->write( name = 'APPROVED cancel FAILED - expect empty'
+                    data = failed_approved_cancel ).
+    IF failed_approved_cancel IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: an APPROVED order must accept cancel.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    IF check_decision_database( order_uuid = approved_uuid
+                                expected_status = 'CANCELLED'
+                                expected_total = 1500
+                                expected_number = approved_number ) = abap_false.
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: APPROVED to CANCELLED persisted with total 1500.' ).
+    IF expect_delete_rejected( order_uuid = approved_uuid
+                               expected_status = 'CANCELLED'
+                               expected_items = 1
+                               expected_total = 1500
+                               expected_number = approved_number ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    " Case 6: REJECTED is terminal and is not a cancellable source.
+    DATA(rejected_uuid) = create_decision_fixture( 'SUP015' ).
+    IF rejected_uuid IS INITIAL.
+      RETURN.
+    ENDIF.
+    " The fixture is already SUBMITTED, so submit has drawn its number.
+    " Every later state must show exactly this captured value.
+    DATA(rejected_number) = read_order_number( rejected_uuid ).
+    console->write( name = 'Fixture SUP015 PO number' data = rejected_number ).
+    IF check_number_format( rejected_number ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: submit did not allocate PO plus eight digits.' ).
+      RETURN.
+    ENDIF.
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = rejected_uuid ) )
+        RESULT DATA(to_reject_orders)
+      FAILED DATA(failed_to_reject_read).
+    IF failed_to_reject_read IS NOT INITIAL OR lines( to_reject_orders ) <> 1.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: the reject-then-cancel fixture failed to read.' ).
+      RETURN.
+    ENDIF.
+    DATA(rejected_key) = to_reject_orders[ 1 ]-%tky.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE reject FROM VALUE #( (
+          %tky = rejected_key
+          %param-RejectionReason = reason_value ) )
+      FAILED DATA(failed_pre_reject)
+      REPORTED DATA(reported_pre_reject).
+    IF failed_pre_reject IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: reject failed on the cancel fixture.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE cancel FROM VALUE #( ( %tky = rejected_key ) )
+      FAILED DATA(failed_rejected_cancel)
+      REPORTED DATA(reported_rejected_cancel).
+    console->write( name = 'REJECTED cancel FAILED - expect rejection'
+                    data = failed_rejected_cancel ).
+    console->write( name = 'REJECTED cancel REPORTED'
+                    data = reported_rejected_cancel ).
+    DATA(rejected_cancel_blocked) = xsdbool( line_exists(
+      failed_rejected_cancel-purchaseorder[ %tky = rejected_key
+        %op-%action-cancel = if_abap_behv=>mk-on ] ) ).
+    DATA(rejected_cancel_msg) = abap_false.
+    LOOP AT reported_rejected_cancel-purchaseorder INTO DATA(rejected_line).
+      IF rejected_line-%msg IS BOUND.
+        IF rejected_line-%msg->if_message~get_text( ) = open_text.
+          rejected_cancel_msg = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    IF rejected_cancel_blocked = abap_false
+       OR rejected_cancel_msg = abap_false.
+      console->write( 'STOP: a REJECTED order accepted cancel.' ).
+      RETURN.
+    ENDIF.
+    IF check_decision_database( order_uuid = rejected_uuid
+                                expected_status = 'REJECTED'
+                                expected_total = 1500
+                                expected_origin = 'APPROVER'
+                                expected_reason = reason_value
+                                expected_number = rejected_number ) = abap_false.
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: REJECTED refuses cancel and stays REJECTED.' ).
+
+    success = expect_delete_rejected( order_uuid = rejected_uuid
+                                      expected_status = 'REJECTED'
+                                      expected_items = 1
+                                      expected_total = 1500
+                                      expected_number = rejected_number ).
+  ENDMETHOD.
+
+  METHOD create_open_fixture.
+    " One active root with one item, 2 x 750 = 1500, committed and left in
+    " business Status DRAFT. Unlike create_decision_fixture it does not submit.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        CREATE FIELDS ( Supplier CompanyCode Currency )
+        WITH VALUE #( ( %cid = 'OPEN_ROOT'
+                        Supplier = supplier
+                        CompanyCode = '1000'
+                        Currency = 'EUR' ) )
+        CREATE BY \_Items
+        FIELDS ( ItemNumber Material Quantity UnitOfMeasure NetPrice Currency )
+        WITH VALUE #( ( %cid_ref = 'OPEN_ROOT'
+          %target = VALUE #( ( %cid = 'OPEN_ITEM' ItemNumber = '00010'
+                               Material = 'MAT001' Quantity = 2
+                               UnitOfMeasure = 'EA' NetPrice = '750.00'
+                               Currency = 'EUR' ) ) ) )
+      MAPPED DATA(mapped_open)
+      FAILED DATA(failed_open_create)
+      REPORTED DATA(reported_open_create).
+    console->write( name = 'Open fixture FAILED' data = failed_open_create ).
+    console->write( name = 'Open fixture REPORTED' data = reported_open_create ).
+    IF failed_open_create IS NOT INITIAL
+       OR NOT line_exists( mapped_open-purchaseorder[ %cid = 'OPEN_ROOT' ] ).
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: open fixture creation failed.' ).
+      RETURN.
+    ENDIF.
+    DATA(fixture_uuid) = mapped_open-purchaseorder[
+      %cid = 'OPEN_ROOT' ]-PurchaseOrderUUID.
+    console->write( name = 'Open fixture UUID - retain for diagnosis'
+                    data = fixture_uuid ).
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = fixture_uuid ) )
+        RESULT DATA(fixture_orders)
+      FAILED DATA(failed_fixture_read).
+    IF failed_fixture_read IS NOT INITIAL OR lines( fixture_orders ) <> 1
+       OR fixture_orders[ 1 ]-Status <> 'DRAFT'
+       OR fixture_orders[ 1 ]-TotalAmount <> 1500.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: open fixture must start in DRAFT with total 1500.' ).
+      RETURN.
+    ENDIF.
+    APPEND fixture_uuid TO lifecycle_uuids.
+    order_uuid = fixture_uuid.
   ENDMETHOD.
 
   METHOD create_decision_fixture.
@@ -2362,29 +3004,132 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     IF save_changes( ) = abap_false.
       RETURN.
     ENDIF.
+    APPEND fixture_uuid TO lifecycle_uuids.
     order_uuid = fixture_uuid.
   ENDMETHOD.
 
-  METHOD delete_decision_fixture.
+  METHOD expect_delete_rejected.
+    " Phase 2.7D-2: a fixture that has reached a terminal business state is
+    " deliberate residue. It can no longer be removed through managed RAP,
+    " direct SQL cleanup is forbidden, and a test-only deletion backdoor in
+    " production behavior is not acceptable. The UUID is printed again so the
+    " surviving row can be identified by hand later.
+    DATA(delete_text) = CONV string( 'Only draft orders can be deleted.' ).
+    console->write( name = 'Terminal residue UUID - retain for manual cleanup'
+                    data = order_uuid ).
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = order_uuid ) )
+        RESULT DATA(residue_orders)
+      FAILED DATA(failed_residue_read).
+    IF failed_residue_read IS NOT INITIAL OR lines( residue_orders ) <> 1
+       OR residue_orders[ 1 ]-Status <> expected_status.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: the terminal fixture could not be read.' ).
+      RETURN.
+    ENDIF.
+    DATA(residue_key) = residue_orders[ 1 ]-%tky.
+
     MODIFY ENTITIES OF ZJP_I_PurchaseOrder
       ENTITY PurchaseOrder
-        DELETE FROM VALUE #( ( PurchaseOrderUUID = order_uuid ) )
-      FAILED DATA(failed_decision_cleanup)
-      REPORTED DATA(reported_decision_cleanup).
-    console->write( name = 'Decision cleanup FAILED' data = failed_decision_cleanup ).
-    IF failed_decision_cleanup IS NOT INITIAL.
-      ROLLBACK ENTITIES.
-      console->write( 'STOP: decision fixture cleanup failed.' ).
+        DELETE FROM VALUE #( ( %tky = residue_key ) )
+      FAILED DATA(failed_residue_delete)
+      REPORTED DATA(reported_residue_delete).
+    console->write( name = 'Terminal DELETE FAILED - expect rejection'
+                    data = failed_residue_delete ).
+    console->write( name = 'Terminal DELETE REPORTED'
+                    data = reported_residue_delete ).
+    DATA(delete_blocked) = xsdbool( line_exists(
+      failed_residue_delete-purchaseorder[ %tky = residue_key ] ) ).
+    DATA(delete_message) = abap_false.
+    LOOP AT reported_residue_delete-purchaseorder INTO DATA(residue_line).
+      IF residue_line-%msg IS BOUND.
+        IF residue_line-%msg->if_message~get_text( ) = delete_text.
+          delete_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
+
+    IF delete_blocked = abap_false OR delete_message = abap_false.
+      console->write( 'STOP: a terminal order accepted root DELETE.' ).
       RETURN.
     ENDIF.
-    IF save_changes( ) = abap_false.
-      RETURN.
-    ENDIF.
+
     success = check_submit_database( order_uuid = order_uuid
-                                     expected_headers = 0 expected_items = 0 ).
+                                     expected_headers = 1
+                                     expected_items = expected_items
+                                     expected_status = expected_status
+                                     expected_header_total = expected_total
+                                     expected_number = expected_number ).
     IF success = abap_true.
-      console->write( 'PASS: decision fixture cleanup complete.' ).
+      console->write( 'PASS: root DELETE rejected; the terminal order survives.' ).
     ENDIF.
+  ENDMETHOD.
+
+  METHOD print_lifecycle_summary.
+    " Diagnostic output only. No assertion depends on this block and it
+    " changes no lifecycle or cleanup behavior.
+    "
+    " Selection is by the exact UUIDs captured during THIS execution, never
+    " by Status or Supplier: from Phase 2.7D-2 onwards terminal fixtures are
+    " deliberate residue, so earlier runs have left APPROVED, REJECTED and
+    " CANCELLED rows in ZJP_PO_H that a status query would wrongly report as
+    " produced here. Read-only SELECT, one row per captured key.
+    TYPES: BEGIN OF summary_line,
+             purchase_order_uuid   TYPE zjp_po_h-purchase_order_uuid,
+             supplier              TYPE zjp_po_h-supplier,
+             status                TYPE zjp_po_h-status,
+             total_amount          TYPE zjp_po_h-total_amount,
+             purchase_order_number TYPE zjp_po_h-purchase_order_number,
+             rejection_origin      TYPE zjp_po_h-rejection_origin,
+             rejection_reason      TYPE zjp_po_h-rejection_reason,
+           END OF summary_line.
+    DATA summary_row  TYPE summary_line.
+    DATA summary_rows TYPE STANDARD TABLE OF summary_line WITH EMPTY KEY.
+
+    IF lifecycle_uuids IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    LOOP AT lifecycle_uuids INTO DATA(summary_uuid).
+      CLEAR summary_row.
+      SELECT SINGLE purchase_order_uuid, supplier, status, total_amount,
+                    purchase_order_number, rejection_origin, rejection_reason
+        FROM zjp_po_h
+        WHERE purchase_order_uuid = @summary_uuid
+        INTO @summary_row.
+      IF sy-subrc <> 0.
+        CLEAR summary_row.
+        summary_row-purchase_order_uuid = summary_uuid.
+        summary_row-status = 'NOT FOUND'.
+      ENDIF.
+      APPEND summary_row TO summary_rows.
+    ENDLOOP.
+
+    console->write( '=== FINAL LIFECYCLE SUMMARY ===' ).
+    console->write( name = 'Terminal fixtures created by this run'
+                    data = summary_rows ).
+
+    LOOP AT summary_rows INTO DATA(printed_row).
+      DATA(number_text) = COND string(
+        WHEN printed_row-purchase_order_number IS INITIAL THEN '-'
+        ELSE |{ printed_row-purchase_order_number }| ).
+      DATA(origin_text) = COND string(
+        WHEN printed_row-rejection_origin IS INITIAL THEN '-'
+        ELSE |{ printed_row-rejection_origin }| ).
+      DATA(reason_text) = COND string(
+        WHEN printed_row-rejection_reason IS INITIAL THEN '-'
+        ELSE |{ printed_row-rejection_reason }| ).
+      console->write( |{ printed_row-supplier WIDTH = 10 }| &&
+                      |{ printed_row-status WIDTH = 12 }| &&
+                      |{ printed_row-total_amount WIDTH = 12 }| &&
+                      |{ number_text WIDTH = 22 }| &&
+                      |{ origin_text WIDTH = 10 }| &&
+                      |{ reason_text }| ).
+    ENDLOOP.
+    console->write( '=== END LIFECYCLE SUMMARY ===' ).
   ENDMETHOD.
 
   METHOD check_decision_database.
@@ -2402,7 +3147,7 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
         AND headers_db[ 1 ]-total_amount = expected_total
         AND headers_db[ 1 ]-rejection_origin = expected_origin
         AND headers_db[ 1 ]-rejection_reason = expected_reason
-        AND headers_db[ 1 ]-purchase_order_number IS INITIAL ).
+        AND headers_db[ 1 ]-purchase_order_number = expected_number ).
     ENDIF.
 
     IF success = abap_false.

@@ -72,7 +72,7 @@ Associate quantities with units and amounts with currencies in CDS semantics. Cu
 
 Calculate each item at sufficient precision, round half up to two decimals, then sum rounded items. For 2 EA × EUR 750.0000, item and header total are EUR 1500.00. A second line of 3 EA × EUR 0.3350 rounds to EUR 1.01; the header becomes EUR 1501.01. Reject overflow rather than truncate. CAP verifies supplied totals and rejects mismatches; it never silently reprices SAP's order.
 
-Use a concurrency-safe number-range facility released for the selected ABAP environment for PurchaseOrderNumber, when available. Gaps are acceptable. Never use MAX + 1. Allocate on first active creation/save as supported; draft display may remain blank. If the number-range API is unavailable, decide and document a UUID-derived display alternative before implementation.
+Use a concurrency-safe number-range facility released for the selected ABAP environment for PurchaseOrderNumber. Gaps are acceptable. Never use MAX + 1, and never reset or reuse a consumed number. **Allocate on a successful `submit`, that is on `DRAFT` → `SUBMITTED`** — not on first active creation/save, and not through a determination. A `DRAFT` order therefore displays no number, and an order cancelled directly from `DRAFT` never receives one. This supersedes the earlier "allocate on first active creation/save" wording, which was settled in Phase 2 against the RAP implementation; see the [Phase 2.7E guide](../../abap-rap/docs/phase-2-7e-purchase-order-number.md).
 
 ## Supplier and reference data
 

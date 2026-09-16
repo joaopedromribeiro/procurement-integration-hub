@@ -1,6 +1,6 @@
 # Phase 2.7B — Post-submission commercial immutability
 
-Status: **SAP runtime-verified complete** for root updates, item updates, create-by-association and `removeItem` on `SUBMITTED` orders, for both active and technical draft instances in the tested flows. Phase 2.1–2.7A remain runtime-verified and were not rewritten to achieve this. [Phase 2.7C](phase-2-7c-approve-reject.md) has since generalized this rule to every state after `DRAFT` and added the approve and reject transitions; `sendToSupplier`, `cancel` and `PurchaseOrderNumber` are not started.
+Status: **SAP runtime-verified complete** for root updates, item updates, create-by-association and `removeItem` on `SUBMITTED` orders, for both active and technical draft instances in the tested flows. Phase 2.1–2.7A remain runtime-verified and were not rewritten to achieve this. [Phase 2.7C](phase-2-7c-approve-reject.md) has since generalized this rule to every state after `DRAFT` and added the approve and reject transitions, and [Phase 2.7D-1](phase-2-7d-1-cancel-action.md) added `cancel`. `sendToSupplier` is not started, and `PurchaseOrderNumber` was unallocated at this checkpoint; [Phase 2.7E](phase-2-7e-purchase-order-number.md) has since implemented allocation on a successful `submit`.
 
 ## Target baseline
 
@@ -43,7 +43,7 @@ The `FOR UPDATE` line type on this target exposes `%cid_ref`, `%control`, `%data
 4. **`removeItem`** is rejected when the root is `SUBMITTED`, checked before the ownership test and before any mutation.
 5. If `%control` flags none of the listed user-writable fields, no rule fires. This is what preserves `submit`'s own `Status` write and the `TotalAmount` writes of `calculateTotalAmount` — both touch readonly fields only.
 6. The status read happens in a precheck, before the buffer changes, so it is the **current** business status. `%tky` carries `%is_draft`, so a draft instance resolves against its own draft row.
-7. **Root `DELETE` stays allowed.** Removing a submitted order belongs to the cancel/lifecycle rules of a later subphase, and the Phase 2.7A regression depends on deleting its own submitted fixture.
+7. **Root `DELETE` stays allowed at this checkpoint.** Removing a submitted order belonged to a later subphase — [Phase 2.7D-2](phase-2-7d-1-cancel-action.md#phase-27d-2-root-delete-narrowed-to-draft-runtime-verified) — and the Phase 2.7A regression depends on deleting its own submitted fixture.
 
 | Condition | Message text as reworded in Phase 2.7C |
 | --- | --- |
@@ -142,9 +142,9 @@ PASS: Phase 2.7B draft immutability verified; cleanup complete.
 
 Runtime verification covers the four operations above on `SUBMITTED` orders. It does not cover any of the following, and none may be presented as solved.
 
-- `PurchaseOrderNumber` is still not allocated; submitted orders have no human-readable identity.
-- Root `DELETE` of a submitted order is still allowed by design; physical deletion rules and `cancel` belong to a later subphase.
-- `approve` and `reject` were added by [Phase 2.7C](phase-2-7c-approve-reject.md); `sendToSupplier` and `cancel` remain unimplemented.
+- `PurchaseOrderNumber` was still not allocated at this checkpoint; [Phase 2.7E](phase-2-7e-purchase-order-number.md) has since added allocation on a successful `submit`.
+- Root `DELETE` of a submitted order was still allowed by design at this checkpoint; the physical deletion policy was later settled by [Phase 2.7D-2](phase-2-7d-1-cancel-action.md#phase-27d-2-root-delete-narrowed-to-draft-runtime-verified).
+- `approve` and `reject` were added by [Phase 2.7C](phase-2-7c-approve-reject.md) and `cancel` by [Phase 2.7D-1](phase-2-7d-1-cancel-action.md); `sendToSupplier` remains unimplemented.
 - Authorization remains the permissive study stub; negative permission cases are not covered.
 - `Activate` over a `SUBMITTED` active instance is untested.
 - Precheck behavior for `IN LOCAL MODE` requests is undetermined; the design does not depend on it.

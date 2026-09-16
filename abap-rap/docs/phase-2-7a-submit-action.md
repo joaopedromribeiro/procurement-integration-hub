@@ -28,7 +28,7 @@ Phase 2.6 `removeItem`, the technical draft model, all determinations, all three
 4. **At least one current item.** The check reads the root's live composition through `BY \_Items`, so an order whose last item was removed by `removeItem` is rejected at the moment of submission.
 5. **Effect.** One local-mode EML `UPDATE FIELDS ( Status )` writing `'SUBMITTED'`. No other field is written. `Status` is `readonly` in the BDEF; `initializeStatus` already establishes that a readonly field is maintained this way.
 6. **No re-validation of content.** Supplier, Quantity and NetPrice keep their existing `on save` validations and trigger declarations. Every committed active root has passed `validateSupplier`; every committed active item has passed `validateQuantity` and `validateNetPrice`; the draft path additionally runs all three through `Prepare`. `submit` therefore checks transition state only and duplicates no business rule.
-7. **No `PurchaseOrderNumber`.** Submission is the intended future allocation point, but no number-range facility is confirmed on the target. The field stays initial and the regression asserts that it stays initial.
+7. **No `PurchaseOrderNumber` at this checkpoint.** Submission was named as the intended future allocation point, but no number-range facility was confirmed on the target yet, so the field stayed initial and the regression asserted that. [Phase 2.7E](phase-2-7e-purchase-order-number.md) has since confirmed the facility and implemented exactly that: allocation on a successful `submit`.
 8. **No commercial locking in this subphase.** At the 2.7A checkpoint a `SUBMITTED` order was still editable and its items still removable. That was a documented gap, not an implemented restriction; [Phase 2.7B](phase-2-7b-post-submission-immutability.md) closed it.
 
 ```mermaid
@@ -150,7 +150,7 @@ Retain both classes as regression evidence. If a future change fails, return the
 Runtime verification covers the transition and its three rejections. It does not cover any of the following, and none of them may be presented as solved.
 
 - Commercial-field and item locking after submission was out of scope here and was delivered separately by [Phase 2.7B](phase-2-7b-post-submission-immutability.md).
-- `PurchaseOrderNumber` remains initial for submitted orders.
-- `approve` and `reject` were out of scope here and were added by [Phase 2.7C](phase-2-7c-approve-reject.md); `sendToSupplier` and `cancel` remain unimplemented.
+- `PurchaseOrderNumber` remained initial for submitted orders at this checkpoint; allocation arrived in [Phase 2.7E](phase-2-7e-purchase-order-number.md).
+- `approve` and `reject` were out of scope here and were added by [Phase 2.7C](phase-2-7c-approve-reject.md); `cancel` was added by [Phase 2.7D-1](phase-2-7d-1-cancel-action.md). `sendToSupplier` remains unimplemented and is deferred to Phase 5.
 - Authorization remains the permissive study stub; negative permission cases are not covered.
 - `Activate`-then-`submit` is the documented draft path but is not exercised by these tests.

@@ -1,6 +1,6 @@
 # Phase 2.7C — Approver decisions: approve and reject
 
-Status: **SAP runtime-verified complete** for `SUBMITTED` → `APPROVED`, `SUBMITTED` → `REJECTED`, and the generalized lifecycle immutability invariant that replaced the Phase 2.7B `SUBMITTED`-only rule. Phase 2.1–2.7B remain runtime-verified and were not rewritten to achieve this. `cancel` and `sendToSupplier` are not started, and `PurchaseOrderNumber` remains unresolved for Phase 2 closure.
+Status: **SAP runtime-verified complete** for `SUBMITTED` → `APPROVED`, `SUBMITTED` → `REJECTED`, and the generalized lifecycle immutability invariant that replaced the Phase 2.7B `SUBMITTED`-only rule. Phase 2.1–2.7B remain runtime-verified and were not rewritten to achieve this. `cancel` was added afterwards by [Phase 2.7D-1](phase-2-7d-1-cancel-action.md); `sendToSupplier` is not started, and `PurchaseOrderNumber` was unallocated at this checkpoint; [Phase 2.7E](phase-2-7e-purchase-order-number.md) has since implemented allocation on a successful `submit`.
 
 ## Target baseline
 
@@ -62,7 +62,7 @@ flowchart LR
     D["DRAFT<br/>commercial content editable"] -->|submit| S["SUBMITTED"]
     S -->|approve| A["APPROVED"]
     S -->|reject + reason| R["REJECTED<br/>origin APPROVER"]
-    D -.->|"cancel - not implemented"| C["CANCELLED"]
+    D -.->|"cancel - added by Phase 2.7D-1"| C["CANCELLED"]
     A -.->|"sendToSupplier - Phase 5"| X["integration states"]
 ```
 
@@ -141,10 +141,10 @@ PASS: SUBMITTED draft rejected root and item updates plus approve and reject.
 
 None of the following is implemented, and none may be presented as solved.
 
-- **`cancel` is not implemented.** `DRAFT`/`SUBMITTED` → `CANCELLED`, and `APPROVED` → `CANCELLED` only when delivery was never requested, remain future work.
+- **`cancel` was not implemented at this checkpoint.** [Phase 2.7D-1](phase-2-7d-1-cancel-action.md) has since added it for `DRAFT`, `SUBMITTED` and `APPROVED`. The "only when delivery was never requested" condition on `APPROVED` is still unimplemented and belongs with `DeliveryIntent` in Phase 5.
 - **`sendToSupplier` is deferred to Phase 5.** `DeliveryIntent`, delivery identity, the immutable snapshot and dispatch semantics are introduced there. A status-only action now would name a capability that does not exist.
-- **`PurchaseOrderNumber` remains unresolved for Phase 2 closure.** Approved and rejected orders still carry no human-readable identity. Before Phase 2 is declared complete, the target must be investigated for an appropriate released number-range mechanism. If a suitable mechanism exists, it is implemented within Phase 2. If it cannot reasonably be implemented within the Phase 2 target and scope, an explicit architectural deferment decision is made and documented at that point. No destination phase is named before that decision is made. Open issue OI-02 keeps this inside Phase 2.
-- **Root `DELETE` is unchanged and still allowed at any status.** Narrowing it belongs with the `cancel` lifecycle rules.
+- **`PurchaseOrderNumber` was unallocated at this checkpoint**, so the evidence above records it as initial. [Phase 2.7E](phase-2-7e-purchase-order-number.md) has since implemented allocation on a successful `submit`, and that is runtime-verified.
+- **Root `DELETE` was unchanged and still allowed at any status at this checkpoint.** Phase 2.7D-1 left it unchanged as well; it was narrowed to `DRAFT` by [Phase 2.7D-2](phase-2-7d-1-cancel-action.md#phase-27d-2-root-delete-narrowed-to-draft-runtime-verified).
 - **No approver-role authorization.** The permissive study stub is unchanged; negative permission cases are uncovered.
 - **Supplier-side rejection** (`RejectionOrigin = 'SUPPLIER'`) is future work and shares no code with this subphase.
 - **`Activate` over a closed-status technical draft is untested.** The Phase 2.7B probe never reached it.

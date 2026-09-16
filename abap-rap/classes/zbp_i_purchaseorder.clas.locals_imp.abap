@@ -14,11 +14,17 @@ CLASS lhc_PurchaseOrder DEFINITION
     METHODS reject FOR MODIFY
       IMPORTING keys FOR ACTION PurchaseOrder~reject.
 
+    METHODS cancel FOR MODIFY
+      IMPORTING keys FOR ACTION PurchaseOrder~cancel.
+
     METHODS precheck_update FOR PRECHECK
       IMPORTING entities FOR UPDATE purchaseorder.
 
     METHODS precheck_cba_items FOR PRECHECK
       IMPORTING entities FOR CREATE purchaseorder\_items.
+
+    METHODS precheck_delete FOR PRECHECK
+      IMPORTING keys FOR DELETE purchaseorder.
 
     METHODS validateSupplier FOR VALIDATE ON SAVE
       IMPORTING keys FOR PurchaseOrder~validateSupplier.
@@ -385,11 +391,50 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
           EXIT.
         ENDIF.
 
+        " Allocate the human-readable identity. This is the only point in the
+        " lifecycle that draws a number: a DRAFT order carries none, and every
+        " state after SUBMITTED keeps exactly the number drawn here. The
+        " number range object is the authority for uniqueness, never MAX + 1,
+        " and a number is never reset or reused. A number that is drawn but
+        " not persisted becomes a permitted gap.
+        TRY.
+            cl_numberrange_runtime=>number_get(
+              EXPORTING
+                nr_range_nr = '01'
+                object      = 'ZJP_PO'
+                quantity    = 1
+              IMPORTING
+                number      = DATA(allocated_number) ).
+          CATCH cx_nr_object_not_found.
+            error_text = 'Number range object ZJP_PO is missing.'.
+          CATCH cx_number_ranges.
+            error_text = 'No purchase order number could be drawn.'.
+        ENDTRY.
+        IF error_text IS NOT INITIAL.
+          EXIT.
+        ENDIF.
+        IF allocated_number IS INITIAL.
+          error_text = 'Number range returned no number; not submitted.'.
+          EXIT.
+        ENDIF.
+
+        " NRLEVEL comes back as 20 digits on this target while the configured
+        " ZJP_PO interval 01 is eight digits wide. Take the last eight
+        " explicitly and refuse anything wider, so a value outside the
+        " configured interval fails the action instead of being truncated
+        " into a wrong number.
+        IF allocated_number+0(12) <> '000000000000'.
+          error_text = 'Allocated number is wider than eight digits.'.
+          EXIT.
+        ENDIF.
+        DATA(order_number) = |PO{ allocated_number+12(8) }|.
+
         MODIFY ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
           ENTITY PurchaseOrder
-            UPDATE FIELDS ( Status )
+            UPDATE FIELDS ( Status PurchaseOrderNumber )
             WITH VALUE #( ( %tky = action_key-%tky
-                            Status = 'SUBMITTED' ) )
+                            Status = 'SUBMITTED'
+                            PurchaseOrderNumber = order_number ) )
           FAILED DATA(update_failed)
           REPORTED DATA(update_reported).
         reported_orders = CORRESPONDING #( DEEP update_reported-purchaseorder ).
@@ -565,6 +610,85 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
       ENDIF.
     ENDLOOP.
   ENDMETHOD.
+
+  METHOD cancel.
+    DATA reported_orders LIKE reported-purchaseorder.
+    DATA reported_items LIKE reported-purchaseorderitem.
+
+    LOOP AT keys INTO DATA(action_key).
+      DATA(error_text) = CONV string( '' ).
+
+      " One invocation cancels one active root; no state survives this method.
+      DO 1 TIMES.
+        " Reject technical draft instances before reading or changing anything.
+        IF action_key-%is_draft = if_abap_behv=>mk-on.
+          error_text = 'Not allowed on a draft instance.'.
+          EXIT.
+        ENDIF.
+
+        READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+          ENTITY PurchaseOrder
+            FIELDS ( Status )
+            WITH VALUE #( ( %tky = action_key-%tky ) )
+            RESULT DATA(orders)
+          FAILED DATA(read_failed)
+          REPORTED DATA(read_reported).
+        reported_orders = CORRESPONDING #( DEEP read_reported-purchaseorder ).
+        APPEND LINES OF reported_orders TO reported-purchaseorder.
+        reported_items = CORRESPONDING #( DEEP read_reported-purchaseorderitem ).
+        APPEND LINES OF reported_items TO reported-purchaseorderitem.
+
+        IF read_failed IS NOT INITIAL OR lines( orders ) <> 1.
+          error_text = 'Order could not be read; no action taken.'.
+          EXIT.
+        ENDIF.
+
+        " A positive allow-list, unlike the prechecks, which are deny-rules.
+        " REJECTED and CANCELLED are terminal, and INITIAL is the transient
+        " state between creation and initializeStatus rather than a business
+        " state, so all three fall through to the rejection without needing
+        " a carve-out of their own.
+        IF orders[ 1 ]-Status <> 'DRAFT'
+           AND orders[ 1 ]-Status <> 'SUBMITTED'
+           AND orders[ 1 ]-Status <> 'APPROVED'.
+          error_text = 'Only open orders can be cancelled.'.
+          EXIT.
+        ENDIF.
+
+        " APPROVED is cancellable here with no delivery-request guard. No
+        " Phase 2 capability can set IntegrationStatus or DeliveryId, so the
+        " condition cannot be true and could not be tested. That guard
+        " belongs with DeliveryIntent and sendToSupplier in Phase 5.
+        MODIFY ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+          ENTITY PurchaseOrder
+            UPDATE FIELDS ( Status )
+            WITH VALUE #( ( %tky = action_key-%tky
+                            Status = 'CANCELLED' ) )
+          FAILED DATA(update_failed)
+          REPORTED DATA(update_reported).
+        reported_orders = CORRESPONDING #( DEEP update_reported-purchaseorder ).
+        APPEND LINES OF reported_orders TO reported-purchaseorder.
+        reported_items = CORRESPONDING #( DEEP update_reported-purchaseorderitem ).
+        APPEND LINES OF reported_items TO reported-purchaseorderitem.
+        IF update_failed IS NOT INITIAL.
+          error_text = 'Status update failed; rollback this request.'.
+          EXIT.
+        ENDIF.
+      ENDDO.
+
+      IF error_text IS NOT INITIAL.
+        APPEND VALUE #( %tky = action_key-%tky
+                        %op-%action-cancel = if_abap_behv=>mk-on )
+          TO failed-purchaseorder.
+        APPEND VALUE #( %tky = action_key-%tky
+          %op-%action-cancel = if_abap_behv=>mk-on
+          %msg = new_message_with_text(
+            severity = if_abap_behv_message=>severity-error
+            text = error_text ) )
+          TO reported-purchaseorder.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
   METHOD precheck_update.
     DATA reported_orders LIKE reported-purchaseorder.
     DATA commercial_entities LIKE entities.
@@ -659,6 +783,49 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
         %msg = new_message_with_text(
           severity = if_abap_behv_message=>severity-error
           text = 'Items can be added to draft orders only.' ) )
+        TO reported-purchaseorder.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD precheck_delete.
+    DATA reported_orders LIKE reported-purchaseorder.
+
+    " A delete request carries keys only, so there is no %control filter
+    " here and nothing field-scoped to guard.
+    READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+      ENTITY PurchaseOrder
+        FIELDS ( Status )
+        WITH CORRESPONDING #( keys )
+        RESULT DATA(orders)
+      FAILED DATA(read_failed)
+      REPORTED DATA(read_reported).
+    reported_orders = CORRESPONDING #( DEEP read_reported-purchaseorder ).
+    APPEND LINES OF reported_orders TO reported-purchaseorder.
+
+    LOOP AT keys INTO DATA(delete_key).
+      READ TABLE orders INTO DATA(order) WITH KEY %tky = delete_key-%tky.
+      " Unreadable instances are left to the framework's own handling.
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
+      " Business rule: an order can be physically deleted only before it has
+      " entered the business lifecycle, that is while Status is DRAFT.
+      " INITIAL is a transient technical state, not a business state: a newly
+      " created root can be readable before initializeStatus has run, and a
+      " create-then-delete request inside one round must keep working. Every
+      " state from SUBMITTED onwards is terminated through cancel or reject,
+      " never removed. Technical draft Discard is a framework draft action
+      " and is not affected by this rule.
+      IF order-Status IS INITIAL OR order-Status = 'DRAFT'.
+        CONTINUE.
+      ENDIF.
+
+      APPEND VALUE #( %tky = delete_key-%tky )
+        TO failed-purchaseorder.
+      APPEND VALUE #( %tky = delete_key-%tky
+        %msg = new_message_with_text(
+          severity = if_abap_behv_message=>severity-error
+          text = 'Only draft orders can be deleted.' ) )
         TO reported-purchaseorder.
     ENDLOOP.
   ENDMETHOD.

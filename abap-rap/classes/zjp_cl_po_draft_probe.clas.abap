@@ -785,6 +785,29 @@ CLASS zjp_cl_po_draft_probe IMPLEMENTATION.
       failed_draft_reject-purchaseorder[ %tky = lock_draft_key
         %op-%action-reject = if_abap_behv=>mk-on ] ) ).
 
+    " Phase 2.7D-1: cancel is active-only too. Run while the draft still
+    " exists, before the rollback below.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE cancel FROM VALUE #( ( %tky = lock_draft_key ) )
+      FAILED DATA(failed_draft_cancel)
+      REPORTED DATA(reported_draft_cancel).
+    out->write( name = 'Draft cancel FAILED - expect rejection'
+                data = failed_draft_cancel ).
+    out->write( name = 'Draft cancel REPORTED' data = reported_draft_cancel ).
+    DATA(draft_cancel_blocked) = xsdbool( line_exists(
+      failed_draft_cancel-purchaseorder[ %tky = lock_draft_key
+        %op-%action-cancel = if_abap_behv=>mk-on ] ) ).
+    DATA(draft_cancel_message) = abap_false.
+    LOOP AT reported_draft_cancel-purchaseorder INTO DATA(draft_cancel_line).
+      IF draft_cancel_line-%msg IS BOUND.
+        IF draft_cancel_line-%msg->if_message~get_text( )
+           = 'Not allowed on a draft instance.'.
+          draft_cancel_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
     ROLLBACK ENTITIES.
     IF draft_root_blocked = abap_false OR draft_item_blocked = abap_false
        OR draft_approve_blocked = abap_false
@@ -793,6 +816,13 @@ CLASS zjp_cl_po_draft_probe IMPLEMENTATION.
       RETURN.
     ENDIF.
     out->write( 'PASS: SUBMITTED draft rejected root and item updates plus approve and reject.' ).
+
+    IF draft_cancel_blocked = abap_false
+       OR draft_cancel_message = abap_false.
+      out->write( 'STOP: a SUBMITTED draft must reject cancel.' ).
+      RETURN.
+    ENDIF.
+    out->write( 'PASS: Phase 2.7D-1 technical draft refuses cancel.' ).
 
     MODIFY ENTITIES OF ZJP_I_PurchaseOrder
       ENTITY PurchaseOrder
@@ -810,33 +840,52 @@ CLASS zjp_cl_po_draft_probe IMPLEMENTATION.
       ROLLBACK ENTITIES.
     ENDIF.
 
+    " The technical draft is gone. What remains is the ACTIVE order, which is
+    " SUBMITTED, so from Phase 2.7D-2 onwards root DELETE no longer removes
+    " it. Draft Discard above and business root DELETE here are different
+    " operations and only the second one changed.
+    out->write( name = 'Terminal residue UUID - retain for manual cleanup'
+                data = lock_draft_uuid ).
     MODIFY ENTITIES OF ZJP_I_PurchaseOrder
       ENTITY PurchaseOrder
         DELETE FROM VALUE #( ( PurchaseOrderUUID = lock_draft_uuid ) )
-      FAILED DATA(failed_lock_draft_cleanup)
-      REPORTED DATA(reported_lock_draft_cleanup).
-    out->write( name = 'Submitted-draft cleanup FAILED'
-                data = failed_lock_draft_cleanup ).
-    IF failed_lock_draft_cleanup IS NOT INITIAL.
-      ROLLBACK ENTITIES.
-      out->write( 'STOP: submitted-draft cleanup failed; use the printed UUID.' ).
-      RETURN.
-    ENDIF.
-    COMMIT ENTITIES RESPONSE OF ZJP_I_PurchaseOrder
-      FAILED DATA(failed_lock_cleanup_save)
-      REPORTED DATA(reported_lock_cleanup_save).
-    out->write( name = 'Submitted-draft cleanup COMMIT sy-subrc' data = sy-subrc ).
+      FAILED DATA(failed_lock_draft_delete)
+      REPORTED DATA(reported_lock_draft_delete).
+    out->write( name = 'Submitted-active DELETE FAILED - expect rejection'
+                data = failed_lock_draft_delete ).
+    out->write( name = 'Submitted-active DELETE REPORTED'
+                data = reported_lock_draft_delete ).
+    DATA(lock_delete_blocked) = xsdbool(
+      failed_lock_draft_delete IS NOT INITIAL ).
+    DATA(lock_delete_message) = abap_false.
+    LOOP AT reported_lock_draft_delete-purchaseorder INTO DATA(lock_delete_line).
+      IF lock_delete_line-%msg IS BOUND.
+        IF lock_delete_line-%msg->if_message~get_text( )
+           = 'Only draft orders can be deleted.'.
+          lock_delete_message = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    ROLLBACK ENTITIES.
 
     SELECT COUNT(*) FROM zjp_po_h
       WHERE purchase_order_uuid = @lock_draft_uuid INTO @DATA(lock_headers_left).
     SELECT COUNT(*) FROM zjp_po_i
       WHERE purchase_order_uuid = @lock_draft_uuid INTO @DATA(lock_items_left).
-    out->write( name = 'Submitted-draft remaining headers' data = lock_headers_left ).
-    out->write( name = 'Submitted-draft remaining items' data = lock_items_left ).
-    IF lock_headers_left <> 0 OR lock_items_left <> 0.
-      out->write( 'STOP: submitted-draft fixture rows remain.' ).
+    SELECT SINGLE status FROM zjp_po_h
+      WHERE purchase_order_uuid = @lock_draft_uuid INTO @DATA(lock_status_left).
+    out->write( name = 'Submitted-active surviving headers - expect 1'
+                data = lock_headers_left ).
+    out->write( name = 'Submitted-active surviving items - expect 1'
+                data = lock_items_left ).
+    out->write( name = 'Submitted-active surviving status' data = lock_status_left ).
+    IF lock_delete_blocked = abap_false OR lock_delete_message = abap_false
+       OR lock_headers_left <> 1 OR lock_items_left <> 1
+       OR lock_status_left <> 'SUBMITTED'.
+      out->write( 'STOP: a SUBMITTED active order accepted root DELETE.' ).
       RETURN.
     ENDIF.
-    out->write( 'PASS: Phase 2.7B draft immutability verified; cleanup complete.' ).
+    out->write( 'PASS: Phase 2.7B draft immutability verified.' ).
+    out->write( 'PASS: Phase 2.7D-2 SUBMITTED root DELETE rejected; row kept.' ).
   ENDMETHOD.
 ENDCLASS.
