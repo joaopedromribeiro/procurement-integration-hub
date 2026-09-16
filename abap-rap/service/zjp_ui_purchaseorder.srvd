@@ -1,0 +1,5 @@
+@EndUserText.label: 'Purchase Order UI Service'
+define service ZJP_UI_PURCHASEORDER {
+  expose ZJP_C_PurchaseOrder     as PurchaseOrders;
+  expose ZJP_C_PurchaseOrderItem as PurchaseOrderItems;
+}

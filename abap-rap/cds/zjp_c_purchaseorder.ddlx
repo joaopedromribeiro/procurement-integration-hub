@@ -1,0 +1,72 @@
+@Metadata.layer: #CUSTOMER
+
+@UI.headerInfo: {
+    typeName: 'Purchase Order',
+    typeNamePlural: 'Purchase Orders',
+    title: {
+        type: #STANDARD,
+        value: 'PurchaseOrderNumber'
+    },
+    description: {
+        value: 'Supplier'
+    }
+}
+
+annotate entity ZJP_C_PurchaseOrder
+    with
+{
+    @UI.facet: [
+        {
+            id: 'GeneralInfo',
+            purpose: #STANDARD,
+            type: #IDENTIFICATION_REFERENCE,
+            label: 'General Information',
+            position: 10
+        },
+        {
+            id: 'Items',
+            purpose: #STANDARD,
+            type: #LINEITEM_REFERENCE,
+            label: 'Items',
+            targetElement: '_Items',
+            position: 20
+        }
+    ]
+
+    @UI.lineItem: [{ position: 10, label: 'Purchase Order' }]
+    @UI.selectionField: [{ position: 10 }]
+    @UI.identification: [{ position: 10, label: 'Purchase Order' }]
+    PurchaseOrderNumber;
+
+    @UI.lineItem: [{ position: 20, label: 'Supplier' }]
+    @UI.selectionField: [{ position: 20 }]
+    @UI.identification: [{ position: 20, label: 'Supplier' }]
+    Supplier;
+
+    @UI.identification: [{ position: 30, label: 'Company Code' }]
+    CompanyCode;
+
+    @UI.identification: [{ position: 40, label: 'Purchasing Organization' }]
+    PurchasingOrganization;
+
+    @UI.identification: [{ position: 50, label: 'Purchasing Group' }]
+    PurchasingGroup;
+
+    @UI.identification: [{ position: 60, label: 'Currency' }]
+    Currency;
+
+    @UI.lineItem: [{ position: 40, label: 'Total Amount' }]
+    @UI.identification: [{ position: 70, label: 'Total Amount' }]
+    TotalAmount;
+
+    @UI.lineItem: [{ position: 30, label: 'Status' }]
+    @UI.selectionField: [{ position: 30 }]
+    @UI.identification: [{ position: 80, label: 'Status' }]
+    Status;
+
+    @UI.identification: [{ position: 90, label: 'Rejection Origin' }]
+    RejectionOrigin;
+
+    @UI.identification: [{ position: 100, label: 'Rejection Reason' }]
+    RejectionReason;
+}

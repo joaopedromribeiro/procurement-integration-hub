@@ -374,7 +374,7 @@ The activation issue in this system was resolved by removing only the child's ex
 | Draft | No draft storage or behavior | Phase 2 draft tables and managed draft behavior |
 | Audit/concurrency | Types and CDS annotations | Managed updates, lock and ETag declarations |
 | Authorization | No DCL/business permission logic | Deliberate checks before secured service use |
-| OData | No endpoint | Phase 3 definition and binding |
+| OData | No endpoint at this checkpoint | Delivered by [Phase 3.1](phase-3-1-odata-service-exposure.md): `ZJP_UI_PURCHASEORDER` and `ZJP_UI_PURCHASEORDER_O4` |
 
 ## Record your SAP results
 

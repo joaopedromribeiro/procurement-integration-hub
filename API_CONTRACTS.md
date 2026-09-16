@@ -1,14 +1,16 @@
 # API contracts
 
-Phase 0 proposed version: v1 / design draft. None of these endpoints exists yet. Freeze machine-readable schemas and test actual protocol serialization when implementing the relevant phase.
+Phase 0 proposed version: v1 / design draft. Freeze machine-readable schemas and test actual protocol serialization when implementing the relevant phase.
 
-Phase 1 compatibility note: `ZJP_` table/view names are internal ADT object names; they do not change these external DTOs or establish an OData service path. The persistence/CDS model preserves the planned field sizes and decimal scales. Optional values use ABAP initial values in the tables; the future boundary adapter must map blank response text, initial UUIDs and initial dates to the contract's null/absence convention. Do not serialize date `00000000` as a valid external calendar date. Phase 1 adds no API implementation.
+**Status update:** the buyer-facing RAP OData V4 service is no longer a proposal — it is implemented, published and runtime-verified; see [the buyer UI service](#buyer-ui-service-rap-odata-v4). Every other endpoint in this document remains a design draft and does not exist yet.
+
+Phase 1 compatibility note: `ZJP_` table/view names are internal ADT object names; they do not change these external DTOs. At that checkpoint they established no OData service path either; [Phase 3.1](abap-rap/docs/phase-3-1-odata-service-exposure.md) has since created one, recorded below. The persistence/CDS model preserves the planned field sizes and decimal scales. Optional values use ABAP initial values in the tables; the future boundary adapter must map blank response text, initial UUIDs and initial dates to the contract's null/absence convention. Do not serialize date `00000000` as a valid external calendar date. Phase 1 adds no API implementation.
 
 ## Boundaries
 
-| Consumer → provider | Proposed interface | Ownership |
+| Consumer → provider | Interface | Ownership |
 | --- | --- | --- |
-| Buyer UI → RAP UI service | OData V4 entity CRUD, draft operations, business actions | Buyer edits permitted fields; RAP enforces rules |
+| Buyer UI → RAP UI service | **Implemented and runtime-verified.** OData V4 entity CRUD, draft operations and bound business actions on `ZJP_UI_PURCHASEORDER`; see [the buyer UI service](#buyer-ui-service-rap-odata-v4) below | Buyer edits permitted fields; RAP enforces rules |
 | Coordinator → CI | POST `/http/pih/v1/order-deliveries` | Source delivery contract |
 | CI → CAP integration service | POST `/rest/integration/v1/Orders` | Mapped portal ingestion contract |
 | Supplier UI → CAP supplier service | GET `/rest/supplier/v1/Orders`, GET `/rest/supplier/v1/Orders/{ID}` | Supplier-filtered list and detail |
@@ -21,11 +23,39 @@ Phase 1 compatibility note: `ZJP_` table/view names are internal ADT object name
 
 CAP supports native [REST and OData adapters](https://cap.cloud.sap/docs/node.js/cds-serve). These REST paths are desired public paths to configure and verify in Phase 4, including bound-action routing and CREATE response codes. Prefer the CAP adapter and handlers; if adapter constraints require a different route, update this document before clients depend on it. Lists need bounded pagination; define actual supported query parameters and result envelope in Phase 4 rather than assuming OData query syntax on REST.
 
-RAP base URL, service version and action namespace come from the actual service binding and `$metadata`. Logical active-instance action form: `POST {RAP_WEB_API_BASE}/PurchaseOrders(<uuid>)/<qualified-action>`. This is notation, not a ready-to-run URL; key shape and draft parameters depend on the selected projection. The UI service's draft-specific keys must not be copied blindly into the integration contract.
+RAP base URL, service version and action namespace come from the actual service binding and `$metadata` — for the buyer service these are now concrete and recorded below. Logical active-instance action form: `POST {RAP_WEB_API_BASE}/PurchaseOrders(<uuid>)/<qualified-action>`. This remains notation rather than a ready-to-run URL; key shape and draft parameters depend on the selected projection, and the qualified action namespace must be read from `$metadata`. **The UI service's draft-specific keys must not be copied into the integration contract**, which is a separate service and remains Phase 5.
 
-Planned RAP UI actions: `submit`, `approve`, `reject`, `sendToSupplier`, `cancel`. Planned restricted operations: `applySupplierResponse`, `retryDelivery`, `recordDeliveryResult`. Prefer EML-only access for coordinator bookkeeping where possible; do not expose an administrative HTTP operation just because a class uses it internally. A callback action checks correlation and deduplication under the BO lock; normal UI edits use framework ETags. Confirm any required callback `If-Match` behavior against the actual binding in Phase 3/5 and test concurrent duplicate calls.
+RAP UI actions, all exposed and runtime-verified except where noted: `submit`, `approve`, `reject`, `cancel` and `removeItem`. `sendToSupplier` is **not** implemented and remains Phase 5. Planned restricted operations, none implemented: `applySupplierResponse`, `retryDelivery`, `recordDeliveryResult`. Prefer EML-only access for coordinator bookkeeping where possible; do not expose an administrative HTTP operation just because a class uses it internally. A callback action checks correlation and deduplication under the BO lock; normal UI edits use framework ETags. Confirm any required callback `If-Match` behavior against the actual binding in Phase 3/5 and test concurrent duplicate calls.
 
 Phase 5 calls CAP directly and uses a small local mapping component; the reverse sender calls RAP directly. Phase 6 switches endpoints to CI without changing business identities or ownership.
+
+## Buyer UI service (RAP, OData V4)
+
+**Runtime-verified in [Phase 3.1](abap-rap/docs/phase-3-1-odata-service-exposure.md).** This is the one endpoint in this document that exists.
+
+| Property | Value |
+| --- | --- |
+| Service definition | `ZJP_UI_PURCHASEORDER` — [source](abap-rap/service/zjp_ui_purchaseorder.srvd) |
+| Service binding | `ZJP_UI_PURCHASEORDER_O4` |
+| Binding type | OData V4 – UI |
+| Entity set | `PurchaseOrders`, from `ZJP_C_PurchaseOrder` |
+| Entity set | `PurchaseOrderItems`, from `ZJP_C_PurchaseOrderItem` |
+| Navigation | `_Items`, verified through `$expand` |
+| Draft | Exposed; `IsActiveEntity` / `HasActiveEntity` observed |
+| Bound business actions | `submit`, `approve`, `reject` (parameter `RejectionReason`), `cancel`, `removeItem` (parameter `PurchaseOrderItemUUID`) |
+| Draft actions | `Edit`, `Activate`, `Discard`, `Resume`, `Prepare` |
+
+Service root as published on the current development target:
+
+```text
+https://s4h2023.sapdemo.com:44323/sap/opu/odata4/sap/zjp_ui_purchaseorder_o4/srvd/sap/zjp_ui_purchaseorder/0001/?sap-client=100
+```
+
+That host, port and client identify one development system, not a stable contract. Treat the **service definition and binding names** as the durable identity and resolve the host per environment; `0001` is the binding's service version. Publishing on this target required transaction `/IWFND/V4_ADMIN` because client 100 is a Customizing client, so ADT's local publish was refused.
+
+**The service adds no rules.** Business behavior is enforced by the Phase 2 handlers and reaches HTTP unchanged: an ineligible `approve` returns 400 with `Only submitted orders can be decided.`, and a content change on a submitted order's draft returns 400 with `Only draft orders can be changed.` `PurchaseOrderNumber` is exposed read-only and is allocated on `submit`, not on `Activate`.
+
+Two limits apply to any client written against this service today. `__OperationControl` advertises bound actions even on orders whose lifecycle would reject them, so a client must handle a 400 rather than trust the advertised availability. And although `OptimisticConcurrency` appears in `$metadata`, no stale-ETag or concurrent-write case has been exercised — see OI-13 in [PROJECT_STATUS.md](PROJECT_STATUS.md). No authorization is enforced; the permissive study stub is unchanged.
 
 ## Common rules
 

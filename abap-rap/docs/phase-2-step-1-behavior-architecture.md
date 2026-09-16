@@ -16,8 +16,8 @@ flowchart TD
     Model --> BDEF["Base Behavior Definition: future"]
     BDEF -. custom behavior implemented in .-> Pool["Behavior pool class: future"]
     BDEF --> Projection["CDS projections: ZJP_C_PurchaseOrder / ZJP_C_PurchaseOrderItem"]
-    Projection --> PBDEF["Projection Behavior Definition: future"]
-    PBDEF --> Service["Service definition and binding: Phase 3"]
+    Projection --> PBDEF["Projection Behavior Definition: ZJP_C_PurchaseOrder, Phase 3.1"]
+    PBDEF --> Service["Service definition and binding: ZJP_UI_PURCHASEORDER / _O4, Phase 3.1"]
 ```
 
 This is a map of the development layers, not the chronological execution of a database request. Behavior attaches to the existing CDS entities; it does not replace the tables or insert another SQL view into their select statements.
@@ -59,7 +59,7 @@ The two Behavior Definition objects can share names with their corresponding CDS
 
 A later EML test will request an operation from RAP, which will use the BO's declared behavior and manage the transactional buffer. Custom handlers run where the configured behavior requires them. Successful changes reach the persistent tables during the save sequence. We will learn that sequence explicitly in the EML step.
 
-Phase 3's OData service will give external consumers another entry point to the BO. It will not replace the BO or introduce a second implementation of the procurement rules. The layer diagram reads from storage toward service; a runtime request arrives from a consumer and is processed toward persistence.
+Phase 3's OData service gives external consumers another entry point to the BO. [Phase 3.1](phase-3-1-odata-service-exposure.md) delivered it, and it did exactly what this sentence anticipated: it did not replace the BO or introduce a second implementation of the procurement rules. The layer diagram reads from storage toward service; a runtime request arrives from a consumer and is processed toward persistence.
 
 ## The Phase 2 learning checkpoints
 
