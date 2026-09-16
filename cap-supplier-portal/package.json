@@ -17,7 +17,7 @@
     "pretypecheck": "npm run generate-types",
     "typecheck": "tsc --noEmit",
     "pretest": "npm run generate-types",
-    "test": "node --import tsx --import ./test/cds-typescript.ts --test test/health.test.ts test/domain-model.test.ts"
+    "test": "node --import tsx --import ./test/cds-typescript.ts --test test/health.test.ts test/domain-model.test.ts test/integration-ingestion.test.ts"
   },
   "dependencies": {
     "@cap-js/sqlite": "^3.1.1",

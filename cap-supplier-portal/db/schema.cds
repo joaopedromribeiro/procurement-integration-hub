@@ -77,7 +77,7 @@ entity Orders : cuid {
     /** Human-readable number allocated by SAP on submit. Display only here. */
     externalOrderNumber   : String(20);
 
-    supplier              : Association to one Suppliers;
+    supplier              : Association to one Suppliers not null;
 
     currency              : CurrencyCode;
 
@@ -139,4 +139,49 @@ entity OrderItems : cuid {
 
     @Measures.ISOCurrency: currency
     lineAmount   : Decimal(19, 2);
+}
+
+/**
+ * Deduplication record for one delivery attempt, written in the same
+ * transaction as the order it produced.
+ *
+ * Specified in the CAP persistence table of docs/architecture/domain-model.md
+ * as "source system + deliveryId unique; normalized request hash; source order
+ * identity; portal order ID; original receipt; createdAt". That table marks it
+ * phase 5, and Phase 4.3 pulls it forward deliberately: the ingestion contract
+ * requires an exact replay to return the *original* receipt and a conflicting
+ * reuse of the same deliveryId to return 409, and neither is answerable without
+ * a stored hash and a stored receipt. The rest of the Phase 5 delivery
+ * machinery — DeliveryIntent, SupplierResponseDelivery, attempt history — is
+ * not pulled forward with it.
+ *
+ * The unique constraint is the point of the entity. The contract requires
+ * parallel duplicates to be "resolved through database uniqueness and rereading
+ * the committed receipt", not by a read-before-insert check that two concurrent
+ * requests can both pass.
+ */
+@assert.unique.delivery: [
+    sourceSystem,
+    deliveryId
+]
+entity DeliveryReceipts : cuid {
+    sourceSystem   : String(30) not null;
+    deliveryId     : UUID not null;
+
+    /** sha256 over the normalized delivery content; see srv/lib/ingestion.ts. */
+    requestHash    : String(64) not null;
+
+    sourceOrderId  : UUID not null;
+    sourceRevision : Integer not null;
+
+    /** The order this delivery produced: `portalOrderId` in the receipt. */
+    order          : Association to one Orders not null;
+
+    // The receipt exactly as it was first returned, so a replay re-reads it
+    // rather than recomputing it from the order's current state.
+    status         : PortalOrderStatus default #RECEIVED;
+    receivedAt     : Timestamp;
+
+    @cds.on.insert: $now
+    createdAt      : Timestamp;
 }
