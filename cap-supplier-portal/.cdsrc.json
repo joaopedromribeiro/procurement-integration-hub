@@ -5,6 +5,27 @@
       "credentials": {
         "url": ":memory:"
       }
+    },
+    "auth": {
+      "kind": "mocked",
+      "users": {
+        "supplier1": {
+          "password": "supplier1",
+          "attr": {
+            "supplier": "SUP001"
+          }
+        },
+        "supplier2": {
+          "password": "supplier2",
+          "attr": {
+            "supplier": "SUP002"
+          }
+        },
+        "nosupplier": {
+          "password": "nosupplier",
+          "attr": {}
+        }
+      }
     }
   },
   "odata": {

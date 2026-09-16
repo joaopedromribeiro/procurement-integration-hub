@@ -1,8 +1,8 @@
-# API contracts
+| **Implemented, Phase 4.4.** New response version on accepted order || **Implemented, Phase 4.4.** Explicit rejection command || **Implemented, Phase 4.4.** Explicit acceptance command || **Implemented, Phase 4.4.** Supplier-filtered list and detail || CI → CAP integration service | POST `/rest/integration/v1/Orders` | **Implemented, Phase 4.3.** Mapped portal ingestion contract |# API contracts
 
 Phase 0 proposed version: v1 / design draft. Freeze machine-readable schemas and test actual protocol serialization when implementing the relevant phase.
 
-**Status update:** the buyer-facing RAP OData V4 service is no longer a proposal — it is implemented, published and SAP runtime-verified; see [the buyer UI service](#buyer-ui-service-rap-odata-v4). The CAP integration ingestion endpoint `POST /rest/integration/v1/Orders` is also implemented and **locally** runtime-verified in [Phase 4.3](cap-supplier-portal/docs/phase-4-3-integration-ingestion.md) — local Node.js execution on a developer machine, not a hosted deployment and not called by SAP, which remains Phase 5. Every other endpoint in this document remains a design draft and does not exist yet.
+**Status update:** the buyer-facing RAP OData V4 service is no longer a proposal — it is implemented, published and SAP runtime-verified; see [the buyer UI service](#buyer-ui-service-rap-odata-v4). The CAP integration ingestion endpoint and the CAP supplier-facing service are also implemented and **locally** runtime-verified, in [Phase 4.3](cap-supplier-portal/docs/phase-4-3-integration-ingestion.md) and [Phase 4.4](cap-supplier-portal/docs/phase-4-4-supplier-service.md) — local Node.js execution on a developer machine, not a hosted deployment, with mocked supplier identity rather than real authentication, and with no traffic between SAP and CAP in either direction, which remains Phase 5. Every route that crosses the SAP/CAP boundary remains a design draft and does not exist yet.
 
 Phase 1 compatibility note: `ZJP_` table/view names are internal ADT object names; they do not change these external DTOs. At that checkpoint they established no OData service path either; [Phase 3.1](abap-rap/docs/phase-3-1-odata-service-exposure.md) has since created one, recorded below. The persistence/CDS model preserves the planned field sizes and decimal scales. Optional values use ABAP initial values in the tables; the future boundary adapter must map blank response text, initial UUIDs and initial dates to the contract's null/absence convention. Do not serialize date `00000000` as a valid external calendar date. Phase 1 adds no API implementation.
 
@@ -12,11 +12,11 @@ Phase 1 compatibility note: `ZJP_` table/view names are internal ADT object name
 | --- | --- | --- |
 | Buyer UI → RAP UI service | **Implemented and runtime-verified.** OData V4 entity CRUD, draft operations and bound business actions on `ZJP_UI_PURCHASEORDER`; see [the buyer UI service](#buyer-ui-service-rap-odata-v4) below | Buyer edits permitted fields; RAP enforces rules |
 | Coordinator → CI | POST `/http/pih/v1/order-deliveries` | Source delivery contract |
-| CI → CAP integration service | POST `/rest/integration/v1/Orders` | Mapped portal ingestion contract |
-| Supplier UI → CAP supplier service | GET `/rest/supplier/v1/Orders`, GET `/rest/supplier/v1/Orders/{ID}` | Supplier-filtered list and detail |
-| Supplier UI → CAP supplier service | POST `/rest/supplier/v1/Orders/{ID}/accept` | Explicit acceptance command |
-| Supplier UI → CAP supplier service | POST `/rest/supplier/v1/Orders/{ID}/reject` | Explicit rejection command |
-| Supplier UI → CAP supplier service | POST `/rest/supplier/v1/Orders/{ID}/updateEstimatedDeliveryDate` | New response version on accepted order |
+| CI → CAP integration service | POST `/rest/integration/v1/Orders` | **Implemented, Phase 4.3.** Mapped portal ingestion contract |
+| Supplier UI → CAP supplier service | GET `/rest/supplier/v1/Orders`, GET `/rest/supplier/v1/Orders/{ID}` | **Implemented, Phase 4.4.** Supplier-filtered list and detail |
+| Supplier UI → CAP supplier service | POST `/rest/supplier/v1/Orders/{ID}/accept` | **Implemented, Phase 4.4.** Explicit acceptance command |
+| Supplier UI → CAP supplier service | POST `/rest/supplier/v1/Orders/{ID}/reject` | **Implemented, Phase 4.4.** Explicit rejection command |
+| Supplier UI → CAP supplier service | POST `/rest/supplier/v1/Orders/{ID}/updateEstimatedDeliveryDate` | **Implemented, Phase 4.4.** New response version on accepted order |
 | CAP response sender → CI | POST `/http/pih/v1/supplier-responses` | CAP supplier response contract |
 | CI → RAP integration service | OData V4 bound `applySupplierResponse` action | Only validated supplier response may change corresponding RAP fields |
 | Operations → CAP integration service | GET `/rest/integration/v1/DeliveryReceipts/{deliveryId}` | Resolve an ambiguous delivery, scoped to source client |
@@ -170,7 +170,9 @@ Normalize known fields, decimal representation and object member ordering before
 
 Supplier `accept` input contains a client-generated stable responseId and optional estimatedDeliveryDate. `reject` contains responseId and required reason. `updateEstimatedDeliveryDate` contains a new responseId and required estimatedDeliveryDate. Use a version/ETag precondition against the order for a new command; replay detection must recognize an already successful identical command even if its original version is now stale. CAP assigns the next responseVersion atomically and enforces supplier ownership.
 
-On success, return 200 with the committed portal order/decision and `responseDeliveryStatus: PENDING` if SAP has not acknowledged it. UI acceptance does not claim SAP has been updated. A local/hosted response sender then submits this immutable DTO:
+**Implemented and locally verified in Phase 4.4**, with the details this section left open now settled by execution. The precondition is the order's `responseVersion` carried as an `expectedResponseVersion` parameter, not an HTTP ETag, so the same value can travel to SAP in the response payload. A stale precondition is **409**, matching "new IDs with stale/conflicting versions return 409"; 412 was considered and not used. An order belonging to another supplier is a scoped **404** with no fields disclosed, the "scoped not-found" option of the design acceptance cases, chosen over 403 because 403 confirms the row exists. Bound actions are routed by CAP's REST adapter as `POST /rest/supplier/v1/Orders/{portalOrderId}/{action}` with the parameters as a flat JSON body — exactly the paths listed above. Supplier identity is read from the authenticated user's attributes and is mocked locally; real identity is Phase 8.
+
+On success, return 200 with the committed portal order/decision and `responseDeliveryStatus: PENDING` if SAP has not acknowledged it. UI acceptance does not claim SAP has been updated. **Phase 4.4 returns exactly this**: `portalOrderId`, `externalOrderNumber`, `status`, `responseVersion`, `estimatedDeliveryDate`, `rejectionReason`, `respondedAt` and `responseDeliveryStatus`, which is always `PENDING` because no sender exists yet. The decision and its pending response commit in one transaction, verified by forcing the second write to fail and observing the first roll back. A local/hosted response sender then submits this immutable DTO:
 
 ```json
 {

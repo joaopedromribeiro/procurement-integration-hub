@@ -482,18 +482,24 @@ describe('the service boundary', () => {
     })
   })
 
-  test('no Phase 4.4 supplier surface exists yet', async () => {
-    for (const route of [
-      '/rest/supplier/v1/Orders',
-      '/rest/supplier/v1/Orders/1/accept',
-      '/rest/supplier/v1/Orders/1/reject',
-      '/odata/v4/Orders'
-    ]) {
+  /**
+   * Phase 4.4 added the supplier surface, so this no longer asserts its absence.
+   * What must stay true is that it is a *separate, authenticated* service: the
+   * integration client's anonymous access does not reach it, and no persistence
+   * entity is served anywhere.
+   */
+  test('the supplier surface is a separate, authenticated service', async () => {
+    for (const route of ['/rest/supplier/v1/Orders', '/rest/supplier/v1/OrderItems']) {
       await assert.rejects(() => portal.GET(route), (error: any) => {
-        assert.equal(error.response?.status, 404, `${route} must not be served`)
+        assert.equal(error.response?.status, 401, `${route} must require authentication`)
         return true
       })
     }
+
+    await assert.rejects(() => portal.GET('/odata/v4/Orders'), (error: any) => {
+      assert.equal(error.response?.status, 404, 'no generic OData surface over persistence')
+      return true
+    })
   })
 
   test('persistence entities are not exposed through any service', () => {

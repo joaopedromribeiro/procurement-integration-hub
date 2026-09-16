@@ -185,3 +185,51 @@ entity DeliveryReceipts : cuid {
     @cds.on.insert: $now
     createdAt      : Timestamp;
 }
+
+/**
+ * The supplier's decision, captured as an immutable outbound response that has
+ * not yet been sent to SAP.
+ *
+ * Specified in the CAP persistence table of docs/architecture/domain-model.md as
+ * "responseId: UUID; order association; version; immutable response payload;
+ * state PENDING/DELIVERED/FAILED/UNKNOWN; attempt count; last error; timestamps".
+ * That table marks it phase 5, and Phase 4.4 pulls forward only what a supplier
+ * decision needs: the identity, the version, the payload and the state. Attempt
+ * count, last error and the sender itself stay in Phase 5, because nothing in
+ * Phase 4 ever attempts a delivery — every row written here is PENDING and stays
+ * PENDING.
+ *
+ * It is written in the same transaction as the decision it records, so an order
+ * can never be ACCEPTED with no pending response, nor carry a pending response
+ * while still RECEIVED.
+ */
+@assert.unique.responseId  : [responseId]
+@assert.unique.orderVersion: [
+    order,
+    version
+]
+entity SupplierResponseDeliveries : cuid {
+    /** Client-generated and stable: the caller's idempotency key. */
+    responseId            : UUID not null;
+
+    order                 : Association to one Orders not null;
+
+    /** The `responseVersion` this response assigned. Starts at 1. */
+    version               : Integer not null;
+
+    // The immutable payload, exactly the facts the Phase 5 sender will submit.
+    decision              : PortalOrderStatus not null;
+    estimatedDeliveryDate : Date;
+    reason                : String(255);
+    respondedAt           : Timestamp;
+
+    /**
+     * Transport state, deliberately separate from the order's business status
+     * (ADR-010). Phase 4.4 only ever writes PENDING; DELIVERED, FAILED and
+     * UNKNOWN become reachable when a sender exists in Phase 5.
+     */
+    state                 : String(10) default 'PENDING';
+
+    @cds.on.insert: $now
+    createdAt             : Timestamp;
+}
