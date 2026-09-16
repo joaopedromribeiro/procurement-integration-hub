@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "lib": ["es2023"],
+    "types": ["@cap-js/cds-types", "node"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "#cds-models/*": ["./@cds-models/*/index.ts"]
+    }
+  },
+  "include": ["srv", "test"],
+  "exclude": ["node_modules", "gen", "@cds-models"]
+}
