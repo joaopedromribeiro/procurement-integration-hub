@@ -1,11 +1,5 @@
 {
   "requires": {
-    "db": {
-      "kind": "sqlite",
-      "credentials": {
-        "url": ":memory:"
-      }
-    },
     "auth": {
       "kind": "mocked",
       "users": {
