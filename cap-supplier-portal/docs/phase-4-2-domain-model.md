@@ -157,7 +157,9 @@ CREATE TABLE pih_portal_OrderItems (
 
 ## Fixtures
 
-Three CSV files under `db/data/`, named `<namespace>-<Entity>.csv` as CAP expects. All values are obviously synthetic.
+Three CSV files named `<namespace>-<Entity>.csv` as CAP expects. All values are obviously synthetic.
+
+They were written to `db/data/` in this subphase and **later moved to `test/data/`**, unchanged, when OI-14 item 3 was resolved. The reason is that CAP resolves seed folders per profile — `[development]` reads `db/data`, `db/csv` *and* `test/data`, while `[production]` reads only the first two — so `db/data` is deployed by construction and **`test/data` is intentionally development-only**. Local development and the tests load exactly the same rows from the new location; a production HANA build now generates no `.hdbtabledata` at all. The fixture content below is unaffected.
 
 Two suppliers: `SUP001` "Example Technology Supplier" and `SUP002` "Example Components Supplier", both active. `SUP001` is the code the domain model already nominates as the shared synthetic supplier.
 

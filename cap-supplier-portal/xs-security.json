@@ -1,0 +1,50 @@
+{
+  "scopes": [
+    {
+      "name": "$XSAPPNAME.IntegrationClient",
+      "description": "IntegrationClient"
+    },
+    {
+      "name": "$XSAPPNAME.SupplierPortalUser",
+      "description": "SupplierPortalUser"
+    }
+  ],
+  "attributes": [
+    {
+      "name": "supplier",
+      "description": "supplier",
+      "valueType": "s",
+      "valueRequired": false
+    }
+  ],
+  "authorities": [
+    "$XSAPPNAME.IntegrationClient"
+  ],
+  "role-templates": [
+    {
+      "name": "IntegrationClient",
+      "description": "generated",
+      "scope-references": [
+        "$XSAPPNAME.IntegrationClient"
+      ],
+      "attribute-references": []
+    },
+    {
+      "name": "SupplierPortalUser",
+      "description": "generated",
+      "scope-references": [
+        "$XSAPPNAME.SupplierPortalUser"
+      ],
+      "attribute-references": []
+    },
+    {
+      "name": "userattributes",
+      "description": "generated",
+      "default-role-name": "Attributes of a User",
+      "scope-references": [],
+      "attribute-references": [
+        "supplier"
+      ]
+    }
+  ]
+}

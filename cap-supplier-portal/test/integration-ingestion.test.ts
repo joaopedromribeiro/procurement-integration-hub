@@ -59,10 +59,19 @@ function delivery(overrides: Record<string, any> = {}) {
   }
 }
 
+/**
+ * The service requires the `IntegrationClient` role, so every delivery below is
+ * sent as SAP's technical client. `sapintegration` is the mocked stand-in for
+ * the machine-to-machine identity; in production that role arrives as an XSUAA
+ * scope on a client-credentials token. Tests that assert the *absence* of this
+ * permission pass their own config and override this default.
+ */
+const asIntegrationClient = { auth: { username: 'sapintegration', password: 'sapintegration' } }
+
 /** POST without throwing, so a rejected request can be asserted on. */
 async function post(body: any, config?: any) {
   try {
-    const response = await portal.POST(ENDPOINT, body, config)
+    const response = await portal.POST(ENDPOINT, body, { ...asIntegrationClient, ...config })
     return { status: response.status, data: response.data }
   } catch (error: any) {
     return { status: error.response?.status, data: error.response?.data }
@@ -476,10 +485,52 @@ describe('integration-contract validation', () => {
 describe('the service boundary', () => {
 
   test('the integration service is insert-only', async () => {
-    await assert.rejects(() => portal.GET(ENDPOINT), (error: any) => {
+    // Sent as a permitted caller, so 405 proves the method is refused rather
+    // than the credentials: an anonymous GET would answer 401 first.
+    await assert.rejects(() => portal.GET(ENDPOINT, asIntegrationClient), (error: any) => {
       assert.equal(error.response?.status, 405)
       return true
     })
+  })
+
+  /**
+   * The ingestion endpoint is not public, and the two roles do not substitute
+   * for one another. This is the separation ADR-005 asks for, asserted rather
+   * than assumed: before the `@requires` annotation the endpoint accepted any
+   * caller at all, which was recorded as Phase 4.6 debt.
+   */
+  test('ingestion refuses an anonymous caller and a supplier-role caller alike', async () => {
+    const body = delivery()
+    const before = await counts()
+
+    // No credentials at all.
+    const anonymous = await post(body, { auth: undefined })
+    assert.equal(anonymous.status, 401, 'the ingestion endpoint must not be public')
+
+    // A real, authenticated supplier — the wrong kind of identity for this route.
+    const asSupplier = await post(body, {
+      auth: { username: 'supplier1', password: 'supplier1' }
+    })
+    assert.equal(
+      asSupplier.status, 403,
+      'a supplier-facing role must not grant SAP integration access'
+    )
+
+    // Neither refused call wrote anything. Counts are cumulative across this
+    // suite, so the assertion is that nothing *changed*, not that nothing exists.
+    assert.deepEqual(await counts(), before, 'a refused delivery must persist nothing')
+  })
+
+  test('the integration role does not grant the supplier surface', async () => {
+    for (const route of ['/rest/supplier/v1/Orders', '/rest/supplier/v1/OrderItems']) {
+      await assert.rejects(() => portal.GET(route, asIntegrationClient), (error: any) => {
+        assert.equal(
+          error.response?.status, 403,
+          `${route} must not be readable by the integration client`
+        )
+        return true
+      })
+    }
   })
 
   /**

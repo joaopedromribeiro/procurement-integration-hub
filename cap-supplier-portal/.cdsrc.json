@@ -1,23 +1,41 @@
 {
   "requires": {
-    "auth": {
-      "kind": "mocked",
-      "users": {
-        "supplier1": {
-          "password": "supplier1",
-          "attr": {
-            "supplier": "SUP001"
+    "[development]": {
+      "auth": {
+        "kind": "mocked",
+        "users": {
+          "supplier1": {
+            "password": "supplier1",
+            "roles": [
+              "SupplierPortalUser"
+            ],
+            "attr": {
+              "supplier": "SUP001"
+            }
+          },
+          "supplier2": {
+            "password": "supplier2",
+            "roles": [
+              "SupplierPortalUser"
+            ],
+            "attr": {
+              "supplier": "SUP002"
+            }
+          },
+          "nosupplier": {
+            "password": "nosupplier",
+            "roles": [
+              "SupplierPortalUser"
+            ],
+            "attr": {}
+          },
+          "sapintegration": {
+            "password": "sapintegration",
+            "roles": [
+              "IntegrationClient"
+            ],
+            "attr": {}
           }
-        },
-        "supplier2": {
-          "password": "supplier2",
-          "attr": {
-            "supplier": "SUP002"
-          }
-        },
-        "nosupplier": {
-          "password": "nosupplier",
-          "attr": {}
         }
       }
     }

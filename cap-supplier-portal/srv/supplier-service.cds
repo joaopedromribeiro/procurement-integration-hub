@@ -14,9 +14,17 @@ using {pih.portal as portal} from '../db/schema';
  * is an explicit action with its own handler. There is no writable path to a
  * status field anywhere in this service.
  */
+// `SupplierPortalUser` is a real application role, not CAP's `authenticated-user`
+// pseudo-role. The distinction matters for exactly the reason ADR-005 separates
+// the two services: a client-credentials token minted for SAP's inbound
+// integration is also an authenticated user, so `authenticated-user` would have
+// let the integration client read supplier orders. A named role cannot be reused
+// that way, and only a named role reaches `xs-security.json` — CAP's
+// `cds compile --to xsuaa` skips the pseudo-roles when generating scopes.
+// Plain comments, not `/** */`: a doc comment here overrides the service's own.
 @protocol: 'rest'
 @path    : '/rest/supplier/v1'
-@requires: 'authenticated-user'
+@requires: 'SupplierPortalUser'
 service SupplierService {
 
   /** The result of any supplier decision, per API_CONTRACTS.md. */

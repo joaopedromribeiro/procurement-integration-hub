@@ -19,7 +19,7 @@ const portal = cds.test(path.resolve(__dirname, '..'))
 
 const SUPPLIER = '/rest/supplier/v1'
 
-/** Fixture ids from db/data; SUP001 owns 1 and 2, SUP002 owns 3. */
+/** Fixture ids from test/data; SUP001 owns 1 and 2, SUP002 owns 3. */
 const SUP001_ORDER_A = '22222222-2222-4222-8222-000000000001'
 const SUP001_ORDER_B = '22222222-2222-4222-8222-000000000002'
 const SUP002_ORDER_C = '22222222-2222-4222-8222-000000000003'

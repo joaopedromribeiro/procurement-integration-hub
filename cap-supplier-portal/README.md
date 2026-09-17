@@ -32,11 +32,11 @@ npx cds build --production                   # -> gen/db (HDI deployer) + gen/sr
 
 Neither profile is configured by hand. `.cdsrc.json` deliberately says **nothing** about `db`: `@cap-js/sqlite` contributes `requires.db = "sql"` with `kinds.sql.[development]` resolving to SQLite `:memory:`, and `@cap-js/hana` contributes `kinds.sql.[production]` resolving to HANA. Pinning `requires.db` in the project file would apply to every profile and silently keep production on SQLite, which is exactly what it did before this step.
 
-`cds build --production` emits a `db` build task `for: 'hana'` and writes `gen/db` as an HDI deployer module — `@sap/hdi-deploy` with the pure-JS `hdb` driver — containing 6 `.hdbtable`, 7 `.hdbindex`, 2 `.hdbview`, the fixture `.hdbtabledata`, `.hdiconfig`, `.hdinamespace` and `undeploy.json`. The 6 tables are the five `pih.portal` entities plus CAP's own `cds.outbox.Messages`; the 7 indexes are the 7 `@assert.unique` rules rendered as `UNIQUE INVERTED INDEX`, so the constraints the idempotency guarantees rest on survive into HANA. Decimals become real `DECIMAL(19,2)`, `DECIMAL(19,4)` and `DECIMAL(13,3)` columns rather than SQLite's `REAL_DECIMAL`.
+`cds build --production` emits a `db` build task `for: 'hana'` and writes `gen/db` as an HDI deployer module — `@sap/hdi-deploy` with the pure-JS `hdb` driver — containing 6 `.hdbtable`, 7 `.hdbindex`, 2 `.hdbview`, `.hdiconfig`, `.hdinamespace` and `undeploy.json`. The 6 tables are the five `pih.portal` entities plus CAP's own `cds.outbox.Messages`; the 7 indexes are the 7 `@assert.unique` rules rendered as `UNIQUE INVERTED INDEX`, so the constraints the idempotency guarantees rest on survive into HANA. **It contains no seed data at all** — no `.hdbtabledata` and no CSV — because the fixtures live in the development-only `test/data` folder described above, so deploying this build cannot load synthetic records into HANA. Decimals become real `DECIMAL(19,2)`, `DECIMAL(19,4)` and `DECIMAL(13,3)` columns rather than SQLite's `REAL_DECIMAL`.
 
 `tsconfig.cdsbuild.json` exists only for this build. The `cds-typer` build plugin looks for that exact filename and, when it is missing, falls back to `tsc --outDir gen/srv`, which fails with `TS2210` because emitting against the `package.json` `imports` map needs a `rootDir`. It has no effect on `npm run typecheck` or `npm test`, which both use `tsconfig.json`.
 
-**Nothing has been deployed and nothing is bound.** `pih-hana` and `pih-hdi` exist in BTP Cloud Foundry space `dev`, but this application has never connected to HANA, so the generated DDL above has been *read*, not *run*. **Three findings remain open** and must be settled before any deployment — mocked authentication carried into the production build, fixture CSVs in the deployment output, and unverified HANA runtime behaviour. They are recorded in [PROJECT_STATUS.md](../PROJECT_STATUS.md) under OI-14, whose **item 1 is resolved**: the empty persistence artifact that the build once generated for `IntegrationService.Orders` is gone, which is what took the table count from 7 to 6.
+**Nothing has been deployed and nothing is bound.** `pih-hana` and `pih-hdi` exist in BTP Cloud Foundry space `dev`, but this application has never connected to HANA, so the generated DDL above has been *read*, not *run*. **Two findings remain open** and must be settled before any deployment — authentication, now **partially resolved** (mocked auth can no longer resolve in production and the `IntegrationClient` authority is token-level proven, but deployed enforcement and the supplier attribute mapping are not), and unverified HANA runtime behaviour. They are recorded in [PROJECT_STATUS.md](../PROJECT_STATUS.md) under OI-14, whose **items 1 and 3 are resolved**: the empty persistence artifact the build once generated for `IntegrationService.Orders` is gone, which took the table count from 7 to 6, and the fixture CSVs moved to `test/data`, which took the seed artifacts from 3 `.hdbtabledata` to none. Both are facts about what the build emits; neither is evidence about HANA.
 
 ### Deliver an order
 
@@ -63,13 +63,43 @@ curl -u supplier1:supplier1 -X POST \
   -d '{"responseId":"7f135926-34af-4eb2-a8b3-1b851303afc9","expectedResponseVersion":0,"estimatedDeliveryDate":"2026-12-01"}'
 ```
 
-`supplier1` is `SUP001` and `supplier2` is `SUP002`, mapped in `.cdsrc.json`. Each sees only its own orders; another supplier's order id returns 404. **This is local supplier isolation, not production authentication** — real identity is Phase 8.
+`supplier1` is `SUP001` and `supplier2` is `SUP002`, mapped in `.cdsrc.json` under the `[development]` profile. Each sees only its own orders; another supplier's order id returns 404. **This is local supplier isolation, not production authentication** — real interactive identity is Phase 8.
+
+Delivering an order also needs a role now. The ingestion endpoint is no longer open: send it as `sapintegration`, the mocked stand-in for SAP's technical client, which in production is an XSUAA scope on a client-credentials token.
+
+```bash
+curl -i -u sapintegration:sapintegration -X POST http://localhost:4004/rest/integration/v1/Orders ...
+```
+
+## Production authentication (prepared, not runtime-verified)
+
+Authentication is chosen by profile, the same way the database is:
+
+```bash
+npx cds env requires.auth                      # -> kind: mocked, with the four mock users
+npx cds env requires.auth --profile production # -> kind: xsuaa, and no `users` key at all
+```
+
+Two named application roles, not CAP's `authenticated-user` pseudo-role:
+
+| Role | Grants | Caller |
+| --- | --- | --- |
+| `SupplierPortalUser` | `/rest/supplier/v1` | a person at a supplier |
+| `IntegrationClient` | `/rest/integration/v1` | SAP's technical client |
+
+The pseudo-role was wrong twice over: CAP's generator skips it, so it produced no XSUAA scope, and a client-credentials token *is* an authenticated user — it would have granted SAP's integration client the supplier read surface. [xs-security.json](xs-security.json) is generated from these annotations with `npx cds compile srv --to xsuaa`.
+
+**One thing needed real cloud evidence.** A scope plus a role-template does **not** put that scope into the application's own `client_credentials` token — a probe against a temporary XSUAA instance returned only `uaa.resource`. Top-level `authorities: ["$XSAPPNAME.IntegrationClient"]` is the same-application mechanism, and with it the token carries the resolved `IntegrationClient` scope while `SupplierPortalUser` stays absent. Role-templates serve interactive users through role-collections; `authorities` serves the app's own client. `SupplierPortalUser` is deliberately excluded from `authorities`, because including it would give every machine token the supplier surface.
+
+`xsappname` is deliberately **not** in the tracked descriptor — the deployment descriptor owns the application identity. Note that `cf create-service` refuses a descriptor without one.
+
+**Still unverified:** CAP is not deployed, so no real token has satisfied `@requires: 'IntegrationClient'` over HTTP; the `supplier` → `req.user.attr.supplier` mapping needs an interactive token, which a technical token cannot provide; and SAP S/4 is not configured to fetch or send a token. Tracked as OI-14 item 2 in [PROJECT_STATUS.md](../PROJECT_STATUS.md), **partially resolved and still open**.
 
 ## What is here
 
-- `db/`: [schema.cds](db/schema.cds) — namespace `pih.portal` with `Suppliers`, `Orders`, composed `OrderItems`, `DeliveryReceipts` and `SupplierResponseDeliveries`, plus CSV fixtures in `db/data/`. The portal's own domain, deliberately not a copy of the SAP tables: `externalOrderNumber`, `productCode`, `lineNumber`, `unitPrice`, `lineAmount`, `uom` `PCE`, and no SAP organizational fields.
+- `db/`: [schema.cds](db/schema.cds) — namespace `pih.portal` with `Suppliers`, `Orders`, composed `OrderItems`, `DeliveryReceipts` and `SupplierResponseDeliveries`. The portal's own domain, deliberately not a copy of the SAP tables: `externalOrderNumber`, `productCode`, `lineNumber`, `unitPrice`, `lineAmount`, `uom` `PCE`, and no SAP organizational fields. The folder holds the model only — **no seed data**, deliberately; see `test/data/` below.
 - `srv/`: [integration-service.cds](srv/integration-service.cds) — the CI → CAP ingestion boundary; [supplier-service.cds](srv/supplier-service.cds) — the supplier read model and the bound `accept`/`reject`/`updateEstimatedDeliveryDate` actions; plus `HealthService` from Phase 4.1. `srv/lib/` holds exact decimal arithmetic and the contract validation.
-- `test/`: the foundation, persistence, ingestion, supplier-service and UI suites — 87 tests, all driven through a running CAP application.
+- `test/`: the foundation, persistence, ingestion, supplier-service and UI suites — 87 tests, all driven through a running CAP application. `test/data/` holds the three CSV fixtures, and the folder is the point: CAP resolves seed folders **per profile**, reading `db/data`, `db/csv` *and* `test/data` under `[development]` but only the first two under `[production]`. So `test/data` is **intentionally development-only** and its rows are excluded from the production HANA build, while local development and the tests load them exactly as before.
 - `app/`: the supplier UI — plain HTML, CSS and ES modules, no framework and no build step, served by CAP at `http://localhost:4004/`. [lib/order-view.mjs](app/lib/order-view.mjs) holds the presentation logic as pure functions, which the tests import directly.
 
 **No writable persistence path is exposed by any service.** `IntegrationService.Orders` is a service-local contract shape with `@insertonly`, so `GET` on it returns 405. The supplier projections are `@readonly` with explicit element lists and a row filter, so `PATCH` and `DELETE` return 405 and no foreign key or SAP correlation field reaches a supplier. `/odata/v4/Orders` returns 404: there is no generic CRUD surface over the database.

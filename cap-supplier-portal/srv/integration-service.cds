@@ -12,8 +12,15 @@
  * as decimal strings per the common rules. A custom CREATE handler maps it into
  * persistence; there is no deep insert from the wire.
  */
+// `IntegrationClient` is a dedicated technical role for SAP's machine-to-machine
+// calls, deliberately distinct from the supplier portal's role: the caller here is
+// a system delivering snapshots, not a person deciding about them (ADR-005), and
+// neither role grants the other's surface. Until this annotation the service was
+// reachable unauthenticated, which was recorded as Phase 4.6 debt.
+// Plain comments, not `/** */`: a doc comment here overrides the service's own.
 @protocol: 'rest'
 @path    : '/rest/integration/v1'
+@requires: 'IntegrationClient'
 service IntegrationService {
 
   /** Decimal transported as a string: "no scientific notation" (common rules). */
