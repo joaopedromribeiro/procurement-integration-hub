@@ -10,7 +10,7 @@ SAP does not call this endpoint yet — that is Phase 5 — and no Integration S
 
 ## Service boundary
 
-`IntegrationService` is a separate service from the Phase 4.4 `SupplierService` that does not exist yet, so the two can carry different permissions when authorization arrives (ADR-005). It exposes exactly one thing.
+`IntegrationService` is a separate service from the supplier-facing `SupplierService`, which Phase 4.4 has since added, so the two can carry different permissions when authorization arrives (ADR-005). It exposes exactly one thing.
 
 | Property | Value |
 | --- | --- |
@@ -259,7 +259,7 @@ ok 9 - the service boundary
 # fail 0
 ```
 
-Suites 1–4 are the unchanged Phase 4.1 and 4.2 tests. Suite 5 posts a two-line delivery and then reads the stored order back through its supplier association and its items composition, checking every mapped field and every server-owned field. Suite 6 covers replay, normalized replay, conflict, concurrency and the database constraint. Suite 7 covers the two uniqueness rules and the new-revision case. Suite 8 has sixteen refusal cases, each asserting that nothing was persisted, plus one direct assertion on the `INVALID_PAYLOAD` guard, which no HTTP body can reach. Suite 9 asserts the boundary: 405 on `GET`, 404 on every Phase 4.4 route, and no service entity anywhere that projects on persistence.
+Entries 1–4 in that output are the unchanged Phase 4.1 and 4.2 tests — three suites plus the standalone health test, which is entry 4 and is a top-level `test()` rather than a `describe()`; that is why the run prints nine entries and reports eight suites. Entry 5 posts a two-line delivery and then reads the stored order back through its supplier association and its items composition, checking every mapped field and every server-owned field. Entry 6 covers replay, normalized replay, conflict, concurrency and the database constraint. Entry 7 covers the two uniqueness rules and the new-revision case. Entry 8 has sixteen refusal cases, each asserting that nothing was persisted, plus one direct assertion on the `INVALID_PAYLOAD` guard, which no HTTP body can reach. Entry 9 asserts the boundary: 405 on `GET`, 404 on every Phase 4.4 route, and no service entity anywhere that projects on persistence.
 
 ## Manual HTTP evidence
 
@@ -285,7 +285,7 @@ HTTP 400
 
 The replay returns the *same* `portalOrderId` and the *same* `receivedAt` as the original — it is the stored receipt, not a recomputed one.
 
-Phase 4.4 remains unimplemented, verified rather than asserted:
+Phase 4.4 was unimplemented at this checkpoint, verified rather than asserted. **These 404s are the Phase 4.3 result and are preserved as recorded; Phase 4.4 has since added the supplier surface**, so the same requests now return 401 without credentials:
 
 ```text
 GET /rest/supplier/v1/Orders          -> 404

@@ -27,6 +27,7 @@ ARCHITECTURE.md draws exactly this line: *"Generated READ support is appropriate
 | `GET` | `/rest/supplier/v1/Orders/{portalOrderId}` | one of the caller's own orders |
 | `GET` | `/rest/supplier/v1/Orders/{portalOrderId}/items` | that order's lines |
 | `GET` | `/rest/supplier/v1/OrderItems` | all the caller's lines, scoped |
+| `GET` | `/rest/supplier/v1/OrderItems/{ID}` | one of the caller's lines; scoped 404 otherwise |
 | `POST` | `/rest/supplier/v1/Orders/{portalOrderId}/accept` | accept |
 | `POST` | `/rest/supplier/v1/Orders/{portalOrderId}/reject` | reject with a reason |
 | `POST` | `/rest/supplier/v1/Orders/{portalOrderId}/updateEstimatedDeliveryDate` | revise the date |
@@ -227,7 +228,7 @@ The test then asserts the order is still `RECEIVED`, still version `0`, still wi
 | Same `responseId`, different content | **409** | `RESPONSE_PAYLOAD_CONFLICT` |
 | Generic write attempt | **405** | framework |
 
-Thirteen application-defined codes, all in the contract envelope with `code`, `message`, `correlationId` and `retryable`.
+Thirteen application-defined codes, all in the contract envelope with `code`, `message`, `correlationId` and `retryable`. **Phase 4.5 added a fourteenth**, `INVALID_PAGINATION`, when it defined the list pagination contract; the current total for this service is 14.
 
 ### A Phase 4.3 lesson applied in advance
 
@@ -263,7 +264,7 @@ ok 15 - the decision and its pending response are atomic
 # fail 0
 ```
 
-Suites 1–9 are Phases 4.1 to 4.3, unchanged in behaviour. Suites 10–15 are new: identity, isolation, and each command with its negative cases, plus atomicity. Fixtures are reset before each supplier test, so no test depends on another's leftovers.
+Entries 1–9 in that output are Phases 4.1 to 4.3, unchanged in behaviour — eight suites plus the standalone health test, which is entry 4 and is a top-level `test()` rather than a `describe()`; that is why the run prints fifteen entries and reports fourteen suites. Entries 10–15 are the six new suites: identity, isolation, and each command with its negative cases, plus atomicity. Fixtures are reset before each supplier test, so no test depends on another's leftovers.
 
 One Phase 4.3 test was rewritten rather than deleted. It asserted that no supplier surface existed, which was true of Phase 4.3 and is now false. It asserts instead that the supplier surface is a *separate, authenticated* service — 401 without credentials — and that no generic OData surface over persistence exists. The Phase 4.3 semantics it guarded are untouched.
 
@@ -338,7 +339,7 @@ The concrete answer: CAP's REST adapter routes a bound action as **`POST /<servi
 - **Nothing is sent.** No sender, no retry, no scheduler, no `responseDeliveryStatus` other than `PENDING`. The Phase 5 sender will read these rows.
 - **Attempt count and last error are absent** from the response entity; they belong to the sender.
 - **`supplierCode` is exposed** on the order read model. It is the caller's own code, needed so the row filter is expressible over the projection, and it discloses nothing new.
-- **No pagination.** API_CONTRACTS.md requires bounded pagination for lists and defers the exact parameters; with three fixture orders this was not implemented and remains open for the supplier UI in Phase 4.5.
+- **No pagination.** API_CONTRACTS.md requires bounded pagination for lists and defers the exact parameters; with three fixture orders this was not implemented and remained open for the supplier UI in Phase 4.5. **Resolved there**: the order list now accepts `?limit=` (default 20, server maximum 100) and `?offset=`, and the contract is recorded in API_CONTRACTS.md.
 
 ## What remains for Phase 4.5
 

@@ -1,8 +1,8 @@
 # CAP Supplier Portal
 
-Phase 4 in progress. **Phase 4.1 (foundation), 4.2 (persistence), 4.3 (integration ingestion), 4.4 (supplier service) and 4.5 (supplier UI) are locally runtime-verified**: the project installs, typechecks, tests and starts; the `pih.portal` model deploys to SQLite with synthetic fixtures; `POST /rest/integration/v1/Orders` accepts a purchase-order snapshot idempotently; and a supplier can open `http://localhost:4004/` in a browser, see only its own orders, and accept, reject or re-date them. See the [Phase 4.1](docs/phase-4-1-cap-foundation.md), [Phase 4.2](docs/phase-4-2-domain-model.md), [Phase 4.3](docs/phase-4-3-integration-ingestion.md), [Phase 4.4](docs/phase-4-4-supplier-service.md) and [Phase 4.5](docs/phase-4-5-supplier-ui.md) guides.
+**Phase 4 is complete.** Subphases 4.1 (foundation), 4.2 (persistence), 4.3 (integration ingestion), 4.4 (supplier service) and 4.5 (supplier UI) are locally runtime-verified, and [Phase 4.6](docs/phase-4-6-closure.md) closed the phase with a clean-install re-verification and a contract reconciliation that found no implementation defect. See the [Phase 4.1](docs/phase-4-1-cap-foundation.md), [4.2](docs/phase-4-2-domain-model.md), [4.3](docs/phase-4-3-integration-ingestion.md), [4.4](docs/phase-4-4-supplier-service.md), [4.5](docs/phase-4-5-supplier-ui.md) and [4.6](docs/phase-4-6-closure.md) guides.
 
-Phase 4.6 is Phase 4 closure. The portal does not talk to SAP in Phase 4: supplier decisions are stored as pending outbound responses and nothing is sent.
+The portal does not talk to SAP: supplier decisions are stored as pending outbound responses and nothing is sent. Phase 5 connects the two systems and is not started.
 
 ## Run it locally
 
