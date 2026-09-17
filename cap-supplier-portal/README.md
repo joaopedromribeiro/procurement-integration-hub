@@ -1,8 +1,8 @@
 # CAP Supplier Portal
 
-Phase 4 in progress. **Phase 4.1 (foundation), 4.2 (persistence), 4.3 (integration ingestion) and 4.4 (supplier service) are locally runtime-verified**: the project installs, typechecks, tests and starts; the `pih.portal` model deploys to SQLite with synthetic fixtures; `POST /rest/integration/v1/Orders` accepts a purchase-order snapshot idempotently; and a supplier can list and read only its own orders and answer with an accept, a reject or a revised delivery date. See the [Phase 4.1](docs/phase-4-1-cap-foundation.md), [Phase 4.2](docs/phase-4-2-domain-model.md), [Phase 4.3](docs/phase-4-3-integration-ingestion.md) and [Phase 4.4](docs/phase-4-4-supplier-service.md) guides.
+Phase 4 in progress. **Phase 4.1 (foundation), 4.2 (persistence), 4.3 (integration ingestion), 4.4 (supplier service) and 4.5 (supplier UI) are locally runtime-verified**: the project installs, typechecks, tests and starts; the `pih.portal` model deploys to SQLite with synthetic fixtures; `POST /rest/integration/v1/Orders` accepts a purchase-order snapshot idempotently; and a supplier can open `http://localhost:4004/` in a browser, see only its own orders, and accept, reject or re-date them. See the [Phase 4.1](docs/phase-4-1-cap-foundation.md), [Phase 4.2](docs/phase-4-2-domain-model.md), [Phase 4.3](docs/phase-4-3-integration-ingestion.md), [Phase 4.4](docs/phase-4-4-supplier-service.md) and [Phase 4.5](docs/phase-4-5-supplier-ui.md) guides.
 
-The supplier UI is Phase 4.5 and does not exist. The portal does not talk to SAP in Phase 4: supplier decisions are stored as pending outbound responses and nothing is sent.
+Phase 4.6 is Phase 4 closure. The portal does not talk to SAP in Phase 4: supplier decisions are stored as pending outbound responses and nothing is sent.
 
 ## Run it locally
 
@@ -28,6 +28,10 @@ curl -i -X POST http://localhost:4004/rest/integration/v1/Orders \
 
 `201` with a receipt the first time. Send it again unchanged and it is `200` with the *same* receipt. Change the quantity but keep the `deliveryId` and it is `409` with the stored order untouched. `GET /health/ping` reports that the runtime is up.
 
+### Use the supplier UI
+
+Open `http://localhost:4004/` and sign in as `supplier1` (SUP001) or `supplier2` (SUP002); the password matches the user name. You will see only that supplier's orders, can open one to read its lines, and can accept, reject or revise the delivery date. **This is local mock sign-in, not production authentication** — the banner on the page says so, and the supplier is derived server-side from the signed-in user.
+
 ### Act as a supplier
 
 ```bash
@@ -45,8 +49,8 @@ curl -u supplier1:supplier1 -X POST \
 
 - `db/`: [schema.cds](db/schema.cds) — namespace `pih.portal` with `Suppliers`, `Orders`, composed `OrderItems`, `DeliveryReceipts` and `SupplierResponseDeliveries`, plus CSV fixtures in `db/data/`. The portal's own domain, deliberately not a copy of the SAP tables: `externalOrderNumber`, `productCode`, `lineNumber`, `unitPrice`, `lineAmount`, `uom` `PCE`, and no SAP organizational fields.
 - `srv/`: [integration-service.cds](srv/integration-service.cds) — the CI → CAP ingestion boundary; [supplier-service.cds](srv/supplier-service.cds) — the supplier read model and the bound `accept`/`reject`/`updateEstimatedDeliveryDate` actions; plus `HealthService` from Phase 4.1. `srv/lib/` holds exact decimal arithmetic and the contract validation.
-- `test/`: the foundation, persistence and ingestion suites — 63 tests, all driven through a running CAP application.
-- `app/`: empty. The minimal supplier interface arrives in Phase 4.5.
+- `test/`: the foundation, persistence, ingestion, supplier-service and UI suites — 87 tests, all driven through a running CAP application.
+- `app/`: the supplier UI — plain HTML, CSS and ES modules, no framework and no build step, served by CAP at `http://localhost:4004/`. [lib/order-view.mjs](app/lib/order-view.mjs) holds the presentation logic as pure functions, which the tests import directly.
 
 **No writable persistence path is exposed by any service.** `IntegrationService.Orders` is a service-local contract shape with `@insertonly`, so `GET` on it returns 405. The supplier projections are `@readonly` with explicit element lists and a row filter, so `PATCH` and `DELETE` return 405 and no foreign key or SAP correlation field reaches a supplier. `/odata/v4/Orders` returns 404: there is no generic CRUD surface over the database.
 

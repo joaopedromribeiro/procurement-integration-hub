@@ -10,6 +10,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
+    "allowJs": true,
     "noEmit": true
   },
   "include": ["srv", "test"],

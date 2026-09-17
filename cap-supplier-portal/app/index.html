@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Supplier Portal</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>Supplier Portal</h1>
+    <p class="mock-warning">
+      <strong>Local mock sign-in.</strong> These are the mocked users from
+      <code>.cdsrc.json</code>, not production authentication. The portal derives the
+      supplier from the signed-in user; this page never sends a supplier code.
+    </p>
+  </header>
+
+  <section id="signin" class="panel">
+    <h2>Sign in</h2>
+    <form id="signin-form">
+      <label>User <input id="username" name="username" autocomplete="username" required></label>
+      <label>Password <input id="password" name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Sign in</button>
+    </form>
+    <p class="hint">Mocked users: <code>supplier1</code> is SUP001, <code>supplier2</code> is SUP002.</p>
+  </section>
+
+  <section id="session" class="panel" hidden>
+    <span>Signed in as <strong id="current-user"></strong></span>
+    <button id="signout" type="button">Sign out</button>
+  </section>
+
+  <p id="message" class="message" hidden></p>
+
+  <section id="list-view" class="panel" hidden>
+    <h2>Your orders</h2>
+    <table id="orders">
+      <thead>
+        <tr>
+          <th>Order</th><th>Status</th><th>Total</th><th>Delivery date</th><th>Version</th><th></th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div class="pager">
+      <button id="prev-page" type="button">Previous</button>
+      <span id="page-label"></span>
+      <button id="next-page" type="button">Next</button>
+    </div>
+  </section>
+
+  <section id="detail-view" class="panel" hidden>
+    <button id="back" type="button">&larr; Back to list</button>
+    <h2 id="detail-number"></h2>
+
+    <dl id="detail-header"></dl>
+
+    <h3>Items</h3>
+    <table id="items">
+      <thead>
+        <tr>
+          <th>Line</th><th>Product</th><th>Description</th><th>Quantity</th><th>Unit price</th><th>Line amount</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <div id="decisions">
+      <div id="accept-box" class="action" hidden>
+        <h3>Accept</h3>
+        <label>Estimated delivery date (optional)
+          <input id="accept-date" type="date">
+        </label>
+        <button id="accept" type="button">Accept order</button>
+      </div>
+
+      <div id="reject-box" class="action" hidden>
+        <h3>Reject</h3>
+        <label>Reason (required)
+          <input id="reject-reason" maxlength="255">
+        </label>
+        <button id="reject" type="button">Reject order</button>
+      </div>
+
+      <div id="date-box" class="action" hidden>
+        <h3>Update estimated delivery date</h3>
+        <label>New date
+          <input id="update-date" type="date">
+        </label>
+        <button id="update" type="button">Update date</button>
+      </div>
+    </div>
+  </section>
+
+  <script type="module" src="supplier-ui.mjs"></script>
+</body>
+</html>

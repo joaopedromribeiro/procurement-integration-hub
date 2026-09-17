@@ -67,6 +67,51 @@ export default class SupplierService extends cds.ApplicationService {
 
   // ------------------------------------------------------------------- reads
 
+  /** Phase 4.5 list contract: `?limit=` (default 20, server maximum 100) and `?offset=`. */
+  private static readonly DEFAULT_PAGE = 20
+  private static readonly MAX_PAGE = 100
+
+  /**
+   * Bounds the order list.
+   *
+   * API_CONTRACTS.md requires that "lists need bounded pagination" and asks for
+   * explicit query parameters "rather than assuming OData query syntax on REST",
+   * so the contract is `limit` and `offset` rather than `$top` and `$skip` —
+   * neither of which this adapter honoured anyway.
+   *
+   * A malformed value is a 400 rather than a silent fallback, because a client
+   * that asked for something specific should be told it was not understood. An
+   * oversized `limit` is clamped to the maximum instead: the request is
+   * meaningful, just larger than the portal will serve.
+   *
+   * Only the collection is paged. A single order read needs no bound, and items
+   * are already bounded — ingestion refuses a delivery of more than 100 lines —
+   * so paging the detail view would risk truncating an order for no gain.
+   */
+  private applyPaging(req: any) {
+    if (req.query?.SELECT?.one) return
+
+    const params = req.http?.req?.query ?? {}
+    const limit = this.positiveInteger(req, params.limit, SupplierService.DEFAULT_PAGE, 'limit')
+    const offset = this.positiveInteger(req, params.offset, 0, 'offset')
+
+    req.query.limit(Math.min(limit, SupplierService.MAX_PAGE), offset)
+  }
+
+  private positiveInteger(req: any, raw: unknown, fallback: number, name: string) {
+    if (raw === undefined) return fallback
+
+    const value = Number(raw)
+    if (!Number.isInteger(value) || value < 0) {
+      this.refuse(
+        req, 400, 'INVALID_PAGINATION',
+        `${name} must be a non-negative integer; received "${raw}".`
+      )
+    }
+    return value
+  }
+
+
   /**
    * Narrows a read to the caller's own rows.
    *
@@ -79,6 +124,7 @@ export default class SupplierService extends cds.ApplicationService {
   private async scopeOrders(req: any) {
     const supplier = await this.supplierOf(req)
     req.query.where({ supplierCode: supplier.supplierCode })
+    this.applyPaging(req)
   }
 
   /**
