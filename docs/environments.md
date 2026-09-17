@@ -14,6 +14,7 @@ SAP BTP trial and free tier are different: trial is for limited personal evaluat
 | Fiori Elements / phase 3 | Actual RAP OData V4 UI service; supported UI deployment or service preview | Local SAP Fiori tools and mock metadata/data for UI work | Real RAP actions, authorizations and draft interactions |
 | CAP / phase 4 | Node.js application runtime; production target BTP Cloud Foundry | Node.js/TypeScript, CAP tooling and SQLite on laptop | BTP deployment/operations; local CAP itself is real CAP |
 | CAP production database / later deployment | SAP HANA Cloud, HDI/container capabilities and bindings as appropriate | SQLite using portable CDS/CQN | HANA-specific semantics, SQL behavior and deployment compatibility |
+| CAP HANA production configuration / prepared | `@cap-js/hana` on the production profile, plus an HDI deployer module from `cds build --production` | Local development keeps SQLite `:memory:` on the default profile; both profiles verified with `cds env` | Nothing about HANA at runtime. The generated DDL has been read, but no schema has been deployed, no query has run on HANA and no binding exists |
 | Direct HTTP / phase 5 | Released ABAP outbound HTTP APIs, supported communication setup, reachable CAP URL; reverse access to RAP Web API | Local CAP and contract test clients; explicitly labeled RAP stub if SAP is unavailable | Actual SAP connectivity and RAP runtime behavior |
 | Cloud Integration / phase 6 | Integration Suite subscription/entitlement with Cloud Integration capability, developer/deployer and monitoring permissions | Mapping fixtures and a local Node.js integration simulator created in the relevant phase | iFlow deployment, adapters, graphical mapping runtime, message processing logs |
 | OAuth / phase 8 | Identity provider, OAuth clients, XSUAA where chosen, roles/scopes and CAP service bindings | CAP mock users; later a local OAuth test issuer if useful | XSUAA provisioning, real trust/audience configuration and platform login |
@@ -50,14 +51,20 @@ SAP Integration Suite, advanced event mesh is a separate offering; it is not req
 | Developer and communication administrator permissions | Development access demonstrated by reported activation; communication-administration permissions unknown |
 | OData V4 UI / Web API binding support | To verify in target system |
 | Released numbering and HTTP APIs | Numbering resolved: `CL_NUMBERRANGE_RUNTIME` with object `ZJP_PO` interval `01` is SAP runtime-verified in Phase 2.7E. Outbound HTTP remains unverified — the repository contains no reference to any ABAP HTTP client class, and the candidates plus the exact ADT probes needed are listed in the [Phase 5.1 outbound foundation](../abap-rap/docs/phase-5-1-outbound-foundation.md) |
-| BTP account type, region, Cloud Foundry quota | Unknown |
+| BTP account type, region, Cloud Foundry quota | **Trial** account. Cloud Foundry is available in region **`us10-003`**, and space **`dev`** exists and is usable. Nothing has been deployed into the space. Exact quota figures and Trial lifecycle limitations — evaluation periods, automatic stopping of idle runtimes, account expiry and the conditions attached to individual service plans — are **environment-specific and must not be generalized from this record**; read them from the cockpit and the current service catalog at the time of use, per the trial-versus-free-tier guidance above |
 | Integration Suite capabilities and roles | Unknown |
-| HANA Cloud / HDI access | Unknown; optional until cloud database deployment |
+| HANA Cloud / HDI access | Available. Two service instances were created by the learner in Cloud Foundry space `dev`: **`pih-hana`** (service `hana-cloud`, plan `hana-free`) and **`pih-hdi`** (service `hana`, plan `hdi-shared`). The CAP application is configured to use HANA in its production profile but is **not bound to `pih-hdi` and not deployed**, so no HANA runtime behaviour is verified |
 | Event Mesh product and entitlement | Unknown; Phase 9 decision |
 | XSUAA / identity provider / destination access | Unknown |
 | GitHub remote | origin points to [procurement-integration-hub](https://github.com/joaopedromribeiro/procurement-integration-hub); main tracks origin/main, confirmed from local Git configuration |
 
 Record non-secret environment facts here when available. Keep credentials, service keys, tokens, tenant-specific sensitive configuration and private destinations outside the repository.
+
+## CAP HANA production preparation, configured but not deployed
+
+The first CAP cloud-deployment preparation step is done: the portal now selects its database by CAP profile — SQLite `:memory:` for local development, SAP HANA through `@cap-js/hana` for production — and `cds build --production` generates an HDI deployer module. **Nothing was deployed and no binding was created**, so this is a build-time and configuration fact only. Details and the verification evidence are in the [CAP README](../cap-supplier-portal/README.md#production-build-hana) and [PROJECT_STATUS.md](../PROJECT_STATUS.md).
+
+Because `pih-hana` and `pih-hdi` now exist, deploying CAP to the BTP Cloud Foundry runtime is **the chosen Phase 5 connectivity path**, replacing the earlier suggestion of proving the round trip through a public tunnel first; a tunnel survives only as a fallback and debugging aid. The reasoning is recorded in the [Phase 5.1 guide](../abap-rap/docs/phase-5-1-outbound-foundation.md#13-the-two-permitted-development-options-compared). Choosing the path is not walking it: the application is **unbound and undeployed**, so there is still no CAP URL an SAP system could call, and Phase 5.1 blocker **B3 stays open**. Deploying also does not by itself make the endpoint safe to expose, because the production build still carries mocked authentication; see the open findings recorded in [PROJECT_STATUS.md](../PROJECT_STATUS.md).
 
 ## Cost-aware sequencing
 
