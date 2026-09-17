@@ -61,6 +61,26 @@ SAP Integration Suite, advanced event mesh is a separate offering; it is not req
 
 Record non-secret environment facts here when available. Keep credentials, service keys, tokens, tenant-specific sensitive configuration and private destinations outside the repository.
 
+## CAP deployed to Cloud Foundry, runtime-verified for auth but not for HANA data
+
+The CAP Supplier Portal is **deployed and running** in Trial Cloud Foundry, region `us10-003`, space `dev`:
+
+| Item | Value |
+| --- | --- |
+| Application | `cap-supplier-portal-srv` — started, 1/1 running, `nodejs_buildpack`, Node 24 |
+| Route | `https://0badc38dtrial-dev-cap-supplier-portal-srv.cfapps.us10-003.hana.ondemand.com` |
+| Schema deployer | `cap-supplier-portal-db-deployer` (MTA `hdb` module) |
+| Database | existing HDI container **`pih-hdi`**, reused via `org.cloudfoundry.existing-service`; bound to app and deployer |
+| Authentication | real XSUAA instance **`cap-supplier-portal-auth`**, created from the tracked `xs-security.json`, bound to the app |
+| Redundant | **`pih-xsuaa-probe`** — bound to nothing, superseded by the real instance, **cleanup debt** |
+| Test credential | **`runtime-test-key`** on `cap-supplier-portal-auth`, kept for the upcoming SAP outbound OAuth work. A standing credential; delete it when that work is done |
+
+**No duplicate HANA Cloud database and no duplicate HDI container were created** — the space still holds one `hana-cloud` instance and one `hdi-shared` container.
+
+**Verified against the live route:** anonymous requests answer 401 everywhere; a real `client_credentials` token carrying `<xsappname>.IntegrationClient` reaches `/health/ping` with 200 and the ingestion handler with the portal's own 400; the same token is refused 403 on the supplier surface. **Not verified:** any HANA data behaviour, because no business row has been written or read; the supplier attribute mapping, which needs an interactive login; and SAP's own OAuth2 client.
+
+Keep credentials, service keys, tokens and tenant-specific secrets out of this repository — none are recorded here.
+
 ## CAP HANA production preparation, configured but not deployed
 
 The first CAP cloud-deployment preparation step is done: the portal now selects its database by CAP profile — SQLite `:memory:` for local development, SAP HANA through `@cap-js/hana` for production — and `cds build --production` generates an HDI deployer module. **Nothing was deployed and no binding was created**, so this is a build-time and configuration fact only. Details and the verification evidence are in the [CAP README](../cap-supplier-portal/README.md#production-build-hana) and [PROJECT_STATUS.md](../PROJECT_STATUS.md).

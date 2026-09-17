@@ -25,6 +25,14 @@ coverage/
 *.sqlite-*
 *.sqlite3
 
+# MTA build output. `mta.yaml` is the tracked source descriptor; these are
+# derived from it by the Cloud MTA Build Tool and are regenerable:
+#   npx mbt mtad-gen   -> mtad.yaml (the deployment descriptor)
+#   npx mbt build      -> mta_archives/*.mtar
+mtad.yaml
+mta_archives/
+*.mtar
+
 # Local editor and OS files
 .idea/
 .DS_Store
