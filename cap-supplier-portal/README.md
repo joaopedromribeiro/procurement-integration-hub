@@ -38,7 +38,7 @@ Neither profile is configured by hand. `.cdsrc.json` deliberately says **nothing
 
 `tsconfig.cdsbuild.json` exists only for this build. The `cds-typer` build plugin looks for that exact filename and, when it is missing, falls back to `tsc --outDir gen/srv`, which fails with `TS2210` because emitting against the `package.json` `imports` map needs a `rootDir`. It has no effect on `npm run typecheck` or `npm test`, which both use `tsconfig.json`.
 
-This application **is now deployed and bound** — see [Deployed state](#deployed-state-sap-btp-cloud-foundry) — but the DDL above has still only been *deployed*, never *exercised*: no business row has been read from or written to HANA. Of the four OI-14 findings in [PROJECT_STATUS.md](../PROJECT_STATUS.md), **items 1, 2 and 3 are resolved** — the empty `IntegrationService.Orders` persistence artifact is gone, which took the table count from 7 to 6; the fixture CSVs moved to `test/data`, which took the seed artifacts from 3 `.hdbtabledata` to none; and production authentication is now enforced by XSUAA in the deployed runtime. **Item 4, HANA runtime behaviour, remains open**, and so does the supplier attribute mapping.
+This application **is deployed, bound and exercised** — see [Deployed state](#deployed-state-sap-btp-cloud-foundry) and [HANA runtime evidence](#hana-runtime-evidence-ingestion-path). The DDL above is no longer only *deployed*: one real order has been written to and read back from HANA, and the decimal columns round-tripped with their scale intact. Of the four OI-14 findings in [PROJECT_STATUS.md](../PROJECT_STATUS.md), **items 1, 2 and 3 are resolved** — the empty `IntegrationService.Orders` persistence artifact is gone, which took the table count from 7 to 6 and is now confirmed absent from the deployed HANA catalog; the fixture CSVs moved to `test/data`, which took the seed artifacts from 3 `.hdbtabledata` to none and is now confirmed by an empty container; and production authentication is enforced by XSUAA in the deployed runtime. **Item 4 is split: the HANA ingestion path is verified and the supplier decision/update path is open**, because every write exercised was an INSERT. The supplier attribute mapping also remains open.
 
 ## Deployed state (SAP BTP Cloud Foundry)
 
@@ -70,6 +70,25 @@ A real `client_credentials` token from `cap-supplier-portal-auth` carries `uaa.r
 | `GET /health/ping` | **200** — `{"status":"UP",…}` |
 | `POST /rest/integration/v1/Orders` with `{}` | **400** `SCHEMA_VERSION_UNSUPPORTED`, in our own error envelope with a `correlationId` |
 | `GET /rest/supplier/v1/Orders` | **403** — `User 'system' is lacking required roles: [SupplierPortalUser]` |
+
+### HANA runtime evidence (ingestion path)
+
+The deployed application resolves the production profile to **`HANAService`**. Inspected before any test data existed, the `pih-hdi` container held **0 rows** in `Suppliers`, `Orders`, `OrderItems` and `DeliveryReceipts` while all four tables existed and were queryable — the HDI deployment worked, and `test/data` really did keep the fixtures out of production. Because ingestion requires an active supplier, **one synthetic supplier** was created through a CAP-aware Cloud Foundry task over the application's own binding (not raw SQL, not a fixture CSV, not a code change, not a new endpoint): `supplierCode` **`RTTEST001`**, active. Deliveries use `sourceSystem` **`PIH_RUNTIME_TEST`**.
+
+| Request (real `IntegrationClient` token) | Result |
+| --- | --- |
+| `POST /rest/integration/v1/Orders` — valid one-line order | **201**, receipt with `deliveryId`, `sourceOrderId`, `portalOrderId`, `status RECEIVED`, `receivedAt` |
+| the same bytes again | **200** — same `portalOrderId`, **original** `receivedAt` |
+| business-equivalent but byte-different (keys reordered, decimals with fewer trailing zeros) | **200** — same receipt, so the replay hash is over a normalized projection, not raw bytes |
+| changed payload, same `deliveryId` | **409** `DELIVERY_PAYLOAD_CONFLICT`, stored order unchanged |
+
+Persistence was then verified in HANA directly rather than inferred from the 201: exactly **one Order**, **one OrderItem** and **one DeliveryReceipt**, the supplier association resolving through an expanded read, `sourceSystem`/`sourceOrderId`/`sourceRevision` as sent, server-owned `status RECEIVED` and `responseVersion 0`, and **decimal scale and Timestamp precision intact** — `37.50`, `3.000` and `12.5000` returned with scale preserved and no float drift, and `receivedAt` keeping millisecond precision. The stored `requestHash` matched the hash computed locally before the request was sent. Counts stayed **1 Order / 1 Item / 1 Receipt** across all four requests, and the final read was byte-identical to the first **including `modifiedAt`**, so no UPDATE touched the row either.
+
+The container's catalog lists six tables — the five `pih.portal` entities plus CAP's framework `cds.outbox.Messages` — and **no `IntegrationService.Orders` table**, which runtime-confirms the `@cds.persistence.skip` design. **No HANA-specific runtime defect was found.**
+
+**Not verified:** the supplier decision/update path against HANA, because every write exercised was an INSERT — the accept/reject UPDATE, the `responseVersion` increment, the `@cds.on.update: $now` behaviour of `modifiedAt` and `SupplierResponseDeliveries` persistence are all untested — plus the interactive `SupplierPortalUser` identity and the `supplier` → `req.user.attr.supplier` mapping.
+
+The synthetic supplier, order, item and receipt **remain in Trial `dev` on purpose** as labelled runtime-test data. `DeliveryReceipts.order` is an association rather than a composition, so deleting the order would orphan the receipt and the referential effect was not established; deleting the receipt would destroy the idempotency record and make that `deliveryId` re-ingestable. `runtime-test-key` on the XSUAA instance and the unbound `pih-xsuaa-probe` remain cleanup debt.
 
 The 400 is the decisive one: it is not a framework rejection but `srv/lib/ingestion.ts` compiled and running in the cloud, which proves the request cleared XSUAA, cleared the `IntegrationClient` check and entered the handler. Nothing was persisted, because `schemaVersion` is the first validation in `normalizeDelivery`. The 403 proves the two surfaces stay isolated in the deployed app: the token that reaches ingestion cannot read supplier data.
 
@@ -153,7 +172,7 @@ The annotation fits this entity because it has **no persistence semantics at all
 
 ## Pinned versions
 
-`@sap/cds@10`, `@sap/cds-dk@10`, `@cap-js/sqlite@3`, `@cap-js/hana@3`, `@cap-js/cds-typer@0`, TypeScript 5.9 and `tsx`, resolved exactly by the committed `package-lock.json`. Local development uses SQLite in memory and production is configured for HANA Cloud, but **HANA runtime behaviour remains unverified** — the application has never run against HANA — so the model continues to use portable CDS types and every query is CQN rather than SQLite-specific SQL.
+`@sap/cds@10`, `@sap/cds-dk@10`, `@cap-js/sqlite@3`, `@cap-js/hana@3`, `@cap-js/cds-typer@0`, TypeScript 5.9 and `tsx`, resolved exactly by the committed `package-lock.json`. Local development uses SQLite in memory and production runs on HANA Cloud, where **the ingestion path is runtime-verified and the supplier decision/update path is not** — see [HANA runtime evidence](#hana-runtime-evidence-ingestion-path). The model therefore continues to use portable CDS types and every query is CQN rather than SQLite-specific SQL, which is what let the same source serve both databases unchanged.
 
 `.cdsrc.json` sets `cds.odata.structs: true`. That is not cosmetic: without it CAP flattens structured elements and the documented nested request body is rejected.
 
