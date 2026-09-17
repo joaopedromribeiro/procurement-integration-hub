@@ -1,0 +1,73 @@
+_schema-version: 3.3.0
+ID: cap-supplier-portal
+version: 0.1.0
+description: "CAP Supplier Portal for the Procurement Integration Hub. Phase 4.2 domain model."
+parameters:
+  enable-parallel-deployments: true
+build-parameters:
+  before-all:
+    - builder: custom
+      commands:
+        - npm ci
+        - npx cds build --production
+modules:
+  - name: cap-supplier-portal-srv
+    type: nodejs
+    path: gen/srv
+    parameters:
+      instances: 1
+      buildpack: nodejs_buildpack
+    build-parameters:
+      builder: npm-ci
+    provides:
+      - name: srv-api # required by consumers of CAP services (e.g. approuter)
+        properties:
+          srv-url: ${default-url}
+    requires:
+      - name: cap-supplier-portal-auth
+      - name: cap-supplier-portal-db
+
+  - name: cap-supplier-portal-db-deployer
+    type: hdb
+    path: gen/db
+    parameters:
+      buildpack: nodejs_buildpack
+    requires:
+      - name: cap-supplier-portal-db
+
+resources:
+  - name: cap-supplier-portal-auth
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: xsuaa
+      service-plan: application
+      path: ./xs-security.json
+      config:
+        xsappname: cap-supplier-portal-${org}-${space}
+        tenant-mode: dedicated
+        oauth2-configuration:
+          credential-types:
+            - "binding-secret"
+            - "x509"
+        role-collections:
+          - name: 'IntegrationClient (cap-supplier-portal ${org}-${space})'
+            description: 'generated'
+            role-template-references:
+              - '$XSAPPNAME.IntegrationClient'
+          - name: 'SupplierPortalUser (cap-supplier-portal ${org}-${space})'
+            description: 'generated'
+            role-template-references:
+              - '$XSAPPNAME.SupplierPortalUser'
+  # Reuses the HDI container that already exists in this space instead of
+  # creating a second one. `cds add mta` generates a managed
+  # `com.sap.xs.hdi-container` here, which would have provisioned another
+  # hdi-shared instance alongside `pih-hdi` and split the schema across two
+  # containers. `org.cloudfoundry.existing-service` is the MTA type for an
+  # instance whose lifecycle the deployment must not manage: it is bound, never
+  # created, updated or deleted. The resource keeps its generated name so both
+  # modules' `requires` entries stay untouched; `service-name` is what points it
+  # at the real instance.
+  - name: cap-supplier-portal-db
+    type: org.cloudfoundry.existing-service
+    parameters:
+      service-name: pih-hdi

@@ -11,7 +11,7 @@
     "#cds-models/*": "./@cds-models/*/index.js"
   },
   "scripts": {
-    "start": "cds-tsx serve",
+    "start": "cds-serve",
     "watch": "cds-tsx watch",
     "generate-types": "cds-typer \"*\" --outputDirectory @cds-models",
     "pretypecheck": "npm run generate-types",

@@ -75,6 +75,8 @@ npm test
 npm start
 ```
 
+*Superseded, and kept as a Phase 4.1 checkpoint: `start` was changed to `cds-serve` when the first Cloud Foundry deployment crashed with `cds-tsx: not found`, because `cds-tsx` ships in the `@sap/cds-dk` devDependency and is absent from a production install. **The TypeScript development command is now `npm run watch`**, and `npm start` is the production command. The paragraph below describes the original Phase 4.1 arrangement.*
+
 `npm start` runs `cds-tsx serve`, which serves the project with the TypeScript runtime registered. `npm run watch` runs `cds-tsx watch` for a reloading development server.
 
 ## Observed execution evidence

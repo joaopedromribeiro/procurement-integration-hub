@@ -4,7 +4,7 @@
 
 The portal does not talk to SAP: supplier decisions are stored as pending outbound responses and nothing is sent. Phase 5 connects the two systems and is open at 5.1, design only.
 
-**Cloud deployment preparation has started.** The database is now selected by CAP profile — SQLite `:memory:` locally, SAP HANA in production — and `cds build --production` produces an HDI deployer. Nothing is deployed, nothing is bound, and no HANA runtime behaviour is verified; see [Production build (HANA)](#production-build-hana).
+**The portal is deployed to SAP BTP Cloud Foundry and authenticated runtime access is verified.** It runs at [`0badc38dtrial-dev-cap-supplier-portal-srv.cfapps.us10-003.hana.ondemand.com`](https://0badc38dtrial-dev-cap-supplier-portal-srv.cfapps.us10-003.hana.ondemand.com) on SAP HANA through the pre-existing `pih-hdi` container, with XSUAA enforcing two named roles. Every route is authenticated: an anonymous request gets 401. See [Deployed state](#deployed-state-sap-btp-cloud-foundry). **No business order has yet been written to HANA**, so HANA runtime behaviour is still unverified.
 
 ## Run it locally
 
@@ -13,10 +13,12 @@ cd cap-supplier-portal
 npm ci
 npm run typecheck
 npm test
-npm start
+npm run watch
 ```
 
-`npm start` serves on `http://localhost:4004`. `npm run watch` gives a reloading development server. Node.js 22 or later is required.
+**`npm run watch` is the local TypeScript development command** — it runs `cds-tsx watch`, which registers the TypeScript runtime and reloads on change, and serves on `http://localhost:4004`. Node.js 22 or later is required.
+
+**`npm start` is the production command, not the development one.** It runs `cds-serve` from `@sap/cds`, plain Node against the JavaScript that `cds build --production` precompiles, so it does **not** register a TypeScript runtime and will not load the `.ts` handlers from source. This used to be `cds-tsx serve`, and that is what broke the first deployment; see [Startup command](#startup-command-cds-serve-not-cds-tsx).
 
 `npm run typecheck` and `npm test` each regenerate the `#cds-models` types first, because that output is git-ignored. `npx cds compile db --to sql` prints the DDL the model deploys — note that it compiles the `db/` folder only, so it shows 5 tables; the whole model including the services compiles to 7 tables and 2 views.
 
@@ -36,7 +38,46 @@ Neither profile is configured by hand. `.cdsrc.json` deliberately says **nothing
 
 `tsconfig.cdsbuild.json` exists only for this build. The `cds-typer` build plugin looks for that exact filename and, when it is missing, falls back to `tsc --outDir gen/srv`, which fails with `TS2210` because emitting against the `package.json` `imports` map needs a `rootDir`. It has no effect on `npm run typecheck` or `npm test`, which both use `tsconfig.json`.
 
-**Nothing has been deployed and nothing is bound.** `pih-hana` and `pih-hdi` exist in BTP Cloud Foundry space `dev`, but this application has never connected to HANA, so the generated DDL above has been *read*, not *run*. **Two findings remain open** and must be settled before any deployment — authentication, now **partially resolved** (mocked auth can no longer resolve in production and the `IntegrationClient` authority is token-level proven, but deployed enforcement and the supplier attribute mapping are not), and unverified HANA runtime behaviour. They are recorded in [PROJECT_STATUS.md](../PROJECT_STATUS.md) under OI-14, whose **items 1 and 3 are resolved**: the empty persistence artifact the build once generated for `IntegrationService.Orders` is gone, which took the table count from 7 to 6, and the fixture CSVs moved to `test/data`, which took the seed artifacts from 3 `.hdbtabledata` to none. Both are facts about what the build emits; neither is evidence about HANA.
+This application **is now deployed and bound** — see [Deployed state](#deployed-state-sap-btp-cloud-foundry) — but the DDL above has still only been *deployed*, never *exercised*: no business row has been read from or written to HANA. Of the four OI-14 findings in [PROJECT_STATUS.md](../PROJECT_STATUS.md), **items 1, 2 and 3 are resolved** — the empty `IntegrationService.Orders` persistence artifact is gone, which took the table count from 7 to 6; the fixture CSVs moved to `test/data`, which took the seed artifacts from 3 `.hdbtabledata` to none; and production authentication is now enforced by XSUAA in the deployed runtime. **Item 4, HANA runtime behaviour, remains open**, and so does the supplier attribute mapping.
+
+## Deployed state (SAP BTP Cloud Foundry)
+
+| | |
+| --- | --- |
+| Landscape | SAP BTP **Trial**, Cloud Foundry region **`us10-003`**, space **`dev`** |
+| Application | `cap-supplier-portal-srv` — **started, 1/1 running**, `nodejs_buildpack`, Node 24 |
+| Route | `https://0badc38dtrial-dev-cap-supplier-portal-srv.cfapps.us10-003.hana.ondemand.com` |
+| Database | existing HDI container **`pih-hdi`** (`hana`/`hdi-shared`), bound to the app *and* to the deployer |
+| Schema deployer | `cap-supplier-portal-db-deployer` — ran the HANA artifacts into that container |
+| Authentication | real XSUAA instance **`cap-supplier-portal-auth`** (`xsuaa`/`application`), bound to the app |
+
+**No duplicate database or container was created.** The `org.cloudfoundry.existing-service` resource in [mta.yaml](mta.yaml) held: there is still exactly one `hana-cloud` instance and one `hdi-shared` container in the space. `pih-xsuaa-probe` still exists from the earlier token experiment, is **bound to nothing** and is not an application dependency — it is cleanup debt.
+
+### Authenticated runtime evidence
+
+Anonymous requests are refused everywhere, because CAP with XSUAA restricts all services by default:
+
+| Request | Result |
+| --- | --- |
+| `GET /health/ping` — no token | **401** |
+| `POST /rest/integration/v1/Orders` — no token | **401** |
+| `GET /rest/supplier/v1/Orders` — no token | **401** |
+
+A real `client_credentials` token from `cap-supplier-portal-auth` carries `uaa.resource` and `<xsappname>.IntegrationClient`, and **does not carry `SupplierPortalUser`**. With that token:
+
+| Request | Result |
+| --- | --- |
+| `GET /health/ping` | **200** — `{"status":"UP",…}` |
+| `POST /rest/integration/v1/Orders` with `{}` | **400** `SCHEMA_VERSION_UNSUPPORTED`, in our own error envelope with a `correlationId` |
+| `GET /rest/supplier/v1/Orders` | **403** — `User 'system' is lacking required roles: [SupplierPortalUser]` |
+
+The 400 is the decisive one: it is not a framework rejection but `srv/lib/ingestion.ts` compiled and running in the cloud, which proves the request cleared XSUAA, cleared the `IntegrationClient` check and entered the handler. Nothing was persisted, because `schemaVersion` is the first validation in `normalizeDelivery`. The 403 proves the two surfaces stay isolated in the deployed app: the token that reaches ingestion cannot read supplier data.
+
+No token, client id, client secret or service-key content is recorded in this repository.
+
+## Startup command: `cds-serve`, not `cds-tsx`
+
+The first deployment staged cleanly and then crashed with `sh: 1: cds-tsx: not found`, exit 127. `cds-tsx` is declared only by `@sap/cds-dk`, a `devDependency`, so the production install does not contain it — and its shebang is `#!/usr/bin/env tsx`, needing a second devDependency even if it were present. `cds-serve` comes from `@sap/cds`, a production dependency, and is plain Node. It is sufficient because `cds build --production` precompiles every handler: `gen/srv` contains compiled `.js` and **zero `.ts`**. The fix was one word in `package.json`, and `gen/srv/package.json` inherits it.
 
 ### Deliver an order
 
@@ -71,7 +112,7 @@ Delivering an order also needs a role now. The ingestion endpoint is no longer o
 curl -i -u sapintegration:sapintegration -X POST http://localhost:4004/rest/integration/v1/Orders ...
 ```
 
-## Production authentication (prepared, not runtime-verified)
+## Production authentication (runtime-verified in the deployed app)
 
 Authentication is chosen by profile, the same way the database is:
 
@@ -93,7 +134,9 @@ The pseudo-role was wrong twice over: CAP's generator skips it, so it produced n
 
 `xsappname` is deliberately **not** in the tracked descriptor — the deployment descriptor owns the application identity. Note that `cf create-service` refuses a descriptor without one.
 
-**Still unverified:** CAP is not deployed, so no real token has satisfied `@requires: 'IntegrationClient'` over HTTP; the `supplier` → `req.user.attr.supplier` mapping needs an interactive token, which a technical token cannot provide; and SAP S/4 is not configured to fetch or send a token. Tracked as OI-14 item 2 in [PROJECT_STATUS.md](../PROJECT_STATUS.md), **partially resolved and still open**.
+**Now verified in the deployed application**, not just at token level: a real token satisfies `@requires: 'IntegrationClient'` over HTTP and reaches the handler, anonymous access is refused 401, and the same token is refused 403 on the supplier surface. See [Authenticated runtime evidence](#authenticated-runtime-evidence). OI-14 item 2 is **resolved**.
+
+**Still unverified:** the `supplier` → `req.user.attr.supplier` mapping, which needs an interactive login with a role-collection assignment — a client-credentials token has no user, so it structurally cannot test this — and SAP S/4 is not yet configured to fetch or send a token.
 
 ## What is here
 
