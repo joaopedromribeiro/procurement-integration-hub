@@ -38,7 +38,7 @@ The first three entities belong to RAP; the remaining entities belong to CAP. Th
 | LocalLastChangedAt | UTC timestamp | Instance ETag candidate, separate from root total ETag |
 | SupplierResponse | String(8), nullable | ACCEPTED or REJECTED; null until supplier decision |
 | EstimatedDeliveryDate | Date, nullable | Supplier-provided, allowed on accepted orders |
-| OrderRevision | Positive integer | Starts at 1; frozen at submission; no revision editing in v1 |
+| OrderRevision | Positive integer | Starts at 1; frozen at submission; no revision editing in v1. **Not implemented:** no RAP handler writes it, so every row holds the `abap.int4` initial value `0`, and CAP's ingestion requires `source.revision` ≥ 1. Phase 5.1 records this as blocker B1 |
 | IntegrationStatus | String(16) | NOT_REQUESTED, PENDING, IN_FLIGHT, DELIVERED, FAILED or UNKNOWN |
 | DeliveryId | UUID, nullable | Current immutable logical delivery; retained on retry |
 | LastErrorCode | String(60), nullable | Safe diagnostic code |
@@ -90,7 +90,7 @@ Maintain a small synthetic supplier reference in RAP and seed matching Suppliers
 
 Uniqueness: Orders(sourceSystem, sourceOrderId, sourceRevision); OrderItems(order, lineNumber) and OrderItems(order, sourceItemId); responses(order, version). Receipt and order insert occur in one local transaction with database uniqueness enforcement, not only a read-before-insert check. Suppliers have an independent CAP UUID; supplierCode is the external mapping key.
 
-`DeliveryIntent` in RAP, introduced in Phase 5, stores delivery ID, root UUID, revision, immutable snapshot/hash, dispatch state, lease and original approval evidence. Phase 7 extends this with DeliveryAttempt history: attempt UUID, direction, correlation ID, start/end, outcome, HTTP status, error code, safe message and next retry time. These operational records are not editable commercial items and should be exposed read-only where needed.
+`DeliveryIntent` in RAP, introduced in Phase 5, stores delivery ID, root UUID, revision, immutable snapshot/hash, dispatch state, correlation, lease and original approval evidence. It also stores the **receipt's `portalOrderId`**, which the Phase 4.6 handoff assigns to SAP — *"what SAP stores to refer to the portal's copy"* — and for which no column exists on `PurchaseOrder` in this document or in `ZJP_PO_H`. It belongs here rather than on the header because a receipt is the result of one delivery, not a property of the order: one row per delivery keeps each receipt beside the payload that earned it, where a header field would be overwritten by a later revision. Phase 7 extends this with DeliveryAttempt history: attempt UUID, direction, correlation ID, start/end, outcome, HTTP status, error code, safe message and next retry time. These operational records are not editable commercial items and should be exposed read-only where needed. The minimum field set, the reason it is a separate managed RAP business object rather than a composition child or a plain table, and which of the two contract DTOs the snapshot freezes are designed in the [Phase 5.1 outbound foundation](../../abap-rap/docs/phase-5-1-outbound-foundation.md); nothing is implemented.
 
 ## Business transitions
 

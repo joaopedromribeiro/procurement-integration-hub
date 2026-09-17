@@ -33,6 +33,8 @@ A cloud ABAP system or CI tenant cannot call the laptop's `localhost`. For a rea
 
 Local CAP may be able to call a reachable SAP endpoint even when SAP cannot call back to local CAP. Test each direction separately. If an actual runtime is missing, mark the round trip as contract simulation; do not silently switch technologies or advance the SAP-runtime completion gate.
 
+Phase 5.1 reviewed this for the outbound SAP → CAP leg and compared the two permitted options — a deliberately configured HTTPS development tunnel, and CAP deployed to a reachable hosted runtime such as BTP Cloud Foundry — without choosing or configuring either; see the [Phase 5.1 outbound foundation](../abap-rap/docs/phase-5-1-outbound-foundation.md). **The choice is still open and nothing is deployed.** Two consequences are recorded there rather than assumed away: a tunnel must be written into this file while it is in use, and it publishes the CAP ingestion endpoint, which has no authentication of any kind, for as long as it runs.
+
 ## Event offering decision, deferred to phase 9
 
 Confirm whether the account offers standalone SAP Event Mesh or Event Mesh as an Integration Suite capability, and whether the ABAP outbound channel and CI consumer support that offering. Record the exact product, plan, region, protocol and adapter. SAP documents [initialization of the Integration Suite Event Mesh capability](https://help.sap.com/docs/integration-suite/sap-integration-suite/initiating-event-mesh).
@@ -43,11 +45,11 @@ SAP Integration Suite, advanced event mesh is a separate offering; it is not req
 
 | Item | Current value |
 | --- | --- |
-| ABAP product and release | SAP S/4HANA with ABAP Cloud confirmed by learner; exact release pending |
+| ABAP product and release | SAP S/4HANA with ABAP Cloud confirmed by learner. Version baseline recorded from the Phase 2.6 target: SAP_BASIS 758 SP0001, S4CORE 108 SP0001, ADT Core 3.60.3, Business Object Tools 1.209.0, Eclipse 4.40.0 |
 | ABAP language version / package / namespace suffix | ABAP Cloud target; learner reports six ZJP_ objects created/activated in ADT; actual package name not reported |
 | Developer and communication administrator permissions | Development access demonstrated by reported activation; communication-administration permissions unknown |
 | OData V4 UI / Web API binding support | To verify in target system |
-| Released numbering and HTTP APIs | To verify before their implementation |
+| Released numbering and HTTP APIs | Numbering resolved: `CL_NUMBERRANGE_RUNTIME` with object `ZJP_PO` interval `01` is SAP runtime-verified in Phase 2.7E. Outbound HTTP remains unverified — the repository contains no reference to any ABAP HTTP client class, and the candidates plus the exact ADT probes needed are listed in the [Phase 5.1 outbound foundation](../abap-rap/docs/phase-5-1-outbound-foundation.md) |
 | BTP account type, region, Cloud Foundry quota | Unknown |
 | Integration Suite capabilities and roles | Unknown |
 | HANA Cloud / HDI access | Unknown; optional until cloud database deployment |
