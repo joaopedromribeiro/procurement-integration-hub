@@ -65,6 +65,16 @@ service IntegrationService {
    * service. `deliveryId` is the caller's key because the delivery, not the
    * order, is what the caller controls and replays.
    */
+  // A wire contract, never a table. This entity has its own elements rather
+  // than being a projection, so the compiler would otherwise give it
+  // persistence — visible as `IntegrationService.Orders.hdbtable` in a HANA
+  // build, a permanently empty table, because the CREATE handler maps every
+  // delivery into `pih.portal` and nothing ever reads or writes this shape.
+  // `@cds.persistence.skip` is honoured in the compiler's database transform
+  // only, so the service, its OData metadata and the handler are untouched.
+  // A plain comment, not a second doc comment: `/** */` here would override
+  // the route's own doc comment above.
+  @cds.persistence.skip
   @insertonly
   entity Orders {
         /**
