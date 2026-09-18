@@ -1,0 +1,58 @@
+managed implementation in class ZBP_I_DELIVERYINTENT unique;
+strict ( 2 );
+
+// No `with draft`. A delivery intent is never edited by a person in an editing
+// session; it is created by an action and advanced by a machine (ADR-032).
+// No projection and no OData binding in Phase 5.2: this is internal integration
+// persistence, not a UI feature, so it has no external caller at all yet.
+// `lock master` without a total etag, on compiler evidence from this target.
+// The first version copied `lock master total etag LastChangedAt` from
+// ZJP_I_PurchaseOrder and ADT refused it:
+//   "A "total etag" field can be flagged only if "with draft" is used."
+// PurchaseOrder gets away with it because it is a draft-enabled BO with a
+// composition child; DeliveryIntent is deliberately neither. So the total etag
+// is dropped rather than `with draft` being added to satisfy the syntax —
+// adding draft would change the business object to suit its own etag
+// declaration, and a delivery intent is never edited in an editing session.
+// Do not reintroduce `total etag` here, and do not add `with draft`.
+// LastChangedAt remains a mapped, readonly admin field; only its role as the
+// *total* etag is gone, and nothing in this phase needs one.
+define behavior for ZJP_I_DeliveryIntent alias DeliveryIntent
+persistent table zjp_po_dlv
+lock master
+authorization master ( instance )
+etag master LocalLastChangedAt
+{
+  create;
+  update;
+  delete;
+
+  // The key is framework-assigned rather than caller-supplied. That keeps the
+  // Phase 5.2b stack free of any UUID-creation API, which this repository has
+  // never used and no probe has yet established, and it makes a duplicate key
+  // structurally impossible instead of merely rejected. `sendToSupplier` will
+  // read the generated value out of MAPPED and use it as the wire deliveryId.
+  field ( readonly, numbering : managed ) DeliveryUUID;
+
+  // Framework-maintained admin data.
+  field ( readonly ) CreatedAt, LastChangedAt, LocalLastChangedAt;
+
+  mapping for zjp_po_dlv
+  {
+    DeliveryUUID       = delivery_uuid;
+    PurchaseOrderUUID  = purchase_order_uuid;
+    OrderRevision      = order_revision;
+    PayloadSnapshot    = payload_snapshot;
+    PayloadHash        = payload_hash;
+    DispatchState      = dispatch_state;
+    LastCorrelationId  = last_correlation_id;
+    PortalOrderUUID    = portal_order_uuid;
+    ApprovedBy         = approved_by;
+    ApprovedAt         = approved_at;
+    LeaseOwner         = lease_owner;
+    LeaseExpiresAt     = lease_expires_at;
+    CreatedAt          = created_at;
+    LastChangedAt      = last_changed_at;
+    LocalLastChangedAt = local_last_changed_at;
+  }
+}

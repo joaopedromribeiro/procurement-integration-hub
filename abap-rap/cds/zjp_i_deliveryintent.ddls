@@ -1,0 +1,65 @@
+@AccessControl.authorizationCheck: #NOT_REQUIRED
+@EndUserText.label: 'Procurement Hub: Delivery Intent'
+define root view entity ZJP_I_DeliveryIntent
+  as select from zjp_po_dlv
+{
+      // The wire `deliveryId`. Key, so it cannot be changed by an update, and a
+      // second delivery means a second row rather than an edited one.
+  key delivery_uuid         as DeliveryUUID,
+
+      // Correlation to the RAP root. Not a foreign key, and deliberately not an
+      // association: ADR-032 makes DeliveryIntent its own root business object
+      // rather than a composition child of PurchaseOrder.
+      purchase_order_uuid   as PurchaseOrderUUID,
+
+      // The revision whose snapshot was frozen. Copied at creation, so the
+      // intent records the revision that was dispatched even if the order
+      // changes later.
+      order_revision        as OrderRevision,
+
+      // The immutable source order delivery DTO, not the mapped CAP order
+      // (ADR-032). `abap.string` is supported as a non-key persistence column
+      // on this target, which probe P9 established by activation.
+      payload_snapshot      as PayloadSnapshot,
+
+      // sha256 hex over the stored snapshot, 64 characters. Stored here from
+      // Phase 5.2b onwards; nothing computes it yet, because the released
+      // hashing API is still probe P13.
+      payload_hash          as PayloadHash,
+
+      // PENDING / IN_FLIGHT / DELIVERED / FAILED / UNKNOWN — deliberately the
+      // same vocabulary as the header's IntegrationStatus, so the two never
+      // need translating.
+      dispatch_state        as DispatchState,
+
+      // One per transport attempt, not per delivery: a retry may carry a new
+      // correlation id while preserving the business delivery id. Hence "last".
+      last_correlation_id   as LastCorrelationId,
+
+      // The receipt's portalOrderId. It lives on the intent rather than the
+      // header because a receipt is the outcome of one delivery, not a property
+      // of an order that may be delivered again at a later revision (ADR-032).
+      portal_order_uuid     as PortalOrderUUID,
+
+      // Approval evidence, captured when the intent is created. These two
+      // deliberately carry NO @Semantics.user or @Semantics.systemDateTime
+      // annotation even though they reuse the admin-data domains: they are
+      // business values naming who approved and when, and a semantics
+      // annotation would hand them to the framework to overwrite.
+      approved_by           as ApprovedBy,
+      approved_at           as ApprovedAt,
+
+      // The lease that stops two coordinators dispatching the same intent.
+      // `lease_owner` is a per-run execution identity rather than a user, and
+      // `lease_expires_at` is initial while unclaimed (ADR-015). No semantics
+      // annotation, for the same reason as the approval fields.
+      lease_owner           as LeaseOwner,
+      lease_expires_at      as LeaseExpiresAt,
+
+      @Semantics.systemDateTime.createdAt: true
+      created_at            as CreatedAt,
+      @Semantics.systemDateTime.lastChangedAt: true
+      last_changed_at       as LastChangedAt,
+      @Semantics.systemDateTime.localInstanceLastChangedAt: true
+      local_last_changed_at as LocalLastChangedAt
+}
