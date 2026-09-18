@@ -84,6 +84,29 @@ The CAP Supplier Portal is **deployed and running** in Trial Cloud Foundry, regi
 
 **Still not verified:** the supplier decision/update path against HANA — every write exercised was an INSERT, so the accept/reject UPDATE, the `responseVersion` increment, the `modifiedAt` update behaviour and `SupplierResponseDeliveries` persistence are untested; the interactive `SupplierPortalUser` identity and the `supplier` attribute mapping, which need an interactive login; and SAP's own OAuth2 client.
 
+## SAP S/4 → CAP outbound configuration, runtime-verified
+
+The S/4HANA development sandbox can call the deployed CAP application. This is the SAP side of the connection; it is a **technical outbound probe**, not the `sendToSupplier` business flow.
+
+| Item | Value |
+| --- | --- |
+| Destination | **`ZJP_CAP`** → `/health/ping` |
+| Destination | **`ZJP_CAP_INGEST`** → `/rest/integration/v1/Orders` |
+| SSL client PSE | **ANONYM** |
+| Trust list | **DigiCert TLS RSA4096 Root G5** imported — see the note below |
+| OAuth2 client profile | **`ZJP_CAP_OAUTH`** |
+| OAuth2 client configuration | **`ZJP_CAP_XSUAA`** |
+| Grant type | Client Credentials |
+| Client authentication | HTTP Basic / standard HTTP |
+| Resource authentication | `Authorization` header |
+| Token scopes observed | `<xsappname>.IntegrationClient`, `uaa.resource` |
+
+**Certificate trust — record the fact, not a rule.** The first outbound handshake failed with **`SSSLERR_PEER_CERT_UNTRUSTED`**. The Cloud Foundry endpoint's chain required **DigiCert TLS RSA4096 Root G5**, and importing that root into the selected **ANONYM** PSE's trust list resolved the handshake. **Do not generalize this certificate requirement to unrelated environments**: it is the anchor this specific route's chain happened to need at this moment, and a different endpoint, a different landscape or a rotated chain requires its own answer rather than a copy of this one.
+
+**Verified from SAP:** the `ZJP_CAP` connection test returned **401 before OAuth** — which proved DNS, network path, TLS and CAP reachability all at once, since only the application can produce a 401 — and **200 / OK** after OAuth was configured. ABAP code read `/health/ping` for **200** with `status UP`, `component cap-supplier-portal`. Through `ZJP_CAP_INGEST`, a `{}` body returned the portal's own **400 `SCHEMA_VERSION_UNSUPPORTED`**, and a valid hand-built delivery returned **201 RECEIVED**, then **200** on an exact replay with the same `portalOrderId` and `receivedAt`, then **409 `DELIVERY_PAYLOAD_CONFLICT`** for a changed payload under the same `deliveryId`.
+
+**Not verified:** anything in the business outbound flow — no RAP purchase order is mapped into the DTO, `OrderRevision` is unpopulated, the `DeliveryId` and `IntegrationStatus` lifecycles are unimplemented, `sendToSupplier` does not exist, and no HTTP outcome is written back into RAP. No client secret or access token is recorded here.
+
 **Cleanup debt in this space:** `pih-xsuaa-probe` (bound to nothing), the `runtime-test-key` service key, and the synthetic HANA rows above. The rows are kept deliberately rather than deleted: `DeliveryReceipts.order` is an association rather than a composition, so removing the order would orphan the receipt and the referential effect was not established, and removing the receipt would destroy the idempotency record and make that `deliveryId` re-ingestable. Both are identifiable by `supplierCode RTTEST001` and `sourceSystem PIH_RUNTIME_TEST`.
 
 Keep credentials, service keys, tokens and tenant-specific secrets out of this repository — none are recorded here.
@@ -92,7 +115,7 @@ Keep credentials, service keys, tokens and tenant-specific secrets out of this r
 
 The first CAP cloud-deployment preparation step is done: the portal now selects its database by CAP profile — SQLite `:memory:` for local development, SAP HANA through `@cap-js/hana` for production — and `cds build --production` generates an HDI deployer module. **Nothing was deployed and no binding was created**, so this is a build-time and configuration fact only. Details and the verification evidence are in the [CAP README](../cap-supplier-portal/README.md#production-build-hana) and [PROJECT_STATUS.md](../PROJECT_STATUS.md).
 
-Because `pih-hana` and `pih-hdi` now exist, deploying CAP to the BTP Cloud Foundry runtime is **the chosen Phase 5 connectivity path**, replacing the earlier suggestion of proving the round trip through a public tunnel first; a tunnel survives only as a fallback and debugging aid. The reasoning is recorded in the [Phase 5.1 guide](../abap-rap/docs/phase-5-1-outbound-foundation.md#13-the-two-permitted-development-options-compared). Choosing the path is not walking it: the application is **unbound and undeployed**, so there is still no CAP URL an SAP system could call, and Phase 5.1 blocker **B3 stays open**. *Superseded as a record of that moment: the application has since been deployed and bound, a public CAP HTTPS URL now exists and HANA ingestion is runtime-verified, so B3 is **partially resolved on the deployment side** and stays open only for SAP reachability — no outbound call from S/4 has reached the route.* Deploying also does not by itself make the endpoint safe to expose, because the production build still carries mocked authentication; see the open findings recorded in [PROJECT_STATUS.md](../PROJECT_STATUS.md).
+Because `pih-hana` and `pih-hdi` now exist, deploying CAP to the BTP Cloud Foundry runtime is **the chosen Phase 5 connectivity path**, replacing the earlier suggestion of proving the round trip through a public tunnel first; a tunnel survives only as a fallback and debugging aid. The reasoning is recorded in the [Phase 5.1 guide](../abap-rap/docs/phase-5-1-outbound-foundation.md#13-the-two-permitted-development-options-compared). Choosing the path is not walking it: the application is **unbound and undeployed**, so there is still no CAP URL an SAP system could call, and Phase 5.1 blocker **B3 stays open**. *Superseded as a record of that moment: the application has since been deployed and bound, HANA ingestion is runtime-verified, and **the S/4 sandbox has now called the route** over HTTPS with OAuth2 — so **blocker B3 is resolved**. See the outbound-probe section below.* Deploying also does not by itself make the endpoint safe to expose, because the production build still carries mocked authentication; see the open findings recorded in [PROJECT_STATUS.md](../PROJECT_STATUS.md).
 
 ## Cost-aware sequencing
 
