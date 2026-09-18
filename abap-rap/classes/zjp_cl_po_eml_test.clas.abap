@@ -92,6 +92,22 @@ CLASS zjp_cl_po_eml_test DEFINITION
       IMPORTING order_uuid     TYPE sysuuid_x16
       RETURNING VALUE(success) TYPE abap_bool.
 
+    " Phase 5.2f. sendToSupplier changes RAP behavior, so it belongs here, in the
+    " lifecycle regression suite, per the repository rule and object 12.
+    METHODS test_send_to_supplier
+      RETURNING VALUE(success) TYPE abap_bool.
+
+    " Phase 5.2f, branches E-H. These complete the locked contract table that the
+    " derived A-D matrix did not reach: technical draft, IN_FLIGHT, DELIVERED and
+    " UNKNOWN.
+    METHODS set_dispatch_state
+      IMPORTING delivery_uuid  TYPE sysuuid_x16
+                state          TYPE zjp_po_dlv-dispatch_state
+      RETURNING VALUE(success) TYPE abap_bool.
+
+    METHODS test_send_state_branches
+      RETURNING VALUE(success) TYPE abap_bool.
+
     " COMMIT ENTITIES selecting the DeliveryIntent response. `save_changes`
     " reports the PurchaseOrder response and cannot see this BO's failures.
     METHODS save_intent_changes
@@ -730,6 +746,21 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
       RETURN.
     ENDIF.
     out->write( 'PASS: Phase 5.2b DeliveryIntent persistence verified.' ).
+
+    " Phase 5.2f. Runs after the 5.2b block for the same reason that one runs
+    " last: it drives a second business object and must not disturb any
+    " lifecycle assertion above it. It builds its own fixture order.
+    IF test_send_to_supplier( ) = abap_false.
+      print_lifecycle_summary( ).
+      RETURN.
+    ENDIF.
+    out->write( 'PASS: Phase 5.2f sendToSupplier durable delivery intent verified.' ).
+
+    IF test_send_state_branches( ) = abap_false.
+      print_lifecycle_summary( ).
+      RETURN.
+    ENDIF.
+    out->write( 'PASS: Phase 5.2f sendToSupplier state branches E-H verified.' ).
 
     print_lifecycle_summary( ).
   ENDMETHOD.
@@ -3516,4 +3547,708 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
       console->write( 'PASS: decision database checkpoint values are correct.' ).
     ENDIF.
   ENDMETHOD.
+  METHOD test_send_to_supplier.
+    " Phase 5.2f. The A-D matrix is derived from the locked contract in Phase 5.1
+    " section 7.4; the repository documents the contract but never enumerated the
+    " scenarios, so they are named here:
+    "
+    "   A  eligible APPROVED order, no intent  -> exactly one intent created
+    "   B  repeat on the same revision         -> no second intent, same identity
+    "   C  FAILED intent, explicit retry       -> same identity, back to PENDING
+    "   D  ineligible status                   -> refused, nothing created
+    "
+    " Note on commits: save_changes( ) issues COMMIT ENTITIES, which commits the
+    " whole LUW including the DeliveryIntent side. Its RESPONSE OF clause only
+    " surfaces PurchaseOrder failures, so every assertion below is taken from the
+    " DATABASE after the commit rather than from the commit response.
+    success = abap_false.
+
+    console->write( '=== PHASE 5.2f SEND TO SUPPLIER ===' ).
+
+    DATA(order_uuid) = create_decision_fixture( 'SUP030' ).
+    IF order_uuid IS INITIAL.
+      console->write( 'STOP: sendToSupplier fixture could not be created.' ).
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = order_uuid ) )
+        RESULT DATA(submitted_orders)
+      FAILED DATA(failed_submitted_read).
+    IF failed_submitted_read IS NOT INITIAL OR lines( submitted_orders ) <> 1.
+      console->write( 'STOP: sendToSupplier fixture could not be read.' ).
+      RETURN.
+    ENDIF.
+    DATA(order_key) = submitted_orders[ 1 ]-%tky.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE approve FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_approve_send)
+      REPORTED DATA(reported_approve_send).
+    IF failed_approve_send IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: sendToSupplier fixture could not be approved.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    " Approval evidence as it stands BEFORE any send. The action must copy these
+    " two values, not sy-uname and not a fresh timestamp.
+    SELECT SINGLE status, order_revision, integration_status,
+                  last_changed_by, last_changed_at
+      FROM zjp_po_h WHERE purchase_order_uuid = @order_uuid
+      INTO @DATA(approved_header).
+
+    console->write( name = 'Header after approve - approval evidence'
+                    data = approved_header ).
+
+    IF approved_header-status <> 'APPROVED'
+       OR approved_header-integration_status <> 'NOT_REQUESTED'.
+      console->write( 'STOP: fixture must be APPROVED with IntegrationStatus NOT_REQUESTED.' ).
+      RETURN.
+    ENDIF.
+
+    " ---------- A: eligible order, no existing intent ----------
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE sendToSupplier FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_send_a)
+      REPORTED DATA(reported_send_a).
+
+    console->write( name = 'sendToSupplier A FAILED - expect empty' data = failed_send_a ).
+    console->write( name = 'sendToSupplier A REPORTED' data = reported_send_a ).
+
+    IF failed_send_a IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: sendToSupplier was refused for an eligible approved order.' ).
+      RETURN.
+    ENDIF.
+
+    IF save_changes( ) = abap_false.
+      console->write( 'STOP: sendToSupplier changes could not be committed.' ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE status, integration_status, delivery_id
+      FROM zjp_po_h WHERE purchase_order_uuid = @order_uuid
+      INTO @DATA(sent_header).
+
+    SELECT delivery_uuid, order_revision, dispatch_state, payload_snapshot,
+           payload_hash, approved_by, approved_at, portal_order_uuid,
+           lease_owner, lease_expires_at
+      FROM zjp_po_dlv WHERE purchase_order_uuid = @order_uuid
+      INTO TABLE @DATA(intents).
+
+    console->write( name = 'Header after sendToSupplier' data = sent_header ).
+    console->write( name = 'Persisted DeliveryIntent' data = intents ).
+
+    IF lines( intents ) <> 1.
+      console->write( |STOP: expected exactly one DeliveryIntent, found { lines( intents ) }.| ).
+      RETURN.
+    ENDIF.
+    DATA(intent) = intents[ 1 ].
+
+    " Business Status is untouched; only the integration state moves.
+    IF sent_header-status <> 'APPROVED'.
+      console->write( 'STOP: business Status must remain APPROVED.' ).
+      RETURN.
+    ENDIF.
+    IF sent_header-integration_status <> 'PENDING'.
+      console->write( 'STOP: IntegrationStatus must become PENDING.' ).
+      RETURN.
+    ENDIF.
+    IF sent_header-delivery_id <> intent-delivery_uuid.
+      console->write( 'STOP: header DeliveryId must equal the managed DeliveryUUID.' ).
+      RETURN.
+    ENDIF.
+    IF intent-order_revision <> approved_header-order_revision
+       OR intent-dispatch_state <> 'PENDING'
+       OR intent-payload_snapshot IS INITIAL
+       OR intent-payload_hash IS INITIAL.
+      console->write( 'STOP: intent revision, state, snapshot or hash is wrong.' ).
+      RETURN.
+    ENDIF.
+
+    " Approval evidence copied, not invented.
+    IF intent-approved_by <> approved_header-last_changed_by
+       OR intent-approved_at <> approved_header-last_changed_at.
+      console->write( 'STOP: ApprovedBy/ApprovedAt do not match the pre-send header values.' ).
+      RETURN.
+    ENDIF.
+
+    " Lease and receipt fields stay initial - they belong to Phase 5.2g.
+    IF intent-portal_order_uuid IS NOT INITIAL
+       OR intent-lease_owner IS NOT INITIAL
+       OR intent-lease_expires_at IS NOT INITIAL.
+      console->write( 'STOP: receipt/lease fields must remain initial in 5.2f.' ).
+      RETURN.
+    ENDIF.
+
+    " The snapshot carries its own delivery identity, in canonical C36 form.
+    cl_system_uuid=>convert_uuid_x16_static(
+      EXPORTING uuid     = intent-delivery_uuid
+      IMPORTING uuid_c36 = DATA(intent_c36) ).
+    IF NOT intent-payload_snapshot CS |"deliveryId":"{ intent_c36 }"|.
+      console->write( 'STOP: the snapshot does not carry its own deliveryId.' ).
+      RETURN.
+    ENDIF.
+
+    " The hash describes the string that was actually persisted.
+    DATA recomputed TYPE string.
+    TRY.
+        cl_abap_message_digest=>calculate_hash_for_char(
+          EXPORTING if_algorithm  = 'SHA256'
+                    if_data       = CONV string( intent-payload_snapshot )
+          IMPORTING ef_hashstring = recomputed ).
+      CATCH cx_root.
+        CLEAR recomputed.
+    ENDTRY.
+    IF recomputed IS INITIAL OR intent-payload_hash <> recomputed.
+      console->write( name = 'Persisted hash' data = intent-payload_hash ).
+      console->write( name = 'Recomputed hash' data = recomputed ).
+      console->write( 'STOP: PayloadHash does not match SHA-256 of the persisted snapshot.' ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: A - one intent created, header PENDING, snapshot and hash consistent.' ).
+
+    DATA(first_uuid)     = intent-delivery_uuid.
+    DATA(first_snapshot) = intent-payload_snapshot.
+    DATA(first_hash)     = intent-payload_hash.
+
+    " ---------- B: repeat on the same revision ----------
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE sendToSupplier FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_send_b)
+      REPORTED DATA(reported_send_b).
+
+    console->write( name = 'sendToSupplier B FAILED - expect empty' data = failed_send_b ).
+    IF failed_send_b IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a repeated request on a PENDING intent must not fail.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    SELECT delivery_uuid, dispatch_state, payload_snapshot, payload_hash
+      FROM zjp_po_dlv WHERE purchase_order_uuid = @order_uuid
+      INTO TABLE @DATA(intents_b).
+
+    IF lines( intents_b ) <> 1
+       OR intents_b[ 1 ]-delivery_uuid    <> first_uuid
+       OR intents_b[ 1 ]-payload_snapshot <> first_snapshot
+       OR intents_b[ 1 ]-payload_hash     <> first_hash
+       OR intents_b[ 1 ]-dispatch_state   <> 'PENDING'.
+      console->write( name = 'Intents after repeat' data = intents_b ).
+      console->write( 'STOP: a repeat must reuse the same intent and leave it unchanged.' ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: B - repeat created no second intent and changed nothing.' ).
+
+    " ---------- C: FAILED intent, explicit retry ----------
+    MODIFY ENTITIES OF ZJP_I_DeliveryIntent
+      ENTITY DeliveryIntent
+        UPDATE FIELDS ( DispatchState )
+        WITH VALUE #( ( DeliveryUUID  = first_uuid
+                        DispatchState = 'FAILED' ) )
+      FAILED DATA(failed_mark)
+      REPORTED DATA(reported_mark).
+    IF failed_mark IS NOT INITIAL OR save_intent_changes( ) = abap_false.
+      console->write( 'STOP: the intent could not be marked FAILED for the retry test.' ).
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE sendToSupplier FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_send_c)
+      REPORTED DATA(reported_send_c).
+
+    console->write( name = 'sendToSupplier C FAILED - expect empty' data = failed_send_c ).
+    IF failed_send_c IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: an explicit retry of a FAILED intent must not be refused.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    SELECT delivery_uuid, dispatch_state, payload_snapshot, payload_hash,
+           approved_by, approved_at
+      FROM zjp_po_dlv WHERE purchase_order_uuid = @order_uuid
+      INTO TABLE @DATA(intents_c).
+
+    console->write( name = 'Intent after retry' data = intents_c ).
+
+    IF lines( intents_c ) <> 1
+       OR intents_c[ 1 ]-delivery_uuid    <> first_uuid
+       OR intents_c[ 1 ]-dispatch_state   <> 'PENDING'
+       OR intents_c[ 1 ]-payload_snapshot <> first_snapshot
+       OR intents_c[ 1 ]-payload_hash     <> first_hash
+       OR intents_c[ 1 ]-approved_by      <> approved_header-last_changed_by
+       OR intents_c[ 1 ]-approved_at      <> approved_header-last_changed_at.
+      console->write( 'STOP: retry must reuse the identity and preserve snapshot, hash and approval evidence.' ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: C - FAILED retry reused the same delivery identity and returned it to PENDING.' ).
+
+    " ---------- D: ineligible status ----------
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        CREATE FIELDS ( Supplier CompanyCode Currency )
+        WITH VALUE #( ( %cid = 'SEND_DRAFT' Supplier = 'SUP031'
+                        CompanyCode = '1000' Currency = 'EUR' ) )
+      MAPPED DATA(mapped_ineligible)
+      FAILED DATA(failed_ineligible_create).
+    IF failed_ineligible_create IS NOT INITIAL
+       OR NOT line_exists( mapped_ineligible-purchaseorder[ %cid = 'SEND_DRAFT' ] ).
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: ineligible fixture could not be created.' ).
+      RETURN.
+    ENDIF.
+    DATA(ineligible_key) = mapped_ineligible-purchaseorder[ %cid = 'SEND_DRAFT' ]-%tky.
+    DATA(ineligible_uuid) = ineligible_key-PurchaseOrderUUID.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE sendToSupplier FROM VALUE #( ( %tky = ineligible_key ) )
+      FAILED DATA(failed_send_d)
+      REPORTED DATA(reported_send_d).
+
+    console->write( name = 'sendToSupplier D FAILED - expect a rejection' data = failed_send_d ).
+    console->write( name = 'sendToSupplier D REPORTED' data = reported_send_d ).
+
+    DATA(expected_text) =
+      CONV string( 'Only approved orders can be sent to the supplier.' ).
+    DATA(rejected_key) = xsdbool( line_exists(
+      failed_send_d-purchaseorder[ %tky = ineligible_key
+        %op-%action-sendToSupplier = if_abap_behv=>mk-on ] ) ).
+    DATA(rejected_message) = abap_false.
+    LOOP AT reported_send_d-purchaseorder INTO DATA(send_message).
+      IF send_message-%msg IS BOUND
+         AND send_message-%msg->if_message~get_text( ) = expected_text.
+        rejected_message = abap_true.
+      ENDIF.
+    ENDLOOP.
+
+    ROLLBACK ENTITIES.
+
+    SELECT COUNT( * ) FROM zjp_po_dlv
+      WHERE purchase_order_uuid = @ineligible_uuid
+      INTO @DATA(ineligible_intents).
+
+    IF rejected_key = abap_false OR rejected_message = abap_false
+       OR ineligible_intents <> 0.
+      console->write( 'STOP: a non-approved order must be refused and must create no intent.' ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: D - a non-approved order was refused and created no intent.' ).
+
+    success = abap_true.
+  ENDMETHOD.
+
+  METHOD set_dispatch_state.
+    " Phase 5.2f test support. Moves a persisted intent into the state a branch
+    " needs, through EML rather than direct SQL, and commits it so the action's
+    " own read-only SELECT can see it as a previous transaction's state.
+    success = abap_false.
+
+    MODIFY ENTITIES OF ZJP_I_DeliveryIntent
+      ENTITY DeliveryIntent
+        UPDATE FIELDS ( DispatchState )
+        WITH VALUE #( ( DeliveryUUID  = delivery_uuid
+                        DispatchState = state ) )
+      FAILED DATA(failed_state)
+      REPORTED DATA(reported_state).
+
+    IF failed_state IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( name = 'Dispatch state update FAILED' data = failed_state ).
+      RETURN.
+    ENDIF.
+
+    success = save_intent_changes( ).
+  ENDMETHOD.
+
+
+  METHOD test_send_state_branches.
+    " Phase 5.2f, branches E-H. These complete the contract table in Phase 5.1
+    " section 7.4 that the original derived A-D matrix did not reach: A-D covered
+    " a new intent, a PENDING repeat, a FAILED retry and a non-approved status,
+    " and left four locked branches unexercised.
+    "
+    "   E  technical draft (%is_draft = 01)  -> rejected by the draft guard
+    "   F  IN_FLIGHT                         -> pure idempotent no-op
+    "   G  DELIVERED                         -> informational no-op, never FAILED
+    "   H  UNKNOWN                           -> retry semantics, same as FAILED
+    "
+    " E is deliberately distinct from D. D used an ACTIVE instance whose business
+    " Status was not APPROVED; E uses a real RAP technical draft, which the guard
+    " must refuse before it reads anything at all. The draft-create pattern is
+    " the one ZJP_CL_PO_DRAFT_PROBE already proved on this target - this class
+    " had no draft fixture of its own, and none was invented.
+    success = abap_false.
+
+    console->write( '=== PHASE 5.2f SEND TO SUPPLIER - BRANCHES E-H ===' ).
+
+    " ---------- E: technical draft ----------
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        CREATE FIELDS ( Supplier CompanyCode Currency )
+        WITH VALUE #( ( %cid      = 'SEND_TECH_DRAFT'
+                        %is_draft = if_abap_behv=>mk-on
+                        Supplier  = 'SUP032'
+                        CompanyCode = '1000'
+                        Currency  = 'EUR' ) )
+      MAPPED DATA(mapped_draft)
+      FAILED DATA(failed_draft_create)
+      REPORTED DATA(reported_draft_create).
+
+    IF failed_draft_create IS NOT INITIAL
+       OR NOT line_exists( mapped_draft-purchaseorder[ %cid = 'SEND_TECH_DRAFT' ] ).
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: technical draft fixture could not be created.' ).
+      RETURN.
+    ENDIF.
+
+    DATA(draft_key) = mapped_draft-purchaseorder[ %cid = 'SEND_TECH_DRAFT' ]-%tky.
+    DATA(draft_uuid) = draft_key-PurchaseOrderUUID.
+
+    IF draft_key-%is_draft <> if_abap_behv=>mk-on.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: the fixture is not a technical draft.' ).
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE sendToSupplier FROM VALUE #( ( %tky = draft_key ) )
+      FAILED DATA(failed_send_e)
+      REPORTED DATA(reported_send_e).
+
+    console->write( name = 'sendToSupplier E FAILED - expect a rejection' data = failed_send_e ).
+    console->write( name = 'sendToSupplier E REPORTED' data = reported_send_e ).
+
+    DATA(draft_text) = CONV string( 'Not allowed on a draft instance.' ).
+    DATA(draft_rejected) = xsdbool( line_exists(
+      failed_send_e-purchaseorder[ %tky = draft_key
+        %op-%action-sendToSupplier = if_abap_behv=>mk-on ] ) ).
+    DATA(draft_message) = abap_false.
+    LOOP AT reported_send_e-purchaseorder INTO DATA(draft_line).
+      IF draft_line-%msg IS BOUND
+         AND draft_line-%msg->if_message~get_text( ) = draft_text.
+        draft_message = abap_true.
+      ENDIF.
+    ENDLOOP.
+
+    ROLLBACK ENTITIES.
+
+    SELECT COUNT( * ) FROM zjp_po_dlv
+      WHERE purchase_order_uuid = @draft_uuid INTO @DATA(draft_intents).
+
+    IF draft_rejected = abap_false OR draft_message = abap_false
+       OR draft_intents <> 0.
+      console->write( 'STOP: a technical draft must be refused by the draft guard and create no intent.' ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: E - a technical draft was refused by the draft guard and created no intent.' ).
+
+    " ---------- fixture for F, G and H: one approved order with one intent ----------
+    DATA(order_uuid) = create_decision_fixture( 'SUP033' ).
+    IF order_uuid IS INITIAL.
+      console->write( 'STOP: branch fixture could not be created.' ).
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = order_uuid ) )
+        RESULT DATA(branch_orders)
+      FAILED DATA(failed_branch_read).
+    IF failed_branch_read IS NOT INITIAL OR lines( branch_orders ) <> 1.
+      console->write( 'STOP: branch fixture could not be read.' ).
+      RETURN.
+    ENDIF.
+    DATA(order_key) = branch_orders[ 1 ]-%tky.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE approve FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_branch_approve)
+      REPORTED DATA(reported_branch_approve).
+    IF failed_branch_approve IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: branch fixture could not be approved.' ).
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE sendToSupplier FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_branch_send)
+      REPORTED DATA(reported_branch_send).
+    IF failed_branch_send IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: branch fixture intent could not be created.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE delivery_uuid, dispatch_state, payload_snapshot, payload_hash,
+                  approved_by, approved_at, lease_owner, lease_expires_at
+      FROM zjp_po_dlv WHERE purchase_order_uuid = @order_uuid
+      INTO @DATA(baseline).
+
+    SELECT SINGLE status, integration_status, delivery_id
+      FROM zjp_po_h WHERE purchase_order_uuid = @order_uuid
+      INTO @DATA(baseline_header).
+
+    console->write( name = 'Branch baseline intent' data = baseline ).
+    console->write( name = 'Branch baseline header' data = baseline_header ).
+
+    IF baseline-delivery_uuid IS INITIAL OR baseline-dispatch_state <> 'PENDING'.
+      console->write( 'STOP: branch baseline intent is not PENDING.' ).
+      RETURN.
+    ENDIF.
+
+    " ---------- F: IN_FLIGHT ----------
+    IF set_dispatch_state( delivery_uuid = baseline-delivery_uuid
+                           state         = 'IN_FLIGHT' ) = abap_false.
+      console->write( 'STOP: intent could not be moved to IN_FLIGHT.' ).
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE sendToSupplier FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_send_f)
+      REPORTED DATA(reported_send_f).
+
+    console->write( name = 'sendToSupplier F FAILED - expect empty' data = failed_send_f ).
+    IF failed_send_f IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: an IN_FLIGHT no-op must not fail.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    SELECT delivery_uuid, dispatch_state, payload_snapshot, payload_hash,
+           approved_by, approved_at, lease_owner, lease_expires_at
+      FROM zjp_po_dlv WHERE purchase_order_uuid = @order_uuid
+      INTO TABLE @DATA(intents_f).
+
+    SELECT SINGLE status, integration_status, delivery_id
+      FROM zjp_po_h WHERE purchase_order_uuid = @order_uuid
+      INTO @DATA(header_f).
+
+    console->write( name = 'Intent after IN_FLIGHT no-op' data = intents_f ).
+
+    IF lines( intents_f ) <> 1
+       OR intents_f[ 1 ]-delivery_uuid    <> baseline-delivery_uuid
+       OR intents_f[ 1 ]-dispatch_state   <> 'IN_FLIGHT'
+       OR intents_f[ 1 ]-payload_snapshot <> baseline-payload_snapshot
+       OR intents_f[ 1 ]-payload_hash     <> baseline-payload_hash
+       OR intents_f[ 1 ]-approved_by      <> baseline-approved_by
+       OR intents_f[ 1 ]-approved_at      <> baseline-approved_at
+       OR intents_f[ 1 ]-lease_owner      <> baseline-lease_owner
+       OR intents_f[ 1 ]-lease_expires_at <> baseline-lease_expires_at.
+      console->write( 'STOP: an IN_FLIGHT request must change nothing on the intent.' ).
+      RETURN.
+    ENDIF.
+
+    IF header_f-status            <> baseline_header-status
+       OR header_f-integration_status <> baseline_header-integration_status
+       OR header_f-delivery_id    <> baseline_header-delivery_id.
+      console->write( name = 'Header after IN_FLIGHT no-op' data = header_f ).
+      console->write( 'STOP: an IN_FLIGHT no-op must not mutate the header.' ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: F - an IN_FLIGHT intent was left untouched, lease and header included.' ).
+
+    " ---------- G: DELIVERED ----------
+    IF set_dispatch_state( delivery_uuid = baseline-delivery_uuid
+                           state         = 'DELIVERED' ) = abap_false.
+      console->write( 'STOP: intent could not be moved to DELIVERED.' ).
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE sendToSupplier FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_send_g)
+      REPORTED DATA(reported_send_g).
+
+    console->write( name = 'sendToSupplier G FAILED - expect empty' data = failed_send_g ).
+    console->write( name = 'sendToSupplier G REPORTED - expect informational'
+                    data = reported_send_g ).
+
+    " An already-delivered request is not an error, so FAILED must stay empty
+    " while REPORTED carries the informational message.
+    "
+    " The expected text has NO trailing full stop, and that is not a typo. The
+    " handler builds the message with one, but new_message_with_text stores free
+    " text in the 50-character message variables, and this text is 51 characters
+    " with the period and exactly 50 without - so the period is truncated before
+    " it ever reaches get_text( ). SAP runtime proved it: FAILED was empty and
+    " REPORTED carried the message with severity INFORMATION, yet the first
+    " version of this assertion compared against the 51-character literal and
+    " reported a false negative. Every other message asserted in this class is
+    " 49 characters or shorter, which is why none of them hit this before.
+    "
+    " The checks below are deliberately separate rather than one compound
+    " condition, so a future failure names which of the four properties broke.
+    DATA(delivered_text) =
+      CONV string( 'Already delivered; the existing delivery is reused' ).
+
+    " 1. FAILED must be empty, checked on its own.
+    IF failed_send_g IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a DELIVERED request must not fail.' ).
+      RETURN.
+    ENDIF.
+
+    " 2-5. A row for this key, with a bound message, the expected text and
+    " severity INFORMATION.
+    DATA(delivered_row_found) = abap_false.
+    DATA(delivered_bound)     = abap_false.
+    DATA(delivered_text_ok)   = abap_false.
+    DATA(delivered_sev_ok)    = abap_false.
+
+    LOOP AT reported_send_g-purchaseorder INTO DATA(delivered_line).
+      IF delivered_line-%tky <> order_key.
+        CONTINUE.
+      ENDIF.
+      delivered_row_found = abap_true.
+
+      IF delivered_line-%msg IS NOT BOUND.
+        CONTINUE.
+      ENDIF.
+      delivered_bound = abap_true.
+
+      IF delivered_line-%msg->if_message~get_text( ) = delivered_text.
+        delivered_text_ok = abap_true.
+        IF delivered_line-%msg->m_severity = if_abap_behv_message=>severity-information.
+          delivered_sev_ok = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    IF delivered_row_found = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: no REPORTED row for the order key after a DELIVERED request.' ).
+      RETURN.
+    ENDIF.
+    IF delivered_bound = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: the REPORTED row carries no bound message.' ).
+      RETURN.
+    ENDIF.
+    IF delivered_text_ok = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: the informational message text does not match.' ).
+      RETURN.
+    ENDIF.
+    IF delivered_sev_ok = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: the message severity is not INFORMATION.' ).
+      RETURN.
+    ENDIF.
+
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    SELECT delivery_uuid, dispatch_state, payload_snapshot, payload_hash,
+           approved_by, approved_at
+      FROM zjp_po_dlv WHERE purchase_order_uuid = @order_uuid
+      INTO TABLE @DATA(intents_g).
+
+    SELECT SINGLE status FROM zjp_po_h
+      WHERE purchase_order_uuid = @order_uuid INTO @DATA(status_g).
+
+    IF lines( intents_g ) <> 1
+       OR intents_g[ 1 ]-delivery_uuid    <> baseline-delivery_uuid
+       OR intents_g[ 1 ]-dispatch_state   <> 'DELIVERED'
+       OR intents_g[ 1 ]-payload_snapshot <> baseline-payload_snapshot
+       OR intents_g[ 1 ]-payload_hash     <> baseline-payload_hash
+       OR intents_g[ 1 ]-approved_by      <> baseline-approved_by
+       OR intents_g[ 1 ]-approved_at      <> baseline-approved_at.
+      console->write( name = 'Intent after DELIVERED no-op' data = intents_g ).
+      console->write( 'STOP: a DELIVERED request must change nothing on the intent.' ).
+      RETURN.
+    ENDIF.
+
+    " SENT belongs to Phase 5.2g, which does not exist.
+    IF status_g <> 'APPROVED'.
+      console->write( |STOP: business Status must remain APPROVED, found { status_g }.| ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: G - a DELIVERED intent produced an informational no-op and no SENT transition.' ).
+
+    " ---------- H: UNKNOWN ----------
+    IF set_dispatch_state( delivery_uuid = baseline-delivery_uuid
+                           state         = 'UNKNOWN' ) = abap_false.
+      console->write( 'STOP: intent could not be moved to UNKNOWN.' ).
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE sendToSupplier FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_send_h)
+      REPORTED DATA(reported_send_h).
+
+    console->write( name = 'sendToSupplier H FAILED - expect empty' data = failed_send_h ).
+    IF failed_send_h IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: an UNKNOWN retry must not be refused.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    SELECT delivery_uuid, dispatch_state, payload_snapshot, payload_hash,
+           approved_by, approved_at, lease_owner, lease_expires_at
+      FROM zjp_po_dlv WHERE purchase_order_uuid = @order_uuid
+      INTO TABLE @DATA(intents_h).
+
+    console->write( name = 'Intent after UNKNOWN retry' data = intents_h ).
+
+    IF lines( intents_h ) <> 1
+       OR intents_h[ 1 ]-delivery_uuid    <> baseline-delivery_uuid
+       OR intents_h[ 1 ]-dispatch_state   <> 'PENDING'
+       OR intents_h[ 1 ]-payload_snapshot <> baseline-payload_snapshot
+       OR intents_h[ 1 ]-payload_hash     <> baseline-payload_hash
+       OR intents_h[ 1 ]-approved_by      <> baseline-approved_by
+       OR intents_h[ 1 ]-approved_at      <> baseline-approved_at
+       OR intents_h[ 1 ]-lease_owner      <> baseline-lease_owner
+       OR intents_h[ 1 ]-lease_expires_at <> baseline-lease_expires_at.
+      console->write( 'STOP: an UNKNOWN retry must reuse the identity, return to PENDING and preserve everything else.' ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: H - an UNKNOWN intent retried to PENDING with identity, snapshot, hash and lease intact.' ).
+
+    success = abap_true.
+  ENDMETHOD.
+
 ENDCLASS.

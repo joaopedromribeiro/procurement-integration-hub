@@ -2,6 +2,10 @@ CLASS lhc_PurchaseOrder DEFINITION
   INHERITING FROM cl_abap_behavior_handler.
 
   PRIVATE SECTION.
+    " B4: interim DEV source-system identity.
+    " Replace with environment configuration before multi-environment rollout.
+    CONSTANTS source_system TYPE string VALUE 'PIH_ABAP_DEV'.
+
     METHODS removeItem FOR MODIFY
       IMPORTING keys FOR ACTION PurchaseOrder~removeItem.
 
@@ -10,6 +14,9 @@ CLASS lhc_PurchaseOrder DEFINITION
 
     METHODS approve FOR MODIFY
       IMPORTING keys FOR ACTION PurchaseOrder~approve.
+
+    METHODS sendToSupplier FOR MODIFY
+      IMPORTING keys FOR ACTION PurchaseOrder~sendToSupplier.
 
     METHODS reject FOR MODIFY
       IMPORTING keys FOR ACTION PurchaseOrder~reject.
@@ -545,6 +552,229 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
           TO failed-purchaseorder.
         APPEND VALUE #( %tky = action_key-%tky
           %op-%action-approve = if_abap_behv=>mk-on
+          %msg = new_message_with_text(
+            severity = if_abap_behv_message=>severity-error
+            text = error_text ) )
+          TO reported-purchaseorder.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD sendToSupplier.
+    " Phase 5.2f. Requests delivery; it does not report it. This action creates
+    " or reuses the durable DeliveryIntent and marks the order as waiting for
+    " dispatch, inside its own LUW. It performs NO HTTP, NO COMMIT and NO
+    " ROLLBACK - the Phase 5.2g coordinator owns the network side effect, and the
+    " external caller owns transaction completion.
+    DATA reported_orders LIKE reported-purchaseorder.
+
+    LOOP AT keys INTO DATA(action_key).
+      DATA(error_text) = CONV string( '' ).
+
+      DO 1 TIMES.
+        IF action_key-%is_draft = if_abap_behv=>mk-on.
+          error_text = 'Not allowed on a draft instance.'.
+          EXIT.
+        ENDIF.
+
+        " LastChangedBy/LastChangedAt are read HERE, before this action changes
+        " anything, because they are the approval evidence. On an APPROVED order
+        " they can only have come from approve: submit requires DRAFT, approve
+        " and reject require SUBMITTED, and cancel is the only action accepting
+        " APPROVED - and it leaves APPROVED immediately. Reading them after the
+        " local-mode update below would overwrite the evidence with the sender.
+        READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+          ENTITY PurchaseOrder
+            FIELDS ( PurchaseOrderUUID OrderRevision Status
+                     LastChangedBy LastChangedAt )
+            WITH VALUE #( ( %tky = action_key-%tky ) )
+            RESULT DATA(orders)
+          FAILED DATA(read_failed)
+          REPORTED DATA(read_reported).
+        reported_orders = CORRESPONDING #( DEEP read_reported-purchaseorder ).
+        APPEND LINES OF reported_orders TO reported-purchaseorder.
+
+        IF read_failed IS NOT INITIAL OR lines( orders ) <> 1.
+          error_text = 'Order could not be read; no action taken.'.
+          EXIT.
+        ENDIF.
+
+        DATA(order) = orders[ 1 ].
+
+        IF order-Status <> 'APPROVED'.
+          error_text = 'Only approved orders can be sent to the supplier.'.
+          EXIT.
+        ENDIF.
+
+        " Find an intent PERSISTED BY AN EARLIER TRANSACTION. A read-only SELECT
+        " is the right instrument and is chosen deliberately: retry semantics
+        " operate on committed delivery state, the unique index is over exactly
+        " this pair, and EML remains the only mutation path. It must happen
+        " BEFORE any create, because an intent created below lives in the
+        " transactional buffer and would not be found here anyway.
+        SELECT SINGLE delivery_uuid, dispatch_state
+          FROM zjp_po_dlv
+          WHERE purchase_order_uuid = @order-PurchaseOrderUUID
+            AND order_revision      = @order-OrderRevision
+          INTO @DATA(existing).
+
+        DATA intent_uuid TYPE sysuuid_x16.
+        CLEAR intent_uuid.
+
+        IF sy-subrc = 0.
+          " One intent per (PurchaseOrderUUID, OrderRevision), ever. A retry
+          " reuses this delivery identity; only a changed commercial snapshot
+          " justifies a higher OrderRevision, and that does not exist yet.
+          intent_uuid = existing-delivery_uuid.
+
+          CASE existing-dispatch_state.
+            WHEN 'DELIVERED'.
+              " Not an error. The request is already satisfied, and the business
+              " transition to SENT belongs to Phase 5.2g.
+              APPEND VALUE #( %tky = action_key-%tky
+                %op-%action-sendToSupplier = if_abap_behv=>mk-on
+                %msg = new_message_with_text(
+                  severity = if_abap_behv_message=>severity-information
+                  text = 'Already delivered; the existing delivery is reused.' ) )
+                TO reported-purchaseorder.
+              EXIT.
+
+            WHEN 'FAILED' OR 'UNKNOWN'.
+              " Explicit retry. The snapshot, its hash and the approval evidence
+              " are immutable for this revision and are deliberately not
+              " rewritten; only the dispatch state returns to PENDING. Lease
+              " fields are left untouched - reclaiming a lease is 5.2g's.
+              MODIFY ENTITIES OF ZJP_I_DeliveryIntent
+                ENTITY DeliveryIntent
+                  UPDATE FIELDS ( DispatchState )
+                  WITH VALUE #( ( DeliveryUUID  = intent_uuid
+                                  DispatchState = 'PENDING' ) )
+                FAILED DATA(retry_failed)
+                REPORTED DATA(retry_reported).
+
+              IF retry_failed IS NOT INITIAL.
+                error_text = 'Existing delivery intent could not be reset to PENDING.'.
+                EXIT.
+              ENDIF.
+
+            WHEN OTHERS.
+              " PENDING and IN_FLIGHT: idempotent no-op. The delivery is already
+              " queued or a coordinator holds it; interfering would either mint
+              " a second identity or disturb a lease.
+              EXIT.
+          ENDCASE.
+
+        ELSE.
+
+          " No intent for this revision yet: create exactly one.
+          MODIFY ENTITIES OF ZJP_I_DeliveryIntent
+            ENTITY DeliveryIntent
+              CREATE FIELDS ( PurchaseOrderUUID OrderRevision DispatchState
+                              ApprovedBy ApprovedAt )
+              WITH VALUE #( ( %cid              = 'SEND_INTENT'
+                              PurchaseOrderUUID = order-PurchaseOrderUUID
+                              OrderRevision     = order-OrderRevision
+                              DispatchState     = 'PENDING'
+                              ApprovedBy        = order-LastChangedBy
+                              ApprovedAt        = order-LastChangedAt ) )
+            MAPPED DATA(mapped_intent)
+            FAILED DATA(intent_failed)
+            REPORTED DATA(intent_reported).
+
+          IF intent_failed IS NOT INITIAL
+             OR NOT line_exists( mapped_intent-deliveryintent[ %cid = 'SEND_INTENT' ] ).
+            error_text = 'Delivery intent could not be created.'.
+            EXIT.
+          ENDIF.
+
+          intent_uuid = mapped_intent-deliveryintent[ %cid = 'SEND_INTENT' ]-DeliveryUUID.
+          IF intent_uuid IS INITIAL.
+            error_text = 'Managed numbering returned no DeliveryUUID.'.
+            EXIT.
+          ENDIF.
+
+          " The snapshot carries the delivery identity, so it cannot be built
+          " until the key exists - which is why the intent is created first and
+          " completed second, in this same LUW.
+          DATA(built) = NEW zjp_cl_order_delivery_builder( )->build(
+                          purchase_order_uuid = order-PurchaseOrderUUID
+                          delivery_uuid       = intent_uuid
+                          source_system       = source_system ).
+
+          IF built-success = abap_false.
+            error_text = |Delivery snapshot could not be built: { built-error_text }|.
+            EXIT.
+          ENDIF.
+
+          DATA(snapshot) = NEW zjp_cl_dlv_snapshot_json( )->serialize( built-delivery ).
+          IF snapshot IS INITIAL.
+            error_text = 'Delivery snapshot serialization returned nothing.'.
+            EXIT.
+          ENDIF.
+
+          " SHA-256 over the EXACT string that will be persisted. No
+          " normalisation and no reserialization, or the hash would describe a
+          " string the database never held.
+          DATA snapshot_hash TYPE string.
+          CLEAR snapshot_hash.
+          TRY.
+              cl_abap_message_digest=>calculate_hash_for_char(
+                EXPORTING if_algorithm  = 'SHA256'
+                          if_data       = snapshot
+                IMPORTING ef_hashstring = snapshot_hash ).
+            CATCH cx_root INTO DATA(hash_error).
+              error_text = |Payload hash could not be calculated: { hash_error->get_text( ) }|.
+          ENDTRY.
+
+          IF snapshot_hash IS INITIAL.
+            IF error_text IS INITIAL.
+              error_text = 'Payload hash could not be calculated.'.
+            ENDIF.
+            EXIT.
+          ENDIF.
+
+          MODIFY ENTITIES OF ZJP_I_DeliveryIntent
+            ENTITY DeliveryIntent
+              UPDATE FIELDS ( PayloadSnapshot PayloadHash )
+              WITH VALUE #( ( DeliveryUUID    = intent_uuid
+                              PayloadSnapshot = snapshot
+                              PayloadHash     = snapshot_hash ) )
+            FAILED DATA(snapshot_failed)
+            REPORTED DATA(snapshot_reported).
+
+          IF snapshot_failed IS NOT INITIAL.
+            error_text = 'Delivery intent snapshot could not be stored.'.
+            EXIT.
+          ENDIF.
+
+        ENDIF.
+
+        " Reached for a new intent and for a FAILED/UNKNOWN retry. Business
+        " Status stays APPROVED: this action requests delivery and does not
+        " report it, and SENT is only true once the portal has acknowledged.
+        MODIFY ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+          ENTITY PurchaseOrder
+            UPDATE FIELDS ( IntegrationStatus DeliveryId )
+            WITH VALUE #( ( %tky              = action_key-%tky
+                            IntegrationStatus = 'PENDING'
+                            DeliveryId        = intent_uuid ) )
+          FAILED DATA(update_failed)
+          REPORTED DATA(update_reported).
+        reported_orders = CORRESPONDING #( DEEP update_reported-purchaseorder ).
+        APPEND LINES OF reported_orders TO reported-purchaseorder.
+
+        IF update_failed IS NOT INITIAL.
+          error_text = 'Header integration state could not be updated.'.
+          EXIT.
+        ENDIF.
+      ENDDO.
+
+      IF error_text IS NOT INITIAL.
+        APPEND VALUE #( %tky = action_key-%tky
+                        %op-%action-sendToSupplier = if_abap_behv=>mk-on )
+          TO failed-purchaseorder.
+        APPEND VALUE #( %tky = action_key-%tky
+          %op-%action-sendToSupplier = if_abap_behv=>mk-on
           %msg = new_message_with_text(
             severity = if_abap_behv_message=>severity-error
             text = error_text ) )

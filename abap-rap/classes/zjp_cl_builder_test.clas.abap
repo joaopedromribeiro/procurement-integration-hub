@@ -59,6 +59,16 @@ CLASS zjp_cl_builder_test DEFINITION
     METHODS test_mapper_rejects_unit
       RETURNING VALUE(success) TYPE abap_bool.
 
+    " Phase 5.2f. The snapshot serializer shares this harness rather than taking
+    " its own, because it consumes the same ty_delivery the builder produces and
+    " the same deterministic fixture the mapper is tested against - two shapes
+    " from one DTO, compared side by side.
+    METHODS source_snapshot_body
+      RETURNING VALUE(body) TYPE string.
+
+    METHODS test_snapshot_serializer
+      RETURNING VALUE(success) TYPE abap_bool.
+
 ENDCLASS.
 
 
@@ -88,6 +98,12 @@ CLASS zjp_cl_builder_test IMPLEMENTATION.
     ENDIF.
 
     out->write( 'PASS: Phase 5.2d outbound builder and CAP mapper verified.' ).
+
+    IF test_snapshot_serializer( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    out->write( 'PASS: Phase 5.2f source delivery snapshot serializer verified.' ).
 
   ENDMETHOD.
 
@@ -375,6 +391,117 @@ CLASS zjp_cl_builder_test IMPLEMENTATION.
     console->write( 'PASS: mapper rejected an unmapped unit instead of guessing it.' ).
     success = abap_true.
 
+  ENDMETHOD.
+
+
+  METHOD source_snapshot_body.
+    " The expected SOURCE order delivery snapshot for golden_snapshot( ). Note
+    " how it differs from golden_body( ): `item` is the string "10" rather than
+    " the number 10, the unit stays "EA" rather than becoming "PCE", and the
+    " member names are the contract's source names. Those differences are the
+    " point - one DTO, two shapes, and only the mapper may produce the CAP one.
+    "
+    " Concatenated rather than held as a CONSTANTS VALUE: a text literal is
+    " capped at 255 characters and a constant's value must be a single literal.
+    body = '{"schemaVersion":"1.0","deliveryId":"00000000-0000-0000-0000-000000000001",'
+        && '"sourceSystem":"PIH_ABAP_DEV","purchaseOrderId":"00000000-0000-0000-0000-000000000002",'
+        && '"revision":1,"purchaseOrder":"PO00002001","supplier":"SUP001",'
+        && '"supplierName":"Example Technology Supplier","companyCode":"1000",'
+        && '"purchasingOrganization":"1000","purchasingGroup":"001","currency":"EUR",'
+        && '"totalAmount":"1500.00","items":[{'
+        && '"itemId":"00000000-0000-0000-0000-000000000003","item":"10",'
+        && '"material":"MAT001","description":"Laptop","quantity":"2.000",'
+        && '"unitOfMeasure":"EA","netPrice":"750.0000","totalAmount":"1500.00"}]}'.
+  ENDMETHOD.
+
+
+  METHOD test_snapshot_serializer.
+    " Phase 5.2f. The serializer is pure, so it is tested exactly like the
+    " mapper: a deterministic in-memory DTO, and one byte comparison that
+    " cannot be satisfied by accident.
+    success = abap_false.
+
+    DATA(snapshot) = golden_snapshot( ).
+
+    DATA(json) = NEW zjp_cl_dlv_snapshot_json( )->serialize( snapshot ).
+
+    console->write( name = 'Source delivery snapshot' data = json ).
+
+    " (1)
+    IF json IS INITIAL.
+      console->write( 'STOP: serializer returned an initial string.' ).
+      RETURN.
+    ENDIF.
+
+    " Valid JSON, proven by reparsing rather than by inspection.
+    DATA(reparsed) = xco_cp_json=>data->from_string( json ).
+    IF reparsed IS NOT BOUND.
+      console->write( 'STOP: the snapshot did not reparse as JSON.' ).
+      RETURN.
+    ENDIF.
+
+    " (2) Determinism, across two separately constructed instances, so it is a
+    " property of the class rather than of one instance's history.
+    DATA(second) = NEW zjp_cl_dlv_snapshot_json( )->serialize( snapshot ).
+    IF json <> second.
+      console->write( 'STOP: the same DTO produced two different snapshots.' ).
+      RETURN.
+    ENDIF.
+
+    " (3)-(10) Named properties, each checked on its own so a failure says which
+    " rule broke, before the byte comparison says only that something did.
+    IF NOT json CS '"deliveryId":"00000000-0000-0000-0000-000000000001"'.
+      console->write( 'STOP: deliveryId missing or not canonical C36.' ).
+      RETURN.
+    ENDIF.
+
+    IF NOT json CS '"sourceSystem":"PIH_ABAP_DEV"'.
+      console->write( 'STOP: sourceSystem was not carried through unchanged.' ).
+      RETURN.
+    ENDIF.
+
+    " A JSON number, not a quoted string.
+    IF NOT json CS '"revision":1,'.
+      console->write( 'STOP: revision is not emitted as a JSON number.' ).
+      RETURN.
+    ENDIF.
+
+    " NUMC 00010 becomes the source contract's unpadded STRING "10".
+    IF NOT json CS '"item":"10"'.
+      console->write( 'STOP: item number is not the unpadded string "10".' ).
+      RETURN.
+    ENDIF.
+
+    " The source contract keeps EA. EA -> PCE belongs to the mapper alone, and
+    " finding PCE here would mean the CAP boundary had leaked inwards.
+    IF NOT json CS '"unitOfMeasure":"EA"'.
+      console->write( 'STOP: unitOfMeasure is not the source value EA.' ).
+      RETURN.
+    ENDIF.
+
+    IF json CS 'PCE'.
+      console->write( 'STOP: CAP unit vocabulary leaked into the source snapshot.' ).
+      RETURN.
+    ENDIF.
+
+    IF NOT json CS '"totalAmount":"1500.00"'
+       OR NOT json CS '"quantity":"2.000"'
+       OR NOT json CS '"netPrice":"750.0000"'.
+      console->write( 'STOP: decimal scales do not match the source contract.' ).
+      RETURN.
+    ENDIF.
+
+    " (11) The decisive assertion. PayloadHash will later be taken over exactly
+    " this string, so byte equality is the property that actually matters.
+    IF json <> source_snapshot_body( ).
+      console->write( name = 'Produced snapshot' data = json ).
+      console->write( name = 'Expected snapshot' data = source_snapshot_body( ) ).
+      console->write( 'STOP: snapshot differs from the expected source contract string.' ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: serializer produced the source delivery snapshot byte for byte.' ).
+    success = abap_true.
   ENDMETHOD.
 
 ENDCLASS.
