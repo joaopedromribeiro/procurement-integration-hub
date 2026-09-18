@@ -67,6 +67,22 @@ CLASS zjp_cl_po_eml_test DEFINITION
                 expected_number       TYPE zjp_po_h-purchase_order_number OPTIONAL
       RETURNING VALUE(success) TYPE abap_bool.
 
+    " Phase 5.2a. Verifies the two integration header values for one order
+    " straight from ZJP_PO_H. Deliberately a separate helper rather than two
+    " more optional parameters on check_submit_database: that helper has
+    " eleven call sites whose expectations are already runtime-verified, and
+    " widening it would silently impose a new assertion on all of them.
+    "
+    " Only orders created by this run are ever passed here. Rows persisted
+    " before Phase 5 carry a blank integration_status, which is correct and
+    " untouched, so no assertion in this class may read one of them.
+    METHODS check_integration_fields
+      IMPORTING order_uuid                  TYPE sysuuid_x16
+                expected_revision           TYPE zjp_po_h-order_revision
+                expected_integration_status TYPE zjp_po_h-integration_status
+                label                       TYPE string
+      RETURNING VALUE(success)              TYPE abap_bool.
+
     METHODS read_order_number
       IMPORTING order_uuid          TYPE sysuuid_x16
       RETURNING VALUE(order_number) TYPE zjp_po_h-purchase_order_number.
@@ -1328,6 +1344,15 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
                               expected_header_total = 1500 ) = abap_false.
       RETURN.
     ENDIF.
+    " Phase 5.2a. A newly created root is DRAFT, has been through
+    " initializeStatus, and is not yet deliverable: revision 0 is below the
+    " minimum CAP accepts, and NOT_REQUESTED says no delivery was asked for.
+    IF check_integration_fields( order_uuid = submit_uuid
+                                 expected_revision = 0
+                                 expected_integration_status = 'NOT_REQUESTED'
+                                 label = 'new order before submit' ) = abap_false.
+      RETURN.
+    ENDIF.
 
     READ ENTITIES OF ZJP_I_PurchaseOrder
       ENTITY PurchaseOrder
@@ -1366,16 +1391,24 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     console->write( name = 'Items after submit - expect unchanged'
                     data = submitted_items ).
 
+    " Phase 5.2a adds OrderRevision to this buffer assertion. Checking it here
+    " rather than only after the commit proves the action wrote it, not a
+    " determination or a save-time side effect.
     IF failed_submit IS NOT INITIAL OR failed_submitted_read IS NOT INITIAL
        OR lines( submitted_orders ) <> 1 OR lines( submitted_items ) <> 1
        OR submitted_orders[ 1 ]-Status <> 'SUBMITTED'
+       OR submitted_orders[ 1 ]-OrderRevision <> 1
+       OR submitted_orders[ 1 ]-IntegrationStatus <> 'NOT_REQUESTED'
        OR submitted_orders[ 1 ]-TotalAmount <> 1500
        OR submitted_items[ 1 ]-TotalAmount <> 1500.
       ROLLBACK ENTITIES.
-      console->write( 'STOP: submit must set Status SUBMITTED and leave totals unchanged.' ).
+      console->write( 'STOP: submit must set Status SUBMITTED, OrderRevision 1 ' &&
+                      'and leave totals unchanged.' ).
       RETURN.
     ENDIF.
     console->write( 'PASS: submit set the buffered Status to SUBMITTED with total 1500.' ).
+    console->write( 'PASS: submit set the buffered OrderRevision to 1; ' &&
+                    'IntegrationStatus stayed NOT_REQUESTED.' ).
 
     IF save_changes( ) = abap_false.
       RETURN.
@@ -1396,6 +1429,14 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     ENDIF.
     console->write( 'PASS: SUBMITTED status is persisted in ZJP_PO_H.' ).
     console->write( 'PASS: submit allocated PurchaseOrderNumber as PO + 8 digits.' ).
+    " Phase 5.2a. Revision 1 must survive the commit, and submit must not have
+    " disturbed IntegrationStatus, which only initializeStatus owns today.
+    IF check_integration_fields( order_uuid = submit_uuid
+                                 expected_revision = 1
+                                 expected_integration_status = 'NOT_REQUESTED'
+                                 label = 'after successful submit' ) = abap_false.
+      RETURN.
+    ENDIF.
 
     " A second submit must be rejected because the order is no longer DRAFT.
     MODIFY ENTITIES OF ZJP_I_PurchaseOrder
@@ -1452,6 +1493,14 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     ENDIF.
     console->write( 'PASS: re-submit rejected; persisted SUBMITTED order unchanged.' ).
     console->write( 'PASS: a refused re-submit kept the original PO number.' ).
+    " Phase 5.2a. A refused second submit must neither re-write nor increment
+    " the revision: it exits before the update, so 1 is still 1.
+    IF check_integration_fields( order_uuid = submit_uuid
+                                 expected_revision = 1
+                                 expected_integration_status = 'NOT_REQUESTED'
+                                 label = 'after refused re-submit' ) = abap_false.
+      RETURN.
+    ENDIF.
 
     " Phase 2.7D-2 replaced this teardown. Deleting the SUBMITTED fixture is
     " no longer valid behavior, so the assertion is inverted and the row is
@@ -1570,6 +1619,15 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
       RETURN.
     ENDIF.
     console->write( 'PASS: submit rejected without items; persisted Status stayed DRAFT.' ).
+    " Phase 5.2a. The decisive negative case for B1: a submit that fails must
+    " leave the order undeliverable. The action exits before its update, so
+    " the revision stays 0 and CAP would refuse a delivery built from it.
+    IF check_integration_fields( order_uuid = empty_uuid
+                                 expected_revision = 0
+                                 expected_integration_status = 'NOT_REQUESTED'
+                                 label = 'refused submit without items' ) = abap_false.
+      RETURN.
+    ENDIF.
 
     MODIFY ENTITIES OF ZJP_I_PurchaseOrder
       ENTITY PurchaseOrder
@@ -1591,6 +1649,34 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
                                      expected_headers = 0 expected_items = 0 ).
     IF success = abap_true.
       console->write( 'PASS: empty-order fixture cleanup complete.' ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD check_integration_fields.
+    " Read-only verification of the Phase 5.2a header values.
+    SELECT SINGLE purchase_order_uuid, status, order_revision,
+                  integration_status
+      FROM zjp_po_h
+      WHERE purchase_order_uuid = @order_uuid
+      INTO @DATA(integration_db).
+    DATA(row_found) = xsdbool( sy-subrc = 0 ).
+
+    console->write( name = |ZJP_PO_H integration fields - { label }|
+                    data = integration_db ).
+
+    success = xsdbool(
+      row_found = abap_true
+      AND integration_db-order_revision = expected_revision
+      AND integration_db-integration_status = expected_integration_status ).
+
+    IF success = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( |STOP: { label } - expected OrderRevision | &&
+                      |{ expected_revision } and IntegrationStatus | &&
+                      |{ expected_integration_status }.| ).
+    ELSE.
+      console->write( |PASS: { label } - OrderRevision { expected_revision }, | &&
+                      |IntegrationStatus { expected_integration_status }.| ).
     ENDIF.
   ENDMETHOD.
 
@@ -2733,8 +2819,10 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
       RETURN.
     ENDIF.
 
-    " Case 5: APPROVED to CANCELLED. No delivery-request guard exists in
-    " Phase 2 because nothing can set IntegrationStatus or DeliveryId.
+    " Case 5: APPROVED to CANCELLED. No delivery-request guard exists yet:
+    " Phase 5.2a starts a new order at IntegrationStatus = NOT_REQUESTED,
+    " which is the value meaning no delivery was requested, and nothing
+    " advances it or sets DeliveryId.
     DATA(approved_uuid) = create_decision_fixture( 'SUP014' ).
     IF approved_uuid IS INITIAL.
       RETURN.
@@ -3083,6 +3171,8 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
              status                TYPE zjp_po_h-status,
              total_amount          TYPE zjp_po_h-total_amount,
              purchase_order_number TYPE zjp_po_h-purchase_order_number,
+             order_revision        TYPE zjp_po_h-order_revision,
+             integration_status    TYPE zjp_po_h-integration_status,
              rejection_origin      TYPE zjp_po_h-rejection_origin,
              rejection_reason      TYPE zjp_po_h-rejection_reason,
            END OF summary_line.
@@ -3096,7 +3186,8 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     LOOP AT lifecycle_uuids INTO DATA(summary_uuid).
       CLEAR summary_row.
       SELECT SINGLE purchase_order_uuid, supplier, status, total_amount,
-                    purchase_order_number, rejection_origin, rejection_reason
+                    purchase_order_number, order_revision, integration_status,
+                    rejection_origin, rejection_reason
         FROM zjp_po_h
         WHERE purchase_order_uuid = @summary_uuid
         INTO @summary_row.
@@ -3122,10 +3213,18 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
       DATA(reason_text) = COND string(
         WHEN printed_row-rejection_reason IS INITIAL THEN '-'
         ELSE |{ printed_row-rejection_reason }| ).
+      " A blank integration_status prints as '-' and is expected on rows
+      " persisted before Phase 5.2a. Those rows are deliberately not
+      " back-filled, and nothing here asserts on them.
+      DATA(integration_text) = COND string(
+        WHEN printed_row-integration_status IS INITIAL THEN '-'
+        ELSE |{ printed_row-integration_status }| ).
       console->write( |{ printed_row-supplier WIDTH = 10 }| &&
                       |{ printed_row-status WIDTH = 12 }| &&
                       |{ printed_row-total_amount WIDTH = 12 }| &&
                       |{ number_text WIDTH = 22 }| &&
+                      |{ printed_row-order_revision WIDTH = 4 }| &&
+                      |{ integration_text WIDTH = 16 }| &&
                       |{ origin_text WIDTH = 10 }| &&
                       |{ reason_text }| ).
     ENDLOOP.

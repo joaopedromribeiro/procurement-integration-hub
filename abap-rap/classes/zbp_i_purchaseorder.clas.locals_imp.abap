@@ -429,12 +429,31 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
         ENDIF.
         DATA(order_number) = |PO{ allocated_number+12(8) }|.
 
+        " OrderRevision becomes 1 here, in the same local-mode update as the
+        " status and the number, so the three facts a successful submit
+        " establishes are written or rolled back together.
+        "
+        " Revision 1 means "this order has been submitted once and is
+        " deliverable". A DRAFT order keeps revision 0 and is deliberately not
+        " deliverable: the CAP ingestion contract requires source.revision >= 1
+        " and answers 400 INVALID_SOURCE_IDENTITY below that, so the revision
+        " is what distinguishes an order that may be delivered from one that
+        " may not. It is a business fact about the order and is therefore
+        " written by the action that creates it, never defaulted from 0 to 1
+        " inside a mapper or a transport class, which would hide a missing
+        " fact and turn the revision into an artifact of the wire format.
+        "
+        " Nothing later in the lifecycle changes it. Approve, reject and
+        " cancel leave the revision alone, and a refused second submit exits
+        " above this statement, so the value written here is final until a
+        " future phase introduces a re-delivery at a higher revision.
         MODIFY ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
           ENTITY PurchaseOrder
-            UPDATE FIELDS ( Status PurchaseOrderNumber )
+            UPDATE FIELDS ( Status PurchaseOrderNumber OrderRevision )
             WITH VALUE #( ( %tky = action_key-%tky
                             Status = 'SUBMITTED'
-                            PurchaseOrderNumber = order_number ) )
+                            PurchaseOrderNumber = order_number
+                            OrderRevision = 1 ) )
           FAILED DATA(update_failed)
           REPORTED DATA(update_reported).
         reported_orders = CORRESPONDING #( DEEP update_reported-purchaseorder ).
@@ -655,10 +674,12 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
           EXIT.
         ENDIF.
 
-        " APPROVED is cancellable here with no delivery-request guard. No
-        " Phase 2 capability can set IntegrationStatus or DeliveryId, so the
-        " condition cannot be true and could not be tested. That guard
-        " belongs with DeliveryIntent and sendToSupplier in Phase 5.
+        " APPROVED is cancellable here with no delivery-request guard. Phase
+        " 5.2a gives a new order IntegrationStatus = NOT_REQUESTED, but that
+        " is precisely the value meaning no delivery has been requested, and
+        " nothing yet moves it onwards or sets DeliveryId — so the guard
+        " condition still cannot be true and still could not be tested. That
+        " guard belongs with DeliveryIntent and sendToSupplier in Phase 5.
         MODIFY ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
           ENTITY PurchaseOrder
             UPDATE FIELDS ( Status )
@@ -859,14 +880,28 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
     DATA reported_orders LIKE reported-purchaseorder.
     reported_orders = CORRESPONDING #( DEEP read_reported-purchaseorder ).
     APPEND LINES OF reported_orders TO reported-purchaseorder.
+    " The guard stays on Status, which is what "this root has not been
+    " initialized yet" has always meant here. It is deliberately not widened
+    " to IntegrationStatus: every row persisted before Phase 5 carries a
+    " filled Status and a blank IntegrationStatus, and guarding on the blank
+    " integration value would make those rows look uninitialized.
     DELETE purchase_orders WHERE Status IS NOT INITIAL.
     CHECK purchase_orders IS NOT INITIAL.
 
+    " Both initial values are written together, in the one determination that
+    " already owns "what a newly created root starts as". IntegrationStatus
+    " belongs here rather than in a second determination because it is the
+    " same fact about the same moment: the order exists and nothing has been
+    " requested of the portal for it yet. NOT_REQUESTED is an explicit
+    " starting state, which is what lets a later delivery check read a
+    " meaningful value instead of having to treat blank as a special case.
     MODIFY ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
       ENTITY PurchaseOrder
-      UPDATE FIELDS ( Status )
+      UPDATE FIELDS ( Status IntegrationStatus )
       WITH VALUE #( FOR purchase_order IN purchase_orders
-        ( %tky = purchase_order-%tky Status = 'DRAFT' ) )
+        ( %tky = purchase_order-%tky
+          Status = 'DRAFT'
+          IntegrationStatus = 'NOT_REQUESTED' ) )
       REPORTED DATA(update_reported).
 
     reported_orders = CORRESPONDING #( DEEP update_reported-purchaseorder ).
