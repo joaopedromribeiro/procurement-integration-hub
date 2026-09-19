@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0",
+  "deliveryId": "00000000-0000-0000-0000-000000000001",
+  "sourceSystem": "PIH_ABAP_DEV",
+  "purchaseOrderId": "00000000-0000-0000-0000-000000000002",
+  "revision": 1,
+  "purchaseOrder": "PO00002001",
+  "supplier": "SUP001",
+  "supplierName": "Example Technology Supplier",
+  "companyCode": "1000",
+  "purchasingOrganization": "1000",
+  "purchasingGroup": "001",
+  "currency": "EUR",
+  "totalAmount": "1500.00",
+  "items": [
+    {
+      "itemId": "00000000-0000-0000-0000-000000000003",
+      "item": "10",
+      "material": "MAT001",
+      "description": "Laptop",
+      "quantity": "2.000",
+      "unitOfMeasure": "EA",
+      "netPrice": "750.0000",
+      "totalAmount": "1500.00"
+    }
+  ]
+}
