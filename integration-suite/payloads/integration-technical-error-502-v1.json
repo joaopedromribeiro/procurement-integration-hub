@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "INTEGRATION_TECHNICAL_ERROR",
+    "message": "A technical error occurred while delivering the order.",
+    "correlationId": "55555555-6666-7777-8888-999999999999",
+    "retryable": true
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "deliveryId 244b218a-5b0c-4244-befe-d3a163f4b3f1 was already accepted with different content. The stored order is unchanged; use a new deliveryId for a corrected snapshot.",
+    "correlationId": "44444444-5555-6666-7777-888888888888",
+    "retryable": false,
+    "code": "DELIVERY_PAYLOAD_CONFLICT"
+  }
+}

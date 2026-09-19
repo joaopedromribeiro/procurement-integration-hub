@@ -1,6 +1,6 @@
 # Phase 6 — Cloud Integration as the mediation layer
 
-Status: **Phase 6.1 and Phase 6.2 are both SAP Integration Suite runtime-verified.** A real HTTPS request reached a deployed iFlow in a real tenant, was converted, validated against the source contract, and answered with a controlled response carrying the caller's own correlation ID — and an invalid contract was rejected by the schema instead of being answered. **Phase 6.2 is built and verified too**: a Graphical Message Mapping now turns the validated source into the CAP order contract, with semantic parity against the Phase 5 ABAP mapper and **no Groovy anywhere**. No SAP ABAP object changed, no CAP object changed, and Cloud Integration is still not in the real outbound path — there is no CAP receiver call yet, which is Phase 6.3.
+Status: **Phases 6.1, 6.2 and 6.3 are all SAP Integration Suite runtime-verified.** A real HTTPS request reached a deployed iFlow in a real tenant, was converted, validated against the source contract, and answered with a controlled response carrying the caller's own correlation ID — and an invalid contract was rejected by the schema instead of being answered. **Phase 6.2 added the mapping**: a Graphical Message Mapping turns the validated source into the CAP order contract, with semantic parity against the Phase 5 ABAP mapper and **no Groovy anywhere**. **Phase 6.3 closed the loop**: Cloud Integration now calls the protected CAP `IntegrationService` over OAuth 2.0 client credentials and returns CAP's real receipt, with a `201` create, a `200` idempotent replay, a truthful `409` conflict and a controlled `502` for technical failures. No SAP ABAP object changed and no CAP object changed in any of the three subphases. **Cloud Integration is still not in the real outbound path** — SAP has not been cut over, which is Phase 6.4.
 
 Phase 5 remains the working baseline and the rollback: SAP still posts directly to CAP through `ZJP_CL_OUTBOUND_TRANSPORT` and `ZJP_CAP_BASE`, and nothing in this phase has touched that.
 
@@ -33,23 +33,33 @@ is not supported for tenant: 0badc38dtrial
 
 Capabilities and roles used: `Integration_Provisioner`, **Build Integration Scenarios**, `PI_Integration_Developer`.
 
-## 3. The Phase 6.1 flow
+## 3. The deployed flow
 
 Integration Package **Procurement Integration Hub**, Integration Flow **`PIH_OrderDelivery_v1`**, version **1.0.0**, runtime profile **Cloud Integration**.
 
-Phase 6.1 deployed the first four steps. **Phase 6.2 added the mapping**, and the response step was renamed accordingly:
+Phase 6.1 deployed the first four steps, **Phase 6.2 added the mapping**, and **Phase 6.3 added the CAP call and the Exception Subprocess**. The deployed flow, with step names exactly as the export carries them:
 
 ```text
 HTTPS Sender
-  → Capture Correlation ID       (Content Modifier, exchange property)
-  → Convert Source JSON to XML   (root element OrderDelivery)
-  → Validate Source Contract     (XML Validator, source XSD)
-  → Map Source to CAP Contract   (Graphical Message Mapping, OpenAPI target)   [6.2]
-  → Prepare Mapping Response     (Content Modifier)                            [6.2]
+  → Capture Correlation ID            (Content Modifier, exchange property)
+  → Convert Source JSON to XML        (root element OrderDelivery)
+  → Validate Source Contract          (XML Validator, source XSD)
+  → Map Source to CAP Contract        (Graphical Message Mapping, OpenAPI target)  [6.2]
+  → Prepare CAP Request               (Content Modifier, headers only)             [6.3]
+  → Send to CAP request Reply         (Request Reply)                              [6.3]
+       → CAP_Supplier_Portal          (HTTP receiver participant)                  [6.3]
+  → Prepare Delivery Receipt Response (Content Modifier, headers only)             [6.3]
   → End
+
+Exception Subprocess "Handle Technical Exception"                                      [6.3]
+  Error Start
+  → Prepare Technical Error Response  (Content Modifier)
+  → End Message
 ```
 
-**There is still no CAP receiver call.** The receiver participant may remain visible but disconnected until Phase 6.3. That absence is the point: these subphases prove the *entry* boundary and then the *mapping* in isolation, so a later failure cannot be ambiguous between the sender, the conversion, the schema, the mapping and the portal.
+**The exported artifact is the implementation truth**, and its step names drift slightly from the prose anyone would write: *Send to CAP request Reply*, and a trailing space in *Prepare CAP Request*. They are reproduced here as-is rather than tidied, because a reader comparing this guide against the iFlow should find the same strings.
+
+**The isolation discipline was kept to the end.** 6.1 proved the entry boundary with no receiver at all, 6.2 proved the mapping with still no receiver, and only 6.3 connected the portal. When 6.3's first attempt failed, that ordering is what made the cause obvious within one request rather than ambiguous across five candidate steps.
 
 ### Endpoint
 
@@ -188,7 +198,7 @@ with `PIH_OrderDelivery_v1` returning the mapped CAP contract. That `X-Correlati
 
 **Authentication was never broken, and this should not be recorded as if it were.** The identical service-key client-credentials authentication succeeded once CSRF protection was off. The 403 was a CSRF-token requirement that the caller did not satisfy, not an authorization failure.
 
-**`CSRF Protected = disabled` is the current Phase 6.2 runtime configuration, and it is not declared to be the final production security posture.** The deployed `.iflw` records it as `xsrfProtection = 0`, which will be checkable from this repository without tenant access once the export is committed. If CSRF protection is enabled later, **the caller must implement the matching CSRF token fetch-and-use flow**, or the final security architecture must explicitly choose another supported machine-to-machine approach. Which of those happens is a later security and cutover decision, tracked as an open item.
+**`CSRF Protected = disabled` is the current Phase 6.2 runtime configuration, and it is not declared to be the final production security posture.** The exported artifact records it: `xsrfProtection` is `0` in the `.iflw` inside [`iflows/PIH_OrderDelivery_v1.zip`](../iflows/PIH_OrderDelivery_v1.zip), so the posture is checkable from this repository without tenant access. If CSRF protection is enabled later, **the caller must implement the matching CSRF token fetch-and-use flow**, or the final security architecture must explicitly choose another supported machine-to-machine approach. Which of those happens is a later security and cutover decision, tracked as an open item.
 
 ### The target turned out to be OpenAPI, not XSD
 
@@ -309,15 +319,118 @@ Compare CI's output with the golden oracle. **Byte-level comparison if it is lit
 
 Assertions required either way: `schemaVersion`, `deliveryId`, `source.system` / `.orderId` / `.orderNumber` / `.revision`, `supplierCode`, `amount.value` / `.currency`, `lines` cardinality **and array-ness**, `sourceItemId`, `lineNumber` numeric, `product.code` / `.description`, `orderedQuantity.value`, `EA → PCE`, `unitPrice.value` / `.currency`, `lineAmount`, and the **absence** of `supplierName`, `companyCode`, `purchasingOrganization` and `purchasingGroup`.
 
-## 6. Remaining subphases
+## 6. Phase 6.3 — the CAP call, runtime-verified
 
-**6.3** — CI → CAP: HTTP receiver, real 201/200/409, receipt handling, Exception Subprocess, and the `Idempotency-Key` ownership transfer noted below. **6.4** — SAP cutover: a new destination, and the coordinator posts the persisted snapshot to CI. **6.5** — inbound `PIH_SupplierResponse_v1`, which needs `applySupplierResponse` and does not exist yet.
+**Cloud Integration now delivers to the portal.** The Request Reply step calls the protected CAP `IntegrationService` and the caller receives CAP's own receipt. Every configuration value below is verifiable in [`iflows/PIH_OrderDelivery_v1.zip`](../iflows/PIH_OrderDelivery_v1.zip); none of it rests on a screenshot.
 
-## 7. Open items
+### Receiver configuration
 
-- **Header ownership transfer.** Today the *ABAP mapper* sets `Content-Type` and `Idempotency-Key` (= `deliveryId`) and owns the CAP path. When CI takes over mapping, CI must set them — otherwise nothing does. Phase 6.3.
-- **Receipt shape.** ARCHITECTURE describes CI mapping the receipt *to the source contract*, but the coordinator's `read_receipt` is runtime-verified against CAP's actual receipt. **Recommendation: CI returns CAP's receipt unchanged**, and any reshaping is a separate later decision. Phase 6.3.
-- **Exported iFlow artifact, partly resolved.** The files under `mappings/` are now **extracted from a real tenant export** rather than derived by hand, so the source XSD, the OpenAPI target and the `.mmap` are the deployed artifacts. **The export archive itself is not yet committed** under `iflows/`, so the flow structure and adapter settings are not yet verifiable from this repository.
+| Property | Value |
+| --- | --- |
+| CAP endpoint | `https://0badc38dtrial-dev-cap-supplier-portal-srv.cfapps.us10-003.hana.ondemand.com/rest/integration/v1/Orders` |
+| Proxy type | Internet (`proxyType = default` in the export) |
+| Method | `POST` |
+| Authentication | OAuth 2.0 Client Credentials |
+| Credential name | `PIH_CAP_OAUTH` |
+| Request headers | `Content-Type|X-Correlation-ID` |
+| Response headers | `*` |
+| Throw Exception on Failure | **OFF** |
+| Retry | platform default; no custom retry behaviour introduced |
+
+`PIH_CAP_OAUTH` is a Security Material entry of type OAuth2 Client Credentials holding the CAP XSUAA technical client. **No secret value, client id or token URL is recorded in this repository** — only the alias, the grant type and the fact that Integration Suite obtains a token and reaches the protected service.
+
+**Neither Content Modifier touches the body.** *Prepare CAP Request* sets `Content-Type: application/json` and `X-Correlation-ID` from `${property.PihCorrelationId}`, and lets the Message Mapping output pass through untouched. *Prepare Delivery Receipt Response* does the same two headers on the way back and leaves **CAP's receipt as the body**. That is the Phase 6.1 recommendation — *CI returns CAP's receipt unchanged* — actually implemented rather than quietly reshaped.
+
+### `Throw Exception on Failure = OFF` is the load-bearing setting
+
+**This one checkbox decides whether the caller is told the truth.** With it enabled, CPI converts a downstream non-2xx into a generic integration exception: the 6.3c conflict test came back as a failed MPL and a caller-facing **500**, and CAP's precise `409 DELIVERY_PAYLOAD_CONFLICT` — including the sentence telling the caller to use a new `deliveryId` — was destroyed in transit.
+
+With it **OFF**, CPI preserves the real status code and the real CAP error body. The distinction the flow now draws is exactly the right one:
+
+- **Downstream HTTP answers** (`201`, `200`, `409`, and any other CAP 4xx/5xx) are **real responses from the portal** and are passed through as themselves.
+- **Technical integration failures** (DNS, connectivity, TLS, timeout, OAuth, iFlow processing) never produce a downstream answer at all, so the **Exception Subprocess** handles them and returns a controlled `502`.
+
+**A downstream `409` is not an integration error, and a DNS failure is not a business outcome.** Collapsing both into one generic 500 would have made the coordinator's Section 6.4 receipt classification unimplementable, because `409` and `502` sit on opposite sides of its retry decision.
+
+### The technical error response
+
+The Exception Subprocess sets `CamelHttpResponseCode = 502`, `Content-Type: application/json` and the same `X-Correlation-ID`, with a fixed body:
+
+```json
+{
+  "error": {
+    "code": "INTEGRATION_TECHNICAL_ERROR",
+    "message": "A technical error occurred while delivering the order.",
+    "correlationId": "${property.PihCorrelationId}",
+    "retryable": true
+  }
+}
+```
+
+**`exception.message` and the stack trace are deliberately not exposed.** The caller gets a stable code, a retryability flag and its own correlation ID; the diagnostic detail stays in the MPL where it belongs. A caller that must parse an error to decide whether to retry needs a contract, not a Java exception string.
+
+### Runtime evidence
+
+All four runs used delivery `244b218a-5b0c-4244-befe-d3a163f4b3f1`.
+
+**6.3a — create, `HTTP 201 Created`.** The receipt came back through Integration Suite:
+
+```json
+{
+  "deliveryId": "244b218a-5b0c-4244-befe-d3a163f4b3f1",
+  "sourceOrderId": "bcb31a02-43ad-41d4-83c8-a4c12917213b",
+  "portalOrderId": "958b9eb4-a427-4acb-af9a-e9b023734349",
+  "status": "RECEIVED",
+  "receivedAt": "2026-09-19T20:51:36.114Z"
+}
+```
+
+One request proves the whole chain at once: HTTPS sender authentication, source validation, mapping, OAuth 2.0 client credentials, Integration Suite reaching CAP, CAP reaching HANA, and the receipt travelling back out.
+
+**6.3b — idempotent replay, `HTTP 200 OK`.** Same `deliveryId`, same content, and the receipt came back with the **same `portalOrderId` and the same `receivedAt`**. Those two fields are the proof: a second portal order would have carried a new id, and a re-created one a later timestamp. Neither moved, so nothing was created.
+
+**6.3c — conflicting replay, `HTTP 409 Conflict`.** Same `deliveryId`, changed commercial content, and CAP's own error body arrived intact through CI:
+
+```json
+{
+  "error": {
+    "message": "deliveryId 244b218a-5b0c-4244-befe-d3a163f4b3f1 was already accepted with different content. The stored order is unchanged; use a new deliveryId for a corrected snapshot.",
+    "correlationId": "44444444-5555-6666-7777-888888888888",
+    "retryable": false,
+    "code": "DELIVERY_PAYLOAD_CONFLICT"
+  }
+}
+```
+
+**6.3d — controlled technical failure, `HTTP 502`.** For verification only, the receiver host was temporarily pointed at `https://pih-cap-test.invalid/...` to force a DNS/connectivity failure. The Exception Subprocess answered with the controlled body above, carrying correlation `55555555-6666-7777-8888-999999999999`.
+
+**The real receiver was then restored and redeployed, and the restore was verified rather than assumed**: the original payload was sent again and returned `HTTP 200 OK` with the same `portalOrderId` and `receivedAt` as 6.3a. The export in this repository carries the real CAP host, not the `.invalid` one, so the restore is checkable here too.
+
+### Idempotency works without an `Idempotency-Key` header, and that resolves an open item unexpectedly
+
+**Phase 6.1 recorded a worry that turned out to be misdirected.** The open item said the ABAP mapper sets `Idempotency-Key` (= `deliveryId`) and that *CI must set it too, otherwise nothing does*. CI does **not** set it: *Prepare CAP Request* sends `Content-Type` and `X-Correlation-ID` only. Yet 6.3b deduplicated correctly and 6.3c detected the conflict.
+
+The reason is in CAP's own contract. `deliveryId` is the **key of the `Orders` entity in the request body**, and `integration-service.cds` says so in as many words, describing it as the *"`Idempotency-Key` equivalent"*. Delivery identity travels **in the payload**, not in a header, so the header was never what CAP deduplicated on. **The open item is closed, but not the way it was written** — and the difference matters for 6.4, because it means the cutover does not need to reproduce that header at all.
+
+### Correlation, still owned by the caller
+
+The caller's `X-Correlation-ID` is captured into `PihCorrelationId`, forwarded to CAP, and echoed on every response — including the `409` body, which proves the same value reached CAP and came back, and the `502`, which proves the Exception Subprocess has it too. **This is the business attempt correlation ID and is not the platform's own CPI or Cloud Foundry correlation identifiers**; conflating them would attach retry semantics to an id that changes per hop.
+
+### What Phase 6.3 does **not** prove
+
+**SAP has not been cut over.** `ZJP_CL_DISPATCH_COORDINATOR` still posts directly to CAP over `ZJP_CAP_BASE`, and every 6.3 run was driven by a test client, not by ABAP. Phase 5 remains the working path and the rollback. The receipt has not been consumed by the coordinator through CI, `PIH_SupplierResponse_v1` does not exist, and no retry or resilience behaviour beyond the platform default was configured or tested.
+
+## 7. Remaining subphases
+
+**6.4** — SAP cutover: a new destination, and the coordinator posts the persisted snapshot to CI. **6.5** — inbound `PIH_SupplierResponse_v1`, which needs `applySupplierResponse` and does not exist yet.
+
+## 8. Open items
+
+- ~~**Header ownership transfer.**~~ **Closed by Phase 6.3, and the premise was wrong.** CI sets `Content-Type` and `X-Correlation-ID` and does **not** send `Idempotency-Key` — yet 6.3b deduplicated and 6.3c conflicted correctly, because `deliveryId` is the key of the `Orders` entity in the body and is what CAP actually deduplicates on. No header ownership needs transferring at cutover.
+- ~~**Receipt shape.**~~ **Closed by Phase 6.3 as recommended.** *Prepare Delivery Receipt Response* sets headers only and leaves CAP's receipt as the body, so CI reshapes nothing and the coordinator's runtime-verified `read_receipt` keeps working unchanged at cutover. Any later reshaping remains a separate decision that would now be a deliberate break.
+- ~~**Exported iFlow artifact.**~~ **Closed.** [`iflows/PIH_OrderDelivery_v1.zip`](../iflows/PIH_OrderDelivery_v1.zip) is a real export and contains the deployed `.iflw`, the source XSD, the OpenAPI target and the `.mmap` mapping. The repository copies under `mappings/` are now extracted from that export rather than derived by hand.
 - **Final inbound security posture, including CSRF.** Phase 6.2 runs with **CSRF protection disabled** on the HTTPS Sender, because an authenticated machine-to-machine POST was rejected with HTTP 403 before reaching the flow while it was enabled. That is the current verified configuration and **not** a declared production posture. The decision to make later: either the caller implements the CSRF token fetch-and-use flow, or the security architecture picks another supported machine-to-machine approach. Belongs with the Phase 8 security work and the 6.4 cutover, not with mapping.
-- **`EA → PCE` will exist in two places** during 6.2 — ABAP and CI. Acceptable while both run; it needs an explicit end date at cutover.
+- **`EA → PCE` will exist in two places** until cutover — ABAP and CI. Acceptable while both run; it needs an explicit end date at 6.4.
+- **Retry and resilience are untested.** Phase 6.3 left the receiver on platform-default retry and introduced no custom behaviour, and nothing exercised a timeout, a transient 5xx or a redelivery. The `502` path proves a technical failure is *reported* cleanly, not that it is *recovered from*. Belongs with 6.4, where the coordinator's retry semantics meet CI's.
+- **The `502` contract is CI's alone.** `INTEGRATION_TECHNICAL_ERROR` with `retryable: true` is not yet mapped to anything in the coordinator's Section 6.4 receipt classification, which was written against CAP's status codes. 6.4 must decide how an unanswered-versus-502 distinction is classified, since both mean *the portal may or may not have the order*.
 - **Cutover consequence worth planning for now:** once CI owns mapping, the coordinator posts the persisted snapshot **verbatim**, so both `ZJP_CL_DLV_SNAPSHOT_READER` and `ZJP_CL_CAP_ORDER_MAPPER` leave the outbound path entirely. That is ADR-032's two-hop split paying off exactly as designed, and it makes 6.4 a smaller change than it looks.
