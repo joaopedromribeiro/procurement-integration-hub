@@ -11,7 +11,7 @@ Phase 1 compatibility note: `ZJP_` table/view names are internal ADT object name
 | Consumer → provider | Interface | Ownership |
 | --- | --- | --- |
 | Buyer UI → RAP UI service | **Implemented and runtime-verified.** OData V4 entity CRUD, draft operations and bound business actions on `ZJP_UI_PURCHASEORDER`; see [the buyer UI service](#buyer-ui-service-rap-odata-v4) below | Buyer edits permitted fields; RAP enforces rules |
-| Coordinator → CI | POST `/http/pih/v1/order-deliveries` | **Endpoint deployed and Integration Suite runtime-verified in Phase 6.1**, validating the source delivery contract and echoing `X-Correlation-ID`. It is **not yet in the SAP outbound path** — the coordinator still posts directly to CAP — and it performs no mapping and no CAP call yet |
+| Coordinator → CI | POST `/http/pih/v1/order-deliveries` | **Endpoint deployed and Integration Suite runtime-verified in Phases 6.1 and 6.2.** It validates the source delivery contract, echoes `X-Correlation-ID`, and **maps the source to the Mapped CAP order contract** below with semantic parity against the Phase 5 ABAP mapper. It is **not yet in the SAP outbound path** — the coordinator still posts directly to CAP — and it makes **no CAP call**, which is Phase 6.3 |
 | CI → CAP integration service | POST `/rest/integration/v1/Orders` | **Implemented, Phase 4.3.** Mapped portal ingestion contract |
 | Supplier UI → CAP supplier service | GET `/rest/supplier/v1/Orders`, GET `/rest/supplier/v1/Orders/{ID}` | **Implemented, Phase 4.4.** Supplier-filtered list and detail |
 | Supplier UI → CAP supplier service | POST `/rest/supplier/v1/Orders/{ID}/accept` | **Implemented, Phase 4.4.** Explicit acceptance command |

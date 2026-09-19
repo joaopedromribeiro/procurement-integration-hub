@@ -1,0 +1,199 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "PIH CAP Order Target Contract",
+    "version": "1.0.0",
+    "description": "Phase 6.2 target contract for PIH_OrderDelivery_v1 graphical message mapping."
+  },
+  "paths": {
+    "/rest/integration/v1/Orders": {
+      "post": {
+        "operationId": "ingestOrder",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CapOrder"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Replay accepted"
+          },
+          "201": {
+            "description": "Order created"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "409": {
+            "description": "Delivery payload conflict"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "DecimalString": {
+        "type": "string",
+        "maxLength": 30
+      },
+      "CapOrder": {
+        "type": "object",
+        "required": [
+          "schemaVersion",
+          "deliveryId",
+          "source",
+          "supplierCode",
+          "amount",
+          "lines"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "maxLength": 10,
+            "enum": [
+              "1.0"
+            ]
+          },
+          "deliveryId": {
+            "type": "string",
+            "maxLength": 36
+          },
+          "source": {
+            "$ref": "#/components/schemas/InboundSource"
+          },
+          "supplierCode": {
+            "type": "string",
+            "maxLength": 10
+          },
+          "amount": {
+            "$ref": "#/components/schemas/InboundMoney"
+          },
+          "lines": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/InboundLine"
+            }
+          }
+        }
+      },
+      "InboundSource": {
+        "type": "object",
+        "required": [
+          "system",
+          "orderId",
+          "orderNumber",
+          "revision"
+        ],
+        "properties": {
+          "system": {
+            "type": "string",
+            "maxLength": 30
+          },
+          "orderId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "orderNumber": {
+            "type": "string",
+            "maxLength": 20
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1
+          }
+        }
+      },
+      "InboundMoney": {
+        "type": "object",
+        "required": [
+          "currency",
+          "value"
+        ],
+        "properties": {
+          "currency": {
+            "type": "string",
+            "maxLength": 3
+          },
+          "value": {
+            "$ref": "#/components/schemas/DecimalString"
+          }
+        }
+      },
+      "InboundLine": {
+        "type": "object",
+        "required": [
+          "sourceItemId",
+          "lineNumber",
+          "product",
+          "orderedQuantity",
+          "unitPrice",
+          "lineAmount"
+        ],
+        "properties": {
+          "sourceItemId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "lineNumber": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "product": {
+            "$ref": "#/components/schemas/InboundProduct"
+          },
+          "orderedQuantity": {
+            "$ref": "#/components/schemas/InboundQuantity"
+          },
+          "unitPrice": {
+            "$ref": "#/components/schemas/InboundMoney"
+          },
+          "lineAmount": {
+            "$ref": "#/components/schemas/DecimalString"
+          }
+        }
+      },
+      "InboundProduct": {
+        "type": "object",
+        "required": [
+          "code",
+          "description"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 100
+          }
+        }
+      },
+      "InboundQuantity": {
+        "type": "object",
+        "required": [
+          "value",
+          "unit"
+        ],
+        "properties": {
+          "value": {
+            "$ref": "#/components/schemas/DecimalString"
+          },
+          "unit": {
+            "type": "string",
+            "maxLength": 3
+          }
+        }
+      }
+    }
+  }
+}

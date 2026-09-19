@@ -1,104 +1,85 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!--
-  PIH source order delivery contract, v1 - the SOURCE schema of PIH_OrderDelivery_v1.
-
-  WHAT THIS VALIDATES. The XML produced by the iFlow's "Convert Source JSON to
-  XML" step from the persisted SAP PayloadSnapshot. It is the SOURCE contract of
-  API_CONTRACTS.md, NOT the mapped CAP order: unitOfMeasure stays EA here, and
-  EA -> PCE is a boundary mapping concern that belongs to Phase 6.2.
-
-  PROVENANCE, STATED HONESTLY. The schema that actually ran in the tenant was
-  authored in Integration Suite and is deployed there as the iFlow resource
-  /xsd/pih-order-delivery-source-v1.xsd. THIS FILE IS A REPOSITORY COPY derived
-  from the same contract, not a byte-level export of the deployed resource. It is
-  kept here because the contract is now runtime-verified and belongs under
-  version control, and it must be reconciled against the deployed resource when
-  the iFlow is exported into integration-suite/iflows/PIH_OrderDelivery_v1/.
-
-  THE ONE RESTRICTION THAT IS RUNTIME-PROVEN is the schemaVersion enumeration.
-  A request carrying "2.0" was rejected in the tenant with, verbatim:
-    Value "2.0" contravenes the enumeration facet "1.0" of the type
-    SchemaVersionType.
-  Every other facet below expresses the documented contract and has not been
-  individually exercised; treat them as contract, not as evidence.
-
-  ARRAY SHAPE. SAP Cloud Integration's JSON-to-XML converter renders a JSON array
-  as REPEATED sibling elements named after the JSON property, so `items` is
-  maxOccurs="unbounded" here and there is deliberately no <items><item> wrapper.
-  A wrapper would not match what the converter emits.
--->
 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
            elementFormDefault="qualified">
 
-  <!-- CAP accepts major version 1 only; an unknown major version is a 400. -->
+  <!-- Phase 6.1 source contract:
+       persisted SAP RAP DeliveryIntent PayloadSnapshot after JSON -> XML conversion.
+       No namespace is used in the first Integration Suite version. -->
+
   <xs:simpleType name="SchemaVersionType">
     <xs:restriction base="xs:string">
       <xs:enumeration value="1.0"/>
     </xs:restriction>
   </xs:simpleType>
 
-  <!-- Canonical hyphenated UUID text, per the contract's common rules. -->
   <xs:simpleType name="UuidType">
     <xs:restriction base="xs:string">
-      <xs:pattern value="[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"/>
-    </xs:restriction>
-  </xs:simpleType>
-
-  <!--
-    Monetary and quantity values travel as decimal STRINGS with no scientific
-    notation. They are deliberately not xs:decimal: the contract fixes the scale
-    ("1500.00", "2.000", "750.0000") and xs:decimal would let a validator or a
-    mapping normalise 1500.00 to 1500, silently changing the wire value.
-  -->
-  <xs:simpleType name="DecimalStringType">
-    <xs:restriction base="xs:string">
-      <xs:pattern value="-?[0-9]+(\.[0-9]+)?"/>
-      <xs:maxLength value="30"/>
+      <xs:pattern value="[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"/>
     </xs:restriction>
   </xs:simpleType>
 
   <xs:simpleType name="CurrencyType">
     <xs:restriction base="xs:string">
-      <xs:length value="3"/>
+      <xs:pattern value="[A-Z]{3}"/>
     </xs:restriction>
   </xs:simpleType>
 
-  <xs:complexType name="ItemType">
-    <xs:sequence>
-      <xs:element name="itemId"          type="UuidType"/>
-      <!-- The source item number as an unpadded STRING: "10", not 00010 and not
-           the number 10. lineNumber becomes numeric only in the CAP target. -->
-      <xs:element name="item"            type="xs:string"/>
-      <xs:element name="material"        type="xs:string"/>
-      <xs:element name="description"     type="xs:string"/>
-      <xs:element name="quantity"        type="DecimalStringType"/>
-      <!-- Stays EA. No PCE anywhere in the source contract. -->
-      <xs:element name="unitOfMeasure"   type="xs:string"/>
-      <xs:element name="netPrice"        type="DecimalStringType"/>
-      <xs:element name="totalAmount"     type="DecimalStringType"/>
-    </xs:sequence>
-  </xs:complexType>
+  <xs:simpleType name="Amount2Type">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[0-9]+\.[0-9]{2}"/>
+    </xs:restriction>
+  </xs:simpleType>
 
-  <!-- Root element name agreed with the converter's "Add XML Root Element". -->
+  <xs:simpleType name="Quantity3Type">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[0-9]+\.[0-9]{3}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="Price4Type">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[0-9]+\.[0-9]{4}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="ItemNumberType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[0-9]+"/>
+    </xs:restriction>
+  </xs:simpleType>
+
   <xs:element name="OrderDelivery">
     <xs:complexType>
       <xs:sequence>
-        <xs:element name="schemaVersion"           type="SchemaVersionType"/>
-        <xs:element name="deliveryId"              type="UuidType"/>
-        <xs:element name="sourceSystem"            type="xs:string"/>
-        <xs:element name="purchaseOrderId"         type="UuidType"/>
-        <xs:element name="revision"                type="xs:integer"/>
-        <xs:element name="purchaseOrder"           type="xs:string"/>
-        <xs:element name="supplier"                type="xs:string"/>
-        <xs:element name="supplierName"            type="xs:string"/>
-        <xs:element name="companyCode"             type="xs:string"/>
-        <xs:element name="purchasingOrganization"  type="xs:string"/>
-        <xs:element name="purchasingGroup"         type="xs:string"/>
-        <xs:element name="currency"                type="CurrencyType"/>
-        <xs:element name="totalAmount"             type="DecimalStringType"/>
-        <!-- Repeated siblings, not a wrapped list. At least one line is
-             required: the ABAP builder already refuses an order with none. -->
-        <xs:element name="items" type="ItemType" maxOccurs="unbounded"/>
+        <xs:element name="schemaVersion" type="SchemaVersionType"/>
+        <xs:element name="deliveryId" type="UuidType"/>
+        <xs:element name="sourceSystem" type="xs:string"/>
+        <xs:element name="purchaseOrderId" type="UuidType"/>
+        <xs:element name="revision" type="xs:positiveInteger"/>
+        <xs:element name="purchaseOrder" type="xs:string"/>
+        <xs:element name="supplier" type="xs:string"/>
+        <xs:element name="supplierName" type="xs:string"/>
+        <xs:element name="companyCode" type="xs:string"/>
+        <xs:element name="purchasingOrganization" type="xs:string"/>
+        <xs:element name="purchasingGroup" type="xs:string"/>
+        <xs:element name="currency" type="CurrencyType"/>
+        <xs:element name="totalAmount" type="Amount2Type"/>
+
+        <!-- JSON array "items": [...] becomes repeated sibling <items> elements. -->
+        <xs:element name="items" minOccurs="1" maxOccurs="unbounded">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="itemId" type="UuidType"/>
+              <xs:element name="item" type="ItemNumberType"/>
+              <xs:element name="material" type="xs:string"/>
+              <xs:element name="description" type="xs:string"/>
+              <xs:element name="quantity" type="Quantity3Type"/>
+              <xs:element name="unitOfMeasure" type="xs:string"/>
+              <xs:element name="netPrice" type="Price4Type"/>
+              <xs:element name="totalAmount" type="Amount2Type"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
       </xs:sequence>
     </xs:complexType>
   </xs:element>

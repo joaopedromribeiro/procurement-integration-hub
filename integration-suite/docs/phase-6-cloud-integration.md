@@ -1,6 +1,6 @@
 # Phase 6 — Cloud Integration as the mediation layer
 
-Status: **Phase 6.1 is SAP Integration Suite runtime-verified.** A real HTTPS request reached a deployed iFlow in a real tenant, was converted, validated against the source contract, and answered with a controlled response carrying the caller's own correlation ID — and an invalid contract was rejected by the schema instead of being answered. **Phase 6.2 is designed here and not built.** No SAP ABAP object changed, no CAP object changed, and Cloud Integration is not yet in the real outbound path.
+Status: **Phase 6.1 and Phase 6.2 are both SAP Integration Suite runtime-verified.** A real HTTPS request reached a deployed iFlow in a real tenant, was converted, validated against the source contract, and answered with a controlled response carrying the caller's own correlation ID — and an invalid contract was rejected by the schema instead of being answered. **Phase 6.2 is built and verified too**: a Graphical Message Mapping now turns the validated source into the CAP order contract, with semantic parity against the Phase 5 ABAP mapper and **no Groovy anywhere**. No SAP ABAP object changed, no CAP object changed, and Cloud Integration is still not in the real outbound path — there is no CAP receiver call yet, which is Phase 6.3.
 
 Phase 5 remains the working baseline and the rollback: SAP still posts directly to CAP through `ZJP_CL_OUTBOUND_TRANSPORT` and `ZJP_CAP_BASE`, and nothing in this phase has touched that.
 
@@ -37,16 +37,19 @@ Capabilities and roles used: `Integration_Provisioner`, **Build Integration Scen
 
 Integration Package **Procurement Integration Hub**, Integration Flow **`PIH_OrderDelivery_v1`**, version **1.0.0**, runtime profile **Cloud Integration**.
 
+Phase 6.1 deployed the first four steps. **Phase 6.2 added the mapping**, and the response step was renamed accordingly:
+
 ```text
 HTTPS Sender
-  → Capture Correlation ID      (Content Modifier, exchange property)
-  → Convert Source JSON to XML  (root element OrderDelivery)
-  → Validate Source Contract    (XML Validator, source XSD)
-  → Build Validation Response   (Content Modifier, controlled JSON)
+  → Capture Correlation ID       (Content Modifier, exchange property)
+  → Convert Source JSON to XML   (root element OrderDelivery)
+  → Validate Source Contract     (XML Validator, source XSD)
+  → Map Source to CAP Contract   (Graphical Message Mapping, OpenAPI target)   [6.2]
+  → Prepare Mapping Response     (Content Modifier)                            [6.2]
   → End
 ```
 
-**There is no CAP receiver call in Phase 6.1.** The receiver participant may remain visible but disconnected until Phase 6.3. That absence is the point: this subphase proves the *entry* boundary in isolation, so a later failure cannot be ambiguous between the sender, the conversion, the schema and the portal.
+**There is still no CAP receiver call.** The receiver participant may remain visible but disconnected until Phase 6.3. That absence is the point: these subphases prove the *entry* boundary and then the *mapping* in isolation, so a later failure cannot be ambiguous between the sender, the conversion, the schema, the mapping and the portal.
 
 ### Endpoint
 
@@ -66,6 +69,8 @@ A **SAP Process Integration Runtime** service instance in the new subaccount: te
 **No secret material is recorded here or anywhere in this repository** — not the client secret, not the service key, not a token. Only the model, the service name, the plan, the role and the already-public host and path.
 
 The `CPI → CAP` hop does not exist yet and its authentication is Phase 6.3's. The full OAuth model for both hops remains Phase 8 per the security progression.
+
+One adapter setting alongside this one turned out to matter as much as the role: **CSRF protection on the HTTPS Sender**, which Phase 6.2 had to disable before an authenticated machine-to-machine POST could reach the flow at all. See [CSRF protection on the HTTPS Sender](#csrf-protection-on-the-https-sender-and-a-403-that-never-reached-the-flow).
 
 ### Correlation
 
@@ -152,13 +157,103 @@ Value "2.0" contravenes the enumeration facet "1.0" of the type SchemaVersionTyp
 
 ### What Phase 6.1 does **not** prove
 
-No mapping exists. No CAP call exists. No SAP system has pointed at this endpoint. The `VALIDATED` body is a stand-in. Only the `schemaVersion` enumeration has been exercised out of the whole schema — every other facet is contract, not evidence.
+At the 6.1 checkpoint no mapping existed, and the `VALIDATED` body was a stand-in; Phase 6.2 has since added the mapping and replaced that response. Still true today: **no CAP call exists and no SAP system has pointed at this endpoint.** And only the `schemaVersion` enumeration has ever been exercised out of the whole source schema — every other facet is contract, not evidence.
 
-## 5. Phase 6.2 — mapping parity
+## 5. Phase 6.2 — mapping parity, runtime-verified
 
-**Objective:** validated source XML → Graphical Message Mapping → target CAP XML → target XSD validation → XML to JSON → compared against the Phase 5 ABAP mapper's golden output.
+**Phase 6.2 is runtime-verified.** The Graphical Message Mapping turns the validated source into the CAP order contract and reaches **semantic parity** with the Phase 5 ABAP mapper. It was proven with a **one-item and a two-item** payload, and it needed **no Groovy**.
 
-Still no SAP cutover, no CAP receiver, no coordinator change, no destination change, and **no deletion of the ABAP mapper** — `ZJP_CL_CAP_ORDER_MAPPER` is the runtime-verified **parity oracle** for the whole of 6.2, and it stops being the oracle only after CI has matched it.
+Still no SAP cutover, no CAP receiver, no coordinator change, no destination change, and **no deletion of the ABAP mapper** — `ZJP_CL_CAP_ORDER_MAPPER` remains the runtime-verified **parity oracle**, and it stops being the oracle only when CI actually takes over the outbound path in 6.4.
+
+### CSRF protection on the HTTPS Sender, and a 403 that never reached the flow
+
+**Before any mapping could be tested, the test could not get in.** The HTTPS Sender was deployed with address `/pih/v1/order-deliveries`, authorization **User Role**, user role `ESBMessaging.send` and **CSRF Protected enabled**. A POST to `/http/pih/v1/order-deliveries`, carrying the same SAP Process Integration Runtime service-key authentication that was already working, came back:
+
+```text
+HTTP 403 Forbidden
+HTTP Status 403 — Forbidden      (plain HTML body)
+```
+
+**The diagnostically decisive detail is what was *absent*.** The rejected POSTs produced **no new Message Processing Log** under *Monitor → Integrations and APIs → Monitor Message Processing*. A 403 with an MPL would have meant the message entered `PIH_OrderDelivery_v1` and something inside it refused the request; a 403 with no MPL can only mean the request was rejected at the **HTTPS sender / endpoint boundary, before the flow ran**. That single observation separates an adapter-configuration problem from a flow problem, and it is worth reaching for before changing anything.
+
+Setting **CSRF Protected to disabled**, then Save → Deploy → Runtime Status *Started*, was the whole fix. **No mapping change was required for this problem.** The same authenticated POST to the same endpoint then returned:
+
+```text
+HTTP 200 OK
+Content-Type: application/json
+X-Correlation-Id: 11111111-2222-3333-4444-555555555555
+```
+
+with `PIH_OrderDelivery_v1` returning the mapped CAP contract. That `X-Correlation-Id` is the **caller-provided PIH attempt correlation ID**, distinct from the platform's own technical correlation and request IDs — the ownership rule from Phase 6.1 still holding across the mapping hop.
+
+**Authentication was never broken, and this should not be recorded as if it were.** The identical service-key client-credentials authentication succeeded once CSRF protection was off. The 403 was a CSRF-token requirement that the caller did not satisfy, not an authorization failure.
+
+**`CSRF Protected = disabled` is the current Phase 6.2 runtime configuration, and it is not declared to be the final production security posture.** The deployed `.iflw` records it as `xsrfProtection = 0`, which will be checkable from this repository without tenant access once the export is committed. If CSRF protection is enabled later, **the caller must implement the matching CSRF token fetch-and-use flow**, or the final security architecture must explicitly choose another supported machine-to-machine approach. Which of those happens is a later security and cutover decision, tracked as an open item.
+
+### The target turned out to be OpenAPI, not XSD
+
+This guide originally proposed a target **XSD**. The built flow uses an **OpenAPI 3.0.3** document instead, [`mappings/pih-cap-order-target-v1.openapi.json`](../mappings/pih-cap-order-target-v1.openapi.json). That changed how the two conversion risks flagged below were answered — but, as the next section records, **the target document alone did not answer them.**
+
+### How JSON numbers and the array were actually achieved — two mechanisms, not one
+
+**Declaring the contract was necessary and not sufficient.** Each risk needed a declaration *and* a mapping-side mechanism.
+
+**Numeric typing.** The OpenAPI target declares `revision` and `lineNumber` as `"type": "integer"`. On its own that did **not** produce numbers. The deployed run emitted them quoted:
+
+```json
+"revision": "1"
+"lineNumber": "10"
+```
+
+Only after the Message Mapping was configured to use the **basic data types defined by the target JSON/OpenAPI schema** — its *Basic Data Type Handling* setting — did the same payload emit them unquoted:
+
+```json
+"revision": 1
+"lineNumber": 10
+```
+
+So the OpenAPI document **declares** the primitive types, and the Message Mapping runtime setting is what **makes the generated JSON honour them**. Attributing the fix to the target schema alone would misdescribe what was done, and would leave the next person wondering why their integers are still strings.
+
+**Array handling.** The target declares `lines` as `"type": "array"` with `"minItems": 1`. The mapping also carries an explicit **structure mapping**, `/OrderDelivery/items` → `/lines`, which is what establishes the repeated target node and its cardinality. The declaration describes the shape; the structure mapping produces the repetition. Both are present in the deployed `.mmap`.
+
+The generalisable lesson is the same in both halves: **a declared target contract is necessary but not sufficient — the transformation engine has to be told to honour it.**
+
+**A consequence worth recording: there is no XML-to-JSON converter step in the flow at all.** ARCHITECTURE's original sketch had one. With an OpenAPI target the Message Mapping emits JSON directly, so the step is unnecessary. That is a deliberate deviation from the sketch, noted here rather than silently absorbed.
+
+The OpenAPI schemas mirror the CAP ingestion contract field for field, lengths included — `supplierCode` 10, `source.system` 30, `source.orderNumber` 20, `product.code` 40, `product.description` 100, `currency` and `unit` 3, `deliveryId` 36, `DecimalString` 30 — so the target document and `cap-supplier-portal/srv/integration-service.cds` agree.
+
+### `EA` to `PCE`, and the header currency, with standard functions
+
+The unit mapping is a **`FixValues`** function over `items/unitOfMeasure` with the single entry `EA` → `PCE`. ADR-009 asked for standard components before Groovy, and this is the rule that could most easily have been answered with a script; it was not.
+
+The header `currency` reaches two places. `amount.currency` is a direct mapping. Every line's `unitPrice.currency` is a **`useOneAsMany`** function, with the per-line cardinality supplied by **`removeContexts`** over `items/itemId` — the standard idiom for replicating one header value once per repeating target node. This too is standard-function work, not a script.
+
+### What the runtime proved
+
+Graphical Message Mapping executes against the source XSD and the OpenAPI target; **JSON number handling** — `revision` and `lineNumber` emerge unquoted, once Basic Data Type Handling honours the target schema; **array handling** — `lines` is an array, from the target declaration plus the `items` → `lines` structure mapping; a **one-item** payload maps correctly; a **two-item** payload maps correctly; `EA` becomes `PCE`; the header currency is replicated per line; the SAP-internal fields `supplierName`, `companyCode`, `purchasingOrganization` and `purchasingGroup` are excluded; `X-Correlation-ID` is still preserved end to end; and the result reaches **semantic parity** with the ABAP mapper golden payload. No Groovy, no SAP ABAP change, no CAP change.
+
+**The two-item run is the one that retires the array risk.** A single-item test cannot distinguish a real array from an object that a converter collapsed, so on its own it would have proven the weaker half of the claim.
+
+**Parity is semantic, not byte-level, and that is stated deliberately.** The rule set before the test was *do not claim byte parity unless it is literally true*. Field-by-field equivalence against the golden payload is what was verified.
+
+The two-item runtime response makes the distinction concrete rather than cautious: Cloud Integration emits its members in a different order from the ABAP mapper — `deliveryId`, `amount`, `schemaVersion`, `source`, `supplierCode`, `lines`, against the ABAP `schemaVersion`, `deliveryId`, `source`, `supplierCode`, `amount`, `lines`, with `source` differing internally too. The payloads are equivalent and are **not** byte-identical, so byte parity is not merely unproven here, it is known to be false.
+
+### Fixtures
+
+| File | Role |
+| --- | --- |
+| [`order-delivery-source-valid-v1.json`](../payloads/order-delivery-source-valid-v1.json) | one-item source, the Phase 5.2d golden input |
+| [`cap-order-target-golden-v1.json`](../payloads/cap-order-target-golden-v1.json) | **the oracle** — byte-exact ABAP mapper output for that input |
+| [`order-delivery-source-valid-2items-v1.json`](../payloads/order-delivery-source-valid-2items-v1.json) | **the two-item source actually executed** against the deployed iFlow — the one-item order extended with a second line, header `totalAmount` `2000.00` |
+| [`cap-order-target-runtime-2items-v1.json`](../payloads/cap-order-target-runtime-2items-v1.json) | **the deployed runtime response, verbatim** — Cloud Integration output, not a derivation. The ABAP golden covers one item only, so there is no ABAP oracle for this case |
+
+The two-item pair is the executed scenario, not a constructed one: `1500.00 + 500.00 = 2000.00` matches the header, both lines carry `PCE` and the header `EUR`, and both `lineNumber` values are numeric. It reuses the one-item order's `deliveryId`, `orderId` and `PO00002001` and adds line `20` (`MAT002`, Docking Station, `1.000` at `500.0000`), so line `10` is identical to the ABAP golden line and can be compared against it directly.
+
+---
+
+## 5a. The Phase 6.2 design as written beforehand
+
+Kept as a record, because the two conversion risks it named were real and are exactly what the OpenAPI target resolved.
 
 ### The oracle
 
@@ -196,9 +291,9 @@ Decimals keep their canonical scale as strings throughout: `1500.00`, `2.000`, `
 
 ### Target schema
 
-[`mappings/pih-cap-order-target-v1.xsd`](../mappings/pih-cap-order-target-v1.xsd) — **proposed, not deployed**. Every element, type and length is derived from `cap-supplier-portal/srv/integration-service.cds` and the element order from the verified ABAP golden body; nothing is invented.
+The plan proposed a target **XSD**, `pih-cap-order-target-v1.xsd`, derived from `cap-supplier-portal/srv/integration-service.cds` with element order taken from the verified ABAP golden body. **It was superseded by the OpenAPI target that was actually built and is no longer in the repository** (it remains in git history at commit `baaf278`). The derivation held up: the OpenAPI document carries the same fields and the same lengths.
 
-### The two conversion risks to prove first
+### The two conversion risks to prove first — both since answered
 
 Both produce output that reads as correct and is not, which is why they come before the cosmetic fields.
 
@@ -222,6 +317,7 @@ Assertions required either way: `schemaVersion`, `deliveryId`, `source.system` /
 
 - **Header ownership transfer.** Today the *ABAP mapper* sets `Content-Type` and `Idempotency-Key` (= `deliveryId`) and owns the CAP path. When CI takes over mapping, CI must set them — otherwise nothing does. Phase 6.3.
 - **Receipt shape.** ARCHITECTURE describes CI mapping the receipt *to the source contract*, but the coordinator's `read_receipt` is runtime-verified against CAP's actual receipt. **Recommendation: CI returns CAP's receipt unchanged**, and any reshaping is a separate later decision. Phase 6.3.
-- **Exported iFlow artifact.** The deployed artifact is in the tenant and **not in this repository**. `integration-suite/iflows/PIH_OrderDelivery_v1/` is still empty.
+- **Exported iFlow artifact, partly resolved.** The files under `mappings/` are now **extracted from a real tenant export** rather than derived by hand, so the source XSD, the OpenAPI target and the `.mmap` are the deployed artifacts. **The export archive itself is not yet committed** under `iflows/`, so the flow structure and adapter settings are not yet verifiable from this repository.
+- **Final inbound security posture, including CSRF.** Phase 6.2 runs with **CSRF protection disabled** on the HTTPS Sender, because an authenticated machine-to-machine POST was rejected with HTTP 403 before reaching the flow while it was enabled. That is the current verified configuration and **not** a declared production posture. The decision to make later: either the caller implements the CSRF token fetch-and-use flow, or the security architecture picks another supported machine-to-machine approach. Belongs with the Phase 8 security work and the 6.4 cutover, not with mapping.
 - **`EA → PCE` will exist in two places** during 6.2 — ABAP and CI. Acceptable while both run; it needs an explicit end date at cutover.
 - **Cutover consequence worth planning for now:** once CI owns mapping, the coordinator posts the persisted snapshot **verbatim**, so both `ZJP_CL_DLV_SNAPSHOT_READER` and `ZJP_CL_CAP_ORDER_MAPPER` leave the outbound path entirely. That is ADR-032's two-hop split paying off exactly as designed, and it makes 6.4 a smaller change than it looks.
