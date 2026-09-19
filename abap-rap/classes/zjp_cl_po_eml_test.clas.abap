@@ -108,6 +108,11 @@ CLASS zjp_cl_po_eml_test DEFINITION
     METHODS test_send_state_branches
       RETURNING VALUE(success) TYPE abap_bool.
 
+    " Phase 5.2g. The new RAP action on this business object; the coordinator
+    " that calls it is ZJP_CL_PO_DISPATCH_TEST's subject, not this class's.
+    METHODS test_record_delivery_result
+      RETURNING VALUE(success) TYPE abap_bool.
+
     " COMMIT ENTITIES selecting the DeliveryIntent response. `save_changes`
     " reports the PurchaseOrder response and cannot see this BO's failures.
     METHODS save_intent_changes
@@ -761,6 +766,13 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
       RETURN.
     ENDIF.
     out->write( 'PASS: Phase 5.2f sendToSupplier state branches E-H verified.' ).
+
+    " Phase 5.2g. The outcome boundary the coordinator drives. No HTTP here.
+    IF test_record_delivery_result( ) = abap_false.
+      print_lifecycle_summary( ).
+      RETURN.
+    ENDIF.
+    out->write( 'PASS: Phase 5.2g recordDeliveryResult outcome boundary verified.' ).
 
     print_lifecycle_summary( ).
   ENDMETHOD.
@@ -1713,6 +1725,233 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     IF success = abap_true.
       console->write( 'PASS: empty-order fixture cleanup complete.' ).
     ENDIF.
+  ENDMETHOD.
+
+  METHOD test_record_delivery_result.
+    " Phase 5.2g. The repository rule is that this class is extended whenever RAP
+    " behavior changes, and recordDeliveryResult is a new action on this business
+    " object. It is tested HERE as a RAP action - its guards and its two
+    " transitions - while the coordinator that calls it, the lease contract and
+    " the HTTP classification are ZJP_CL_PO_DISPATCH_TEST's subject.
+    "
+    " No HTTP, no coordinator and no transport is involved in this method. It
+    " drives the action directly through EML, which is exactly how the real
+    " coordinator reaches it.
+    success = abap_false.
+
+    console->write( '=== PHASE 5.2g RECORD DELIVERY RESULT ===' ).
+
+    " ---------- fixture: an approved order with a PENDING intent ----------
+    DATA(order_uuid) = create_decision_fixture( 'SUP050' ).
+    IF order_uuid IS INITIAL.
+      console->write( 'STOP: recordDeliveryResult fixture could not be created.' ).
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = order_uuid ) )
+        RESULT DATA(fixture_orders)
+      FAILED DATA(failed_fixture_read).
+    IF failed_fixture_read IS NOT INITIAL OR lines( fixture_orders ) <> 1.
+      console->write( 'STOP: recordDeliveryResult fixture could not be read.' ).
+      RETURN.
+    ENDIF.
+    DATA(order_key) = fixture_orders[ 1 ]-%tky.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE approve FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_approve_rdr).
+    IF failed_approve_rdr IS NOT INITIAL OR save_changes( ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: recordDeliveryResult fixture could not be approved.' ).
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE sendToSupplier FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_send_rdr).
+    IF failed_send_rdr IS NOT INITIAL OR save_changes( ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: sendToSupplier failed on the recordDeliveryResult fixture.' ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE delivery_id, order_revision, status FROM zjp_po_h
+      WHERE purchase_order_uuid = @order_uuid INTO @DATA(baseline).
+
+    IF baseline-status <> 'APPROVED' OR baseline-delivery_id IS INITIAL.
+      console->write( name = 'Baseline header' data = baseline ).
+      console->write( 'STOP: fixture must be APPROVED and carry a DeliveryId.' ).
+      RETURN.
+    ENDIF.
+
+    " ---------- 1: a result for the WRONG delivery must be refused ----------
+    " Without this guard a stale or misrouted coordinator result could move an
+    " order's business status on the strength of someone else's receipt.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE recordDeliveryResult
+        FROM VALUE #( ( %tky                     = order_key
+                        %param-DeliveryUUID      = VALUE sysuuid_x16( )
+                        %param-OrderRevision     = baseline-order_revision
+                        %param-IntegrationStatus = 'DELIVERED' ) )
+      FAILED DATA(failed_wrong_delivery)
+      REPORTED DATA(reported_wrong_delivery).
+
+    IF failed_wrong_delivery IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a result for a different delivery was accepted.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+    console->write( 'PASS: 1 - a foreign delivery identity is refused.' ).
+
+    " ---------- 2: an unknown result state must be refused ----------
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE recordDeliveryResult
+        FROM VALUE #( ( %tky                     = order_key
+                        %param-DeliveryUUID      = baseline-delivery_id
+                        %param-OrderRevision     = baseline-order_revision
+                        %param-IntegrationStatus = 'SHIPPED' ) )
+      FAILED DATA(failed_bad_state).
+
+    IF failed_bad_state IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: an unknown integration status was accepted.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+    console->write( 'PASS: 2 - the result vocabulary is closed.' ).
+
+    " ---------- 3: a definite failure moves APPROVED to ERROR ----------
+    DATA(correlation_one) = cl_system_uuid=>create_uuid_x16_static( ).
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE recordDeliveryResult
+        FROM VALUE #( ( %tky                     = order_key
+                        %param-DeliveryUUID      = baseline-delivery_id
+                        %param-OrderRevision     = baseline-order_revision
+                        %param-IntegrationStatus = 'FAILED'
+                        %param-CorrelationId     = correlation_one
+                        %param-ErrorCode         = 'HTTP_409'
+                        %param-ErrorMessage      = 'Payload collision on replay.' ) )
+      FAILED DATA(failed_failure).
+
+    IF failed_failure IS NOT INITIAL OR save_changes( ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a definite failure could not be recorded.' ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE status, integration_status, delivery_id, last_correlation_id,
+                  last_error_code, last_error_message, last_error_at
+      FROM zjp_po_h WHERE purchase_order_uuid = @order_uuid
+      INTO @DATA(failed_header).
+    console->write( name = 'Header after a FAILED result' data = failed_header ).
+
+    IF failed_header-status <> 'ERROR'.
+      console->write( 'STOP: a definite send failure must move the order to ERROR.' ).
+      RETURN.
+    ENDIF.
+    IF failed_header-integration_status <> 'FAILED'.
+      console->write( 'STOP: the header integration status is not FAILED.' ).
+      RETURN.
+    ENDIF.
+    IF failed_header-last_correlation_id <> correlation_one.
+      console->write( 'STOP: the attempt correlation id was not recorded.' ).
+      RETURN.
+    ENDIF.
+    IF failed_header-last_error_code <> 'HTTP_409'
+       OR failed_header-last_error_message IS INITIAL.
+      console->write( 'STOP: the error evidence was not recorded.' ).
+      RETURN.
+    ENDIF.
+    IF failed_header-last_error_at IS INITIAL.
+      console->write( 'STOP: LastErrorAt was not stamped by the handler.' ).
+      RETURN.
+    ENDIF.
+    IF failed_header-delivery_id <> baseline-delivery_id.
+      console->write( 'STOP: the delivery identity changed while recording a failure.' ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: 3 - APPROVED -> ERROR with correlation and error evidence.' ).
+
+    " ---------- 4: a later success moves ERROR to SENT and clears the error ----------
+    " The domain model allows it - "SENT on positive receipt" - and a delivered
+    " order still carrying the last failure's code would be a standing lie about
+    " its own state.
+    DATA(correlation_two) = cl_system_uuid=>create_uuid_x16_static( ).
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE recordDeliveryResult
+        FROM VALUE #( ( %tky                     = order_key
+                        %param-DeliveryUUID      = baseline-delivery_id
+                        %param-OrderRevision     = baseline-order_revision
+                        %param-IntegrationStatus = 'DELIVERED'
+                        %param-CorrelationId     = correlation_two ) )
+      FAILED DATA(failed_success).
+
+    IF failed_success IS NOT INITIAL OR save_changes( ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a successful delivery could not be recorded.' ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE status, integration_status, last_correlation_id,
+                  last_error_code, last_error_message, last_error_at
+      FROM zjp_po_h WHERE purchase_order_uuid = @order_uuid
+      INTO @DATA(sent_header_rdr).
+    console->write( name = 'Header after a DELIVERED result' data = sent_header_rdr ).
+
+    IF sent_header_rdr-status <> 'SENT'.
+      console->write( 'STOP: a positive receipt must move the order to SENT.' ).
+      RETURN.
+    ENDIF.
+    IF sent_header_rdr-integration_status <> 'DELIVERED'.
+      console->write( 'STOP: the header integration status is not DELIVERED.' ).
+      RETURN.
+    ENDIF.
+    IF sent_header_rdr-last_correlation_id <> correlation_two.
+      console->write( 'STOP: the second attempt correlation id was not recorded.' ).
+      RETURN.
+    ENDIF.
+    IF sent_header_rdr-last_error_code IS NOT INITIAL
+       OR sent_header_rdr-last_error_message IS NOT INITIAL
+       OR sent_header_rdr-last_error_at IS NOT INITIAL.
+      console->write( 'STOP: success did not clear the previous error evidence.' ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: 4 - ERROR -> SENT, error evidence cleared.' ).
+
+    " ---------- 5: a late failure must not un-send a delivered order ----------
+    " "A later delivery receipt must not downgrade that state."
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE recordDeliveryResult
+        FROM VALUE #( ( %tky                     = order_key
+                        %param-DeliveryUUID      = baseline-delivery_id
+                        %param-OrderRevision     = baseline-order_revision
+                        %param-IntegrationStatus = 'UNKNOWN' ) )
+      FAILED DATA(failed_late).
+
+    IF failed_late IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a late failure was allowed to downgrade a SENT order.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+
+    console->write( 'PASS: 5 - a SENT order cannot be downgraded by a late failure.' ).
+
+    success = abap_true.
   ENDMETHOD.
 
   METHOD save_intent_changes.

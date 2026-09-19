@@ -1,0 +1,32 @@
+@EndUserText.label: 'Purchase Order Delivery Result Parameter'
+define abstract entity ZJP_A_RecordDeliveryResult
+{
+      // Identity guard. The action refuses a result whose delivery identity is
+      // not the one the header currently carries in DeliveryId, so a stale or
+      // misrouted coordinator result cannot move an order's business status.
+  DeliveryUUID      : sysuuid_x16;
+
+      // Revision guard. An intent is frozen to one OrderRevision; a result for
+      // a different revision belongs to a different delivery and is refused.
+  OrderRevision     : abap.int4;
+
+      // The classification, owned by the coordinator because only it has seen
+      // the transport response. Validated here against the closed vocabulary
+      // DELIVERED / FAILED / UNKNOWN / PENDING - the same words the intent's
+      // DispatchState uses, per the CDS comment on ZJP_PO_DLV.
+      //
+      // The business Status is NOT a parameter. It is derived from this value
+      // inside the handler, so no caller can set an arbitrary business status:
+      // "No unrestricted status PATCH exists" (domain model).
+  IntegrationStatus : abap.char(16);
+
+      // The transport attempt this result came from. A retry carries a new one
+      // while DeliveryUUID stays the same (API_CONTRACTS section 5.4).
+  CorrelationId     : sysuuid_x16;
+
+      // Error evidence, written to the header fields that have existed since
+      // Phase 1 and that nothing has ever written. Empty on success, where the
+      // handler also clears whatever a previous failure left behind.
+  ErrorCode         : abap.char(60);
+  ErrorMessage      : abap.char(255);
+}

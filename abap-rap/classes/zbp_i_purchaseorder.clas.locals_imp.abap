@@ -18,6 +18,9 @@ CLASS lhc_PurchaseOrder DEFINITION
     METHODS sendToSupplier FOR MODIFY
       IMPORTING keys FOR ACTION PurchaseOrder~sendToSupplier.
 
+    METHODS recordDeliveryResult FOR MODIFY
+      IMPORTING keys FOR ACTION PurchaseOrder~recordDeliveryResult.
+
     METHODS reject FOR MODIFY
       IMPORTING keys FOR ACTION PurchaseOrder~reject.
 
@@ -778,6 +781,179 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
           %msg = new_message_with_text(
             severity = if_abap_behv_message=>severity-error
             text = error_text ) )
+          TO reported-purchaseorder.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD recordDeliveryResult.
+    " Phase 5.2g - the RAP outcome boundary for the post-commit coordinator.
+    "
+    " WHY THIS ACTION EXISTS AT ALL. Status, IntegrationStatus, LastErrorCode,
+    " LastErrorMessage, LastErrorAt and LastCorrelationId are every one of them
+    " declared `field ( readonly )` in the base BDEF. An external EML consumer
+    " therefore cannot write them, and the coordinator runs outside every
+    " handler by design. Only a handler in LOCAL MODE may write a readonly
+    " field, so the coordinator needs a door - and this is the whole door, with
+    " a lock on it rather than an opening in the wall.
+    "
+    " THE BUSINESS STATUS IS NEVER A PARAMETER. It is derived below from the
+    " integration classification, so no caller can set an arbitrary business
+    " status: "No unrestricted status PATCH exists" (domain model). The caller
+    " supplies what the transport said; this handler decides what that means.
+    DATA reported_orders LIKE reported-purchaseorder.
+    DATA reported_items LIKE reported-purchaseorderitem.
+
+    LOOP AT keys INTO DATA(action_key).
+      DATA(error_text) = CONV string( '' ).
+
+      DO 1 TIMES.
+        " Active instance only, the shape every action in this pool uses.
+        IF action_key-%is_draft = if_abap_behv=>mk-on.
+          error_text = 'Not allowed on a draft instance.'.
+          EXIT.
+        ENDIF.
+
+        " The closed vocabulary, checked before anything is read. These are the
+        " same four words the intent's DispatchState uses, which is why the two
+        " never need translating.
+        DATA(requested) = CONV string( action_key-%param-IntegrationStatus ).
+        IF requested <> 'DELIVERED' AND requested <> 'FAILED'
+           AND requested <> 'UNKNOWN' AND requested <> 'PENDING'.
+          error_text = 'Unknown delivery result state.'.
+          EXIT.
+        ENDIF.
+
+        READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+          ENTITY PurchaseOrder
+            FIELDS ( Status OrderRevision DeliveryId )
+            WITH VALUE #( ( %tky = action_key-%tky ) )
+            RESULT DATA(orders)
+          FAILED DATA(read_failed)
+          REPORTED DATA(read_reported).
+        reported_orders = CORRESPONDING #( DEEP read_reported-purchaseorder ).
+        APPEND LINES OF reported_orders TO reported-purchaseorder.
+
+        IF read_failed IS NOT INITIAL OR lines( orders ) <> 1.
+          error_text = 'Order could not be read; no result recorded.'.
+          EXIT.
+        ENDIF.
+
+        " Identity guards. A result carries the delivery and the revision it
+        " belongs to, and both must match what this order currently holds.
+        " Without them a stale or misrouted coordinator result could move an
+        " order's business status on the strength of someone else's receipt.
+        IF orders[ 1 ]-DeliveryId <> action_key-%param-DeliveryUUID.
+          error_text = 'Result belongs to a different delivery.'.
+          EXIT.
+        ENDIF.
+
+        IF orders[ 1 ]-OrderRevision <> action_key-%param-OrderRevision.
+          error_text = 'Result belongs to a different revision.'.
+          EXIT.
+        ENDIF.
+
+        DATA(current_status) = CONV string( orders[ 1 ]-Status ).
+        DATA(new_status)     = current_status.
+
+        " The domain model's transition table, and nothing invented.
+        CASE requested.
+
+          WHEN 'DELIVERED'.
+            " APPROVED + positive portal receipt -> SENT. ERROR is allowed for
+            " the same reason the model allows it - "SENT on positive receipt" -
+            " and SENT itself is allowed so that recording an idempotent replay
+            " twice is a no-op rather than a failure.
+            IF current_status <> 'APPROVED' AND current_status <> 'ERROR'
+               AND current_status <> 'SENT'.
+              error_text = 'Order cannot be marked sent from its status.'.
+              EXIT.
+            ENDIF.
+            new_status = 'SENT'.
+
+          WHEN 'FAILED' OR 'UNKNOWN'.
+            " Definite send failure or ambiguous timeout -> ERROR. Refused from
+            " SENT on purpose: "A later delivery receipt must not downgrade
+            " that state", so a late failure cannot un-send a delivered order.
+            IF current_status <> 'APPROVED' AND current_status <> 'ERROR'.
+              error_text = 'Order cannot be marked failed from its status.'.
+              EXIT.
+            ENDIF.
+            new_status = 'ERROR'.
+
+          WHEN OTHERS.
+            " PENDING - a retryable congestion answer. The business status is
+            " deliberately untouched: nothing was decided, so nothing moves.
+            new_status = current_status.
+
+        ENDCASE.
+
+        IF requested = 'DELIVERED'.
+          " Success clears the error evidence a previous attempt left behind.
+          " A delivered order carrying the last failure's code would be a
+          " standing lie about its own state.
+          MODIFY ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+            ENTITY PurchaseOrder
+              UPDATE FIELDS ( Status IntegrationStatus LastCorrelationId
+                              LastErrorCode LastErrorMessage LastErrorAt )
+              WITH VALUE #( ( %tky              = action_key-%tky
+                              Status            = new_status
+                              IntegrationStatus = requested
+                              LastCorrelationId = action_key-%param-CorrelationId
+                              LastErrorCode     = VALUE zjp_po_h-last_error_code( )
+                              LastErrorMessage  = VALUE zjp_po_h-last_error_message( )
+                              LastErrorAt       = VALUE zjp_po_h-last_error_at( ) ) )
+            FAILED DATA(delivered_failed)
+            REPORTED DATA(delivered_reported).
+          reported_orders = CORRESPONDING #( DEEP delivered_reported-purchaseorder ).
+          APPEND LINES OF reported_orders TO reported-purchaseorder.
+
+          IF delivered_failed IS NOT INITIAL.
+            error_text = 'Delivery result could not be recorded.'.
+            EXIT.
+          ENDIF.
+
+        ELSE.
+          " Failure or retryable congestion. The error moment is taken HERE
+          " rather than from a parameter, for the same reason Phase 5.2f takes
+          " approval evidence from the header: the moment this system recorded
+          " the outcome is a fact it owns, and a caller-supplied timestamp is a
+          " claim it would have to trust.
+          GET TIME STAMP FIELD DATA(error_at).
+
+          MODIFY ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+            ENTITY PurchaseOrder
+              UPDATE FIELDS ( Status IntegrationStatus LastCorrelationId
+                              LastErrorCode LastErrorMessage LastErrorAt )
+              WITH VALUE #( ( %tky              = action_key-%tky
+                              Status            = new_status
+                              IntegrationStatus = requested
+                              LastCorrelationId = action_key-%param-CorrelationId
+                              LastErrorCode     = action_key-%param-ErrorCode
+                              LastErrorMessage  = action_key-%param-ErrorMessage
+                              LastErrorAt       = error_at ) )
+            FAILED DATA(failure_failed)
+            REPORTED DATA(failure_reported).
+          reported_orders = CORRESPONDING #( DEEP failure_reported-purchaseorder ).
+          APPEND LINES OF reported_orders TO reported-purchaseorder.
+
+          IF failure_failed IS NOT INITIAL.
+            error_text = 'Delivery failure could not be recorded.'.
+            EXIT.
+          ENDIF.
+
+        ENDIF.
+
+      ENDDO.
+
+      IF error_text IS NOT INITIAL.
+        APPEND VALUE #( %tky = action_key-%tky
+                        %op-%action-recordDeliveryResult = if_abap_behv=>mk-on )
+          TO failed-purchaseorder.
+        APPEND VALUE #( %tky = action_key-%tky
+                        %msg = new_message_with_text(
+                          severity = if_abap_behv_message=>severity-error
+                          text = error_text ) )
           TO reported-purchaseorder.
       ENDIF.
     ENDLOOP.

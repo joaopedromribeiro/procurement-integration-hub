@@ -19,6 +19,18 @@ etag master LocalLastChangedAt
   action ( authorization : update ) submit;
   action ( authorization : update ) approve;
   action ( authorization : update ) sendToSupplier;
+
+  // Phase 5.2g. The coordinator's outcome boundary. It is a NORMAL action and
+  // deliberately not an `internal action`: the coordinator is an EXTERNAL EML
+  // consumer running outside every handler, and `internal` would put it out of
+  // reach. "Restricted" here means NOT PROJECTED - it is absent from
+  // ZJP_C_PurchaseOrder, so no OData client can reach it, which is what
+  // API_CONTRACTS means by "prefer EML-only access for coordinator bookkeeping;
+  // do not expose an administrative HTTP operation just because a class uses it
+  // internally". It exists because Status, IntegrationStatus, LastErrorCode,
+  // LastErrorMessage, LastErrorAt and LastCorrelationId are all `field
+  // ( readonly )` below, so only a handler in local mode may write them.
+  action ( authorization : update ) recordDeliveryResult parameter ZJP_A_RecordDeliveryResult;
   action ( authorization : update ) reject parameter ZJP_A_Reject;
   action ( authorization : update ) cancel;
 
