@@ -31,6 +31,7 @@ define table zjp_po_h {
   last_correlation_id         : sysuuid_x16 not null;
   last_response_id            : sysuuid_x16 not null;
   last_response_version       : abap.int4 not null;
+  supplier_responded_at       : abp_lastchange_tstmpl not null;
   rejection_origin           : abap.char(10) not null;
   rejection_reason           : abap.char(255) not null;
 }

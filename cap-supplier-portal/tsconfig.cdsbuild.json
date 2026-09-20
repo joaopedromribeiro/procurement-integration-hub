@@ -5,6 +5,6 @@
     "rootDir": ".",
     "outDir": "gen/srv"
   },
-  "include": ["srv"],
+  "include": ["srv", "scripts"],
   "exclude": ["node_modules", "gen", "app", "test", "@cds-models"]
 }

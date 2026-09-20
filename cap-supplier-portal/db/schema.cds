@@ -193,15 +193,27 @@ entity DeliveryReceipts : cuid {
  * Specified in the CAP persistence table of docs/architecture/domain-model.md as
  * "responseId: UUID; order association; version; immutable response payload;
  * state PENDING/DELIVERED/FAILED/UNKNOWN; attempt count; last error; timestamps".
- * That table marks it phase 5, and Phase 4.4 pulls forward only what a supplier
- * decision needs: the identity, the version, the payload and the state. Attempt
- * count, last error and the sender itself stay in Phase 5, because nothing in
- * Phase 4 ever attempts a delivery — every row written here is PENDING and stays
- * PENDING.
+ * That table marks it phase 5, and Phase 4.4 pulled forward only what a supplier
+ * decision needs: the identity, the version, the payload and the state — because
+ * nothing in Phase 4 ever attempted a delivery, so every row written there was
+ * PENDING and stayed PENDING.
  *
- * It is written in the same transaction as the decision it records, so an order
- * can never be ACCEPTED with no pending response, nor carry a pending response
- * while still RECEIVED.
+ * Phase 6.5e completes the documented field set. The sender now exists, so
+ * "attempt count, last error, timestamps" stop being a future note and become
+ * `attempts`, `lastError` and `lastAttemptAt`. `lastCorrelationId` is the one
+ * addition beyond that line: it is the only way to find the Cloud Integration
+ * message processing log for an attempt after the fact, which is what Phase 6.5f
+ * reconciliation has to do when a row ends UNKNOWN. It is transport metadata and
+ * never business identity — the correlation ID changes on every attempt while
+ * `responseId` never does.
+ *
+ * Everything above `state` is immutable once written. The sender writes only the
+ * transport columns, and never the decision, the version or the payload: a
+ * transport outcome must not be able to edit the supplier's committed answer.
+ *
+ * The row is written in the same transaction as the decision it records, so an
+ * order can never be ACCEPTED with no pending response, nor carry a pending
+ * response while still RECEIVED.
  */
 @assert.unique.responseId  : [responseId]
 @assert.unique.orderVersion: [
@@ -225,10 +237,29 @@ entity SupplierResponseDeliveries : cuid {
 
     /**
      * Transport state, deliberately separate from the order's business status
-     * (ADR-010). Phase 4.4 only ever writes PENDING; DELIVERED, FAILED and
-     * UNKNOWN become reachable when a sender exists in Phase 5.
+     * (ADR-010). Phase 4.4 only ever wrote PENDING; Phase 6.5e's sender is what
+     * makes DELIVERED, FAILED and UNKNOWN reachable.
+     *
+     * PENDING is both "never attempted" and "attempted, retryable", exactly as
+     * the ABAP coordinator returns a retryable intent to PENDING rather than
+     * inventing a fifth value. `attempts` is what tells the two apart.
      */
     state                 : String(10) default 'PENDING';
+
+    /** Attempts made, including the one that succeeded. Never reset. */
+    attempts              : Integer default 0;
+
+    /** When the most recent attempt ran, whatever its outcome. */
+    lastAttemptAt         : Timestamp;
+
+    /**
+     * Transport diagnosis for the most recent attempt: a status code and a
+     * short safe reason, never a response body, a header or a credential.
+     */
+    lastError             : String(255);
+
+    /** Transport metadata for the most recent attempt. Not business identity. */
+    lastCorrelationId     : UUID;
 
     @cds.on.insert: $now
     createdAt             : Timestamp;

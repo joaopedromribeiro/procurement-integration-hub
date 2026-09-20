@@ -17,6 +17,7 @@ define root view entity ZJP_C_PurchaseOrder
       Status,
       SupplierResponse,
       EstimatedDeliveryDate,
+      SupplierRespondedAt,
       CreatedBy,
       CreatedAt,
       LastChangedBy,

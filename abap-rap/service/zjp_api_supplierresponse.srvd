@@ -1,0 +1,16 @@
+// Phase 6.5b-2. The integration service definition.
+//
+// It exposes the restricted integration projection and NOTHING else. The buyer
+// projections ZJP_C_PurchaseOrder and ZJP_C_PurchaseOrderItem stay on
+// ZJP_UI_PURCHASEORDER, where they belong; a single service carrying both
+// surfaces would mean one binding, one set of authorizations and one blast
+// radius for two consumers with opposite needs.
+//
+// Named for its purpose rather than for its entity: the service exists so the
+// supplier's answer can reach SAP. It is also deliberately not named
+// ZJP_API_PURCHASEORDER, which would collide with the projection view entity
+// above once ABAP upper-cases both.
+@EndUserText.label: 'Purchase Order Supplier Response API'
+define service ZJP_API_SUPPLIERRESPONSE {
+  expose ZJP_API_PurchaseOrder as PurchaseOrders;
+}

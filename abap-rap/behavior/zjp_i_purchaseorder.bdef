@@ -31,6 +31,25 @@ etag master LocalLastChangedAt
   // LastErrorMessage, LastErrorAt and LastCorrelationId are all `field
   // ( readonly )` below, so only a handler in local mode may write them.
   action ( authorization : update ) recordDeliveryResult parameter ZJP_A_RecordDeliveryResult;
+  // Phase 6.5b-1. The inbound boundary, and the mirror image of
+  // recordDeliveryResult: SupplierResponse, EstimatedDeliveryDate,
+  // SupplierRespondedAt, RejectionOrigin, RejectionReason, LastResponseId and
+  // LastResponseVersion are all `field ( readonly )`, so only a handler in
+  // LOCAL MODE can write them and an external caller needs a door with a lock
+  // rather than an opening in the wall.
+  //
+  // A NORMAL action, not `internal`, for the same reason recordDeliveryResult
+  // is: the caller is Cloud Integration through an OData binding, which is an
+  // external consumer. It is deliberately NOT projected onto
+  // ZJP_C_PurchaseOrder - the buyer UI must not answer on a supplier behalf,
+  // and the integration surface is its own projection in Phase 6.5b-2.
+  //
+  // ONE action, not two. A supplier date update is an ACCEPTED response with a
+  // higher ResponseVersion, which the version rules already order correctly; a
+  // second action would need the same guards, the same idempotency receipt and
+  // the same conflict rules, and would add a way for the two to disagree.
+  action ( authorization : update ) applySupplierResponse parameter ZJP_A_ApplySupplierResponse;
+
   action ( authorization : update ) reject parameter ZJP_A_Reject;
   action ( authorization : update ) cancel;
 
@@ -55,6 +74,7 @@ etag master LocalLastChangedAt
                      LocalLastChangedAt, OrderRevision, IntegrationStatus,
                      DeliveryId, LastErrorCode, LastErrorMessage, LastErrorAt,
                      LastCorrelationId, LastResponseId, LastResponseVersion,
+                     SupplierRespondedAt,
                      RejectionOrigin, RejectionReason;
 
   mapping for zjp_po_h
@@ -85,6 +105,7 @@ etag master LocalLastChangedAt
     LastCorrelationId       = last_correlation_id;
     LastResponseId          = last_response_id;
     LastResponseVersion     = last_response_version;
+    SupplierRespondedAt     = supplier_responded_at;
     RejectionOrigin         = rejection_origin;
     RejectionReason         = rejection_reason;
   }

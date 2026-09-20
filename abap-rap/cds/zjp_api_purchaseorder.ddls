@@ -1,0 +1,39 @@
+@AccessControl.authorizationCheck: #NOT_REQUIRED
+@EndUserText.label: 'Procurement Hub: Purchase Order Integration API'
+define root view entity ZJP_API_PurchaseOrder
+  provider contract transactional_query
+  as projection on ZJP_I_PurchaseOrder
+{
+      // Phase 6.5b-2. The integration surface, and deliberately NOT the buyer
+      // projection. ZJP_C_PurchaseOrder is draft-enabled and re-exposes create,
+      // update, delete and the whole buyer action set; handing that to Cloud
+      // Integration would give an integration client a way to edit commercial
+      // facts and to mutate a buyer's draft. This projection exposes ONE action
+      // and no writable field at all - its behavior definition declares no
+      // `use create`, `use update` or `use delete`, so every element below is
+      // readable and nothing here is a write path.
+
+      // The instance identity, and the only element the caller strictly needs.
+      // It is the wire contract's sourceOrderId, which is how an OData client
+      // addresses the bound action on the right order. The parameter entity
+      // deliberately does not repeat it.
+  key PurchaseOrderUUID,
+
+      // Read-only outcome evidence. Not required to invoke the action, but it
+      // is what lets Phase 6.5c prove over HTTP that a response actually landed
+      // - a GET on the order shows the result without an ADT session. Every one
+      // of these is written only by the action's own handler in LOCAL MODE.
+      Status,
+      SupplierResponse,
+      EstimatedDeliveryDate,
+      SupplierRespondedAt,
+      LastResponseId,
+      LastResponseVersion,
+
+      // Required by the underlying behavior definition rather than chosen:
+      // ZJP_I_PurchaseOrder declares `lock master total etag LastChangedAt` and
+      // `etag master LocalLastChangedAt`, so a projection that omitted them
+      // would not satisfy its own provider contract.
+      LastChangedAt,
+      LocalLastChangedAt
+}

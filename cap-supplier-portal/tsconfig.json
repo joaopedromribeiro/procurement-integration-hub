@@ -13,6 +13,6 @@
     "allowJs": true,
     "noEmit": true
   },
-  "include": ["srv", "test"],
+  "include": ["srv", "test", "scripts"],
   "exclude": ["node_modules", "gen", "@cds-models"]
 }

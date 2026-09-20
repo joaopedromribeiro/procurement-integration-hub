@@ -1,0 +1,61 @@
+@EndUserText.label: 'Supplier Response Parameter'
+define abstract entity ZJP_A_ApplySupplierResponse
+{
+      // The idempotency identity, and the reason this action can be called
+      // twice safely. Persisted as LastResponseId when a new response is
+      // applied, and compared against it on the next call.
+  ResponseUUID          : sysuuid_x16;
+
+      // Revision guard. A response is answered against the revision that was
+      // dispatched; a response for a different revision belongs to a different
+      // delivery and is refused rather than applied to whatever is current.
+  OrderRevision         : abap.int4;
+
+      // Identity guard against the header's DeliveryId. Also the key used to
+      // locate the delivery intent that carries PortalOrderUUID.
+  DeliveryUUID          : sysuuid_x16;
+
+      // Identity guard against the PERSISTED INTENT, not the header. This is
+      // the one guard that reads a second entity: portal_order_uuid lives on
+      // ZJP_PO_DLV, written by recordDeliveryResult when the receipt came back,
+      // and the header has never carried it.
+  PortalOrderUUID       : sysuuid_x16;
+
+      // Identity guard. A response from a supplier other than the one the order
+      // was sent to is refused.
+  Supplier              : abap.char(10);
+
+      // The ordering key, and deliberately not RespondedAt: a timestamp minted
+      // by another system is not an ordering guarantee. A response whose version
+      // is not newer than the one already applied never overwrites it.
+  ResponseVersion       : abap.int4;
+
+      // The commercial decision, validated against the closed vocabulary
+      // ACCEPTED / REJECTED. Exactly the width of the persisted field.
+      //
+      // The business Status is NOT a parameter. ACCEPTED leaves Status at SENT
+      // and only records the supplier's answer; REJECTED is terminal and the
+      // handler derives the status itself, so no caller can set one directly.
+  SupplierResponse      : abap.char(8);
+
+      // Optional on the wire, so the initial DATS value 00000000 is the ABAP
+      // representation of "not supplied" and is never serialized outward as a
+      // calendar date. Mandatory only for a later ACCEPTED that updates the
+      // date, which is CAP's updateEstimatedDeliveryDate path.
+  EstimatedDeliveryDate : abap.dats;
+
+      // Mandatory for REJECTED, empty otherwise. Persisted as RejectionReason
+      // beside RejectionOrigin = 'SUPPLIER', which is what tells a supplier
+      // rejection apart from the buyer's own reject action.
+  Reason                : abap.char(255);
+
+      // When the SUPPLIER decided, which is not when SAP applied it: the two
+      // differ by however long the response waited in the portal's outbox.
+      //
+      // DELIBERATELY EXCLUDED FROM THE IDEMPOTENCY COMPARISON. It is business
+      // event metadata, not commercial content, so a replay that differs only
+      // here is the SAME effective response and must not be treated as a
+      // conflict. Only SupplierResponse, EstimatedDeliveryDate and Reason
+      // decide whether two responses under one identity agree.
+  RespondedAt           : abp_lastchange_tstmpl;
+}

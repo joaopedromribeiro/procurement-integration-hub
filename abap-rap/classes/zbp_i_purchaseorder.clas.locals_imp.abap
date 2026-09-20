@@ -21,6 +21,10 @@ CLASS lhc_PurchaseOrder DEFINITION
     METHODS recordDeliveryResult FOR MODIFY
       IMPORTING keys FOR ACTION PurchaseOrder~recordDeliveryResult.
 
+    " Phase 6.5b-1. The inbound supplier response.
+    METHODS applySupplierResponse FOR MODIFY
+      IMPORTING keys FOR ACTION PurchaseOrder~applySupplierResponse.
+
     METHODS reject FOR MODIFY
       IMPORTING keys FOR ACTION PurchaseOrder~reject.
 
@@ -1343,4 +1347,296 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
       APPEND authorization_result TO result.
     ENDLOOP.
   ENDMETHOD.
+
+
+  METHOD applySupplierResponse.
+    " Phase 6.5b-1 - the RAP inbound boundary for the supplier's answer.
+    "
+    " THE MIRROR IMAGE OF recordDeliveryResult, and for the same reason. Status,
+    " SupplierResponse, EstimatedDeliveryDate, SupplierRespondedAt,
+    " RejectionOrigin, RejectionReason, LastResponseId and LastResponseVersion
+    " are every one of them declared `field ( readonly )`, so an external EML or
+    " OData consumer cannot write them. Only a handler in LOCAL MODE may, which
+    " is why this action exists at all.
+    "
+    " NO REMOTE CALL, NO COMMIT, NO ROLLBACK. It reads locally, mutates locally
+    " and reports through RAP. Transaction ownership stays with the caller,
+    " exactly as ADR-006 requires - the same rule that keeps the outbound HTTP
+    " call outside every handler.
+    "
+    " THE DECISION IS A PARAMETER; THE BUSINESS STATUS IS NOT. An ACCEPTED
+    " response does not appear in the Status field list below at all, so
+    " acceptance provably cannot move the order: SENT stays SENT and only the
+    " supplier's answer is recorded. A REJECTED response is terminal and the
+    " handler derives REJECTED itself. No caller can set a status directly.
+    DATA reported_orders LIKE reported-purchaseorder.
+    DATA reported_items LIKE reported-purchaseorderitem.
+
+    LOOP AT keys INTO DATA(action_key).
+      DATA(error_text) = CONV string( '' ).
+
+      DO 1 TIMES.
+        " Active instance only, the shape every action in this pool uses.
+        IF action_key-%is_draft = if_abap_behv=>mk-on.
+          error_text = 'Not allowed on a draft instance.'.
+          EXIT.
+        ENDIF.
+
+        " The closed commercial vocabulary, checked before anything is read.
+        " ACCEPTED and REJECTED are the only decisions CAP can make, and the
+        " field is char(8) precisely because those two words fit it exactly.
+        DATA(decision) = CONV string( action_key-%param-SupplierResponse ).
+        IF decision <> 'ACCEPTED' AND decision <> 'REJECTED'.
+          error_text = 'Unsupported supplier response decision.'.
+          EXIT.
+        ENDIF.
+
+        " A rejection without a reason is not a rejection anyone can act on.
+        IF decision = 'REJECTED' AND action_key-%param-Reason IS INITIAL.
+          error_text = 'A supplier rejection requires a reason.'.
+          EXIT.
+        ENDIF.
+
+        READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+          ENTITY PurchaseOrder
+            FIELDS ( PurchaseOrderUUID Status Supplier OrderRevision DeliveryId
+                     SupplierResponse EstimatedDeliveryDate RejectionReason
+                     LastResponseId LastResponseVersion )
+            WITH VALUE #( ( %tky = action_key-%tky ) )
+            RESULT DATA(orders)
+          FAILED DATA(read_failed)
+          REPORTED DATA(read_reported).
+        reported_orders = CORRESPONDING #( DEEP read_reported-purchaseorder ).
+        APPEND LINES OF reported_orders TO reported-purchaseorder.
+
+        IF read_failed IS NOT INITIAL OR lines( orders ) <> 1.
+          error_text = 'Order could not be read; no response applied.'.
+          EXIT.
+        ENDIF.
+
+        " ---------- identity guards ----------
+        " These are guards, not lookups. The instance was already located by its
+        " key; each of these says "and it had better be the one this response
+        " was written about". Without them a misrouted response could answer on
+        " the strength of someone else's delivery.
+        IF orders[ 1 ]-Supplier <> action_key-%param-Supplier.
+          error_text = 'Response belongs to a different supplier.'.
+          EXIT.
+        ENDIF.
+
+        IF orders[ 1 ]-DeliveryId <> action_key-%param-DeliveryUUID.
+          error_text = 'Response belongs to a different delivery.'.
+          EXIT.
+        ENDIF.
+
+        IF orders[ 1 ]-OrderRevision <> action_key-%param-OrderRevision.
+          error_text = 'Response belongs to a different revision.'.
+          EXIT.
+        ENDIF.
+
+        " The one guard that reads a second entity. PortalOrderUUID is NOT on
+        " the header: it lives on ZJP_PO_DLV, written by recordDeliveryResult
+        " when the receipt came back. A read-only SELECT is used for the same
+        " reason the Phase 5.2f handler and the coordinator use one on this
+        " table - RAP offers no query for "the intent behind this delivery" -
+        " and nothing here writes to it. The inbound action does not own the
+        " intent and does not touch it.
+        DATA(order_uuid) = orders[ 1 ]-PurchaseOrderUUID.
+
+        SELECT SINGLE portal_order_uuid
+          FROM zjp_po_dlv
+          WHERE purchase_order_uuid = @order_uuid
+            AND delivery_uuid       = @action_key-%param-DeliveryUUID
+          INTO @DATA(persisted_portal_order).
+
+        IF sy-subrc <> 0.
+          error_text = 'No delivery intent exists for this response.'.
+          EXIT.
+        ENDIF.
+
+        IF persisted_portal_order <> action_key-%param-PortalOrderUUID.
+          error_text = 'Response belongs to a different portal order.'.
+          EXIT.
+        ENDIF.
+
+        " ---------- idempotency ----------
+        " LastResponseId and LastResponseVersion are the receipt. Only the
+        " LATEST response is retained, which is a deliberate Phase 6.5 limit:
+        " an exact replay of the CURRENT response is recognised, while a replay
+        " of a SUPERSEDED one falls through to the staleness rule below and is
+        " refused rather than reported as already applied. That is conservative
+        " in the safe direction - it never overwrites newer supplier state - and
+        " response history is explicitly not persisted in this phase.
+        DATA(last_response) = orders[ 1 ]-LastResponseId.
+        DATA(last_version)  = orders[ 1 ]-LastResponseVersion.
+
+        IF last_response IS NOT INITIAL
+           AND last_response = action_key-%param-ResponseUUID.
+
+          " Same identity. Is it the same EFFECTIVE response?
+          "
+          " RespondedAt is deliberately NOT compared. It is business-event
+          " metadata, not commercial content, so a replay that differs only in
+          " when the supplier says it decided is the same answer and must not
+          " be turned into a conflict. Only the three commercial facts decide.
+          DATA(same_effective) = abap_true.
+
+          IF CONV string( orders[ 1 ]-SupplierResponse ) <> decision.
+            same_effective = abap_false.
+          ELSEIF decision = 'ACCEPTED'
+                 AND orders[ 1 ]-EstimatedDeliveryDate <> action_key-%param-EstimatedDeliveryDate.
+            same_effective = abap_false.
+          ELSEIF decision = 'REJECTED'
+                 AND orders[ 1 ]-RejectionReason <> action_key-%param-Reason.
+            same_effective = abap_false.
+          ENDIF.
+
+          IF same_effective = abap_false.
+            error_text = 'A different response was already applied under this response identity.'.
+            EXIT.
+          ENDIF.
+
+          " ALREADY_APPLIED. Success with NO mutation, which is the whole point:
+          " a duplicate delivery of the same answer must be harmless. Reported
+          " as information so a caller can tell it apart from a fresh apply;
+          " how OData surfaces that outcome is Phase 6.5c's question.
+          APPEND VALUE #( %tky = action_key-%tky
+                          %msg = new_message_with_text(
+                            severity = if_abap_behv_message=>severity-information
+                            text = 'Supplier response already applied; nothing changed.' ) )
+            TO reported-purchaseorder.
+          EXIT.
+        ENDIF.
+
+        " A different response. It must be strictly newer than the one already
+        " applied; equal or older never overwrites newer supplier state.
+        " ResponseVersion is the ordering key and RespondedAt is not, because a
+        " timestamp minted by another system is not an ordering guarantee.
+        IF last_response IS NOT INITIAL
+           AND action_key-%param-ResponseVersion <= last_version.
+          error_text = 'A newer or equal supplier response has already been applied.'.
+          EXIT.
+        ENDIF.
+
+        " ---------- state guards and the two transitions ----------
+        DATA(current_status)   = CONV string( orders[ 1 ]-Status ).
+        DATA(current_response) = CONV string( orders[ 1 ]-SupplierResponse ).
+
+        " SENT only, for both decisions, for Phase 6.5. An order in ERROR with
+        " IntegrationStatus UNKNOWN is an AMBIGUOUS outbound case: the portal
+        " may hold a delivery SAP could not positively confirm. Letting a
+        " supplier response silently resolve that ambiguity would decide a
+        " reconciliation question by accident, so it is refused here and the
+        " reconciliation of ambiguous outbound states is left as open behaviour.
+        IF current_status <> 'SENT'.
+          IF decision = 'ACCEPTED'.
+            error_text = 'A supplier acceptance is only valid on a sent order.'.
+          ELSE.
+            error_text = 'A supplier rejection is only valid on a sent order.'.
+          ENDIF.
+          EXIT.
+        ENDIF.
+
+        IF decision = 'ACCEPTED'.
+
+          " A later ACCEPTED on an already ACCEPTED order is CAP's
+          " updateEstimatedDeliveryDate path. It exists to carry a date, so a
+          " date is mandatory - without one it would be a second commercial
+          " acceptance that changes nothing, which is not a thing this contract
+          " has. The first ACCEPTED may legitimately arrive without a date.
+          IF current_response = 'ACCEPTED'
+             AND action_key-%param-EstimatedDeliveryDate IS INITIAL.
+            error_text = 'A supplier date update requires an estimated delivery date.'.
+            EXIT.
+          ENDIF.
+
+          " Status is ABSENT from this field list on purpose. It is the
+          " strongest available statement that acceptance does not move the
+          " order: the handler cannot change Status here even by mistake, and
+          " SENT remains SENT. No CONFIRMED status exists or is needed.
+          MODIFY ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+            ENTITY PurchaseOrder
+              UPDATE FIELDS ( SupplierResponse EstimatedDeliveryDate
+                              SupplierRespondedAt
+                              LastResponseId LastResponseVersion )
+              WITH VALUE #( ( %tky                  = action_key-%tky
+                              SupplierResponse      = 'ACCEPTED'
+                              EstimatedDeliveryDate = action_key-%param-EstimatedDeliveryDate
+                              SupplierRespondedAt   = action_key-%param-RespondedAt
+                              LastResponseId        = action_key-%param-ResponseUUID
+                              LastResponseVersion   = action_key-%param-ResponseVersion ) )
+            FAILED DATA(accepted_failed)
+            REPORTED DATA(accepted_reported).
+          reported_orders = CORRESPONDING #( DEEP accepted_reported-purchaseorder ).
+          APPEND LINES OF reported_orders TO reported-purchaseorder.
+
+          IF accepted_failed IS NOT INITIAL.
+            error_text = 'Supplier acceptance could not be recorded.'.
+            EXIT.
+          ENDIF.
+
+        ELSE.
+
+          " CAP CANNOT SEND THIS, so SAP must not accept it. The portal's own
+          " state machine requires status RECEIVED for both accept and reject
+          " (supplier-service.ts: "Only a received order can be accepted or
+          " rejected"), so once an order is ACCEPTED there the supplier has no
+          " path to reject it and no such response can legitimately exist.
+          "
+          " SAP cannot lean on its own Status here, because an acceptance
+          " deliberately leaves the order at SENT - the very design decision
+          " that makes SupplierResponse the only field carrying the supplier's
+          " answer. So the guard has to read the ANSWER, not the status. Without
+          " it a forged or misordered REJECTED at a higher version would quietly
+          " terminate an order the supplier had already accepted.
+          IF current_response = 'ACCEPTED'.
+            error_text = 'This order was already accepted; an accepted order cannot then be rejected.'.
+            EXIT.
+          ENDIF.
+
+          " Rejection IS terminal, which is why it moves Status where an
+          " acceptance does not. RejectionOrigin is what tells this apart from
+          " the buyer's own reject action, which writes APPROVER and is not
+          " touched, reused or reinterpreted by this phase.
+          MODIFY ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+            ENTITY PurchaseOrder
+              UPDATE FIELDS ( Status SupplierResponse
+                              RejectionOrigin RejectionReason
+                              SupplierRespondedAt
+                              LastResponseId LastResponseVersion )
+              WITH VALUE #( ( %tky                = action_key-%tky
+                              Status              = 'REJECTED'
+                              SupplierResponse    = 'REJECTED'
+                              RejectionOrigin     = 'SUPPLIER'
+                              RejectionReason     = action_key-%param-Reason
+                              SupplierRespondedAt = action_key-%param-RespondedAt
+                              LastResponseId      = action_key-%param-ResponseUUID
+                              LastResponseVersion = action_key-%param-ResponseVersion ) )
+            FAILED DATA(rejected_failed)
+            REPORTED DATA(rejected_reported).
+          reported_orders = CORRESPONDING #( DEEP rejected_reported-purchaseorder ).
+          APPEND LINES OF reported_orders TO reported-purchaseorder.
+
+          IF rejected_failed IS NOT INITIAL.
+            error_text = 'Supplier rejection could not be recorded.'.
+            EXIT.
+          ENDIF.
+
+        ENDIF.
+
+      ENDDO.
+
+      IF error_text IS NOT INITIAL.
+        APPEND VALUE #( %tky = action_key-%tky
+                        %op-%action-applySupplierResponse = if_abap_behv=>mk-on )
+          TO failed-purchaseorder.
+        APPEND VALUE #( %tky = action_key-%tky
+                        %msg = new_message_with_text(
+                          severity = if_abap_behv_message=>severity-error
+                          text = error_text ) )
+          TO reported-purchaseorder.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
 ENDCLASS.

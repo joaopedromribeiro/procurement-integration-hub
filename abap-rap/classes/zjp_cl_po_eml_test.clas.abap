@@ -110,6 +110,9 @@ CLASS zjp_cl_po_eml_test DEFINITION
 
     " Phase 5.2g. The new RAP action on this business object; the coordinator
     " that calls it is ZJP_CL_PO_DISPATCH_TEST's subject, not this class's.
+    METHODS test_apply_supplier_response
+      RETURNING VALUE(success) TYPE abap_bool.
+
     METHODS test_record_delivery_result
       RETURNING VALUE(success) TYPE abap_bool.
 
@@ -773,6 +776,11 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
       RETURN.
     ENDIF.
     out->write( 'PASS: Phase 5.2g recordDeliveryResult outcome boundary verified.' ).
+
+    IF test_apply_supplier_response( ) = abap_false.
+      RETURN.
+    ENDIF.
+    out->write( 'PASS: Phase 6.5b-1 applySupplierResponse inbound boundary verified.' ).
 
     print_lifecycle_summary( ).
   ENDMETHOD.
@@ -4488,6 +4496,634 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
     console->write( 'PASS: H - an UNKNOWN intent retried to PENDING with identity, snapshot, hash and lease intact.' ).
 
     success = abap_true.
+  ENDMETHOD.
+
+
+
+  METHOD test_apply_supplier_response.
+    " Phase 6.5b-1. The inbound supplier response, tested HERE as a RAP action -
+    " its guards, its idempotency and its two transitions - because the
+    " repository rule is that this class is extended whenever RAP behavior
+    " changes. No HTTP, no Integration Suite and no CAP is involved: the action
+    " is driven through EML exactly as the inbound OData call will reach it,
+    " and proving it this way BEFORE any endpoint exists is what keeps a later
+    " failure from being ambiguous between the business rule and the transport.
+    success = abap_false.
+
+    console->write( '=== PHASE 6.5b-1 APPLY SUPPLIER RESPONSE ===' ).
+
+    " ---------- fixture: an order that has actually been delivered ----------
+    " The action only accepts a SENT order, so the fixture must go all the way
+    " through approve, sendToSupplier and a DELIVERED result. Anything less
+    " would test the guards against a state the supplier could never answer.
+    DATA(order_uuid) = create_decision_fixture( 'SUP060' ).
+    IF order_uuid IS INITIAL.
+      console->write( 'STOP: applySupplierResponse fixture could not be created.' ).
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = order_uuid ) )
+        RESULT DATA(fixture_orders)
+      FAILED DATA(failed_fixture_read).
+    IF failed_fixture_read IS NOT INITIAL OR lines( fixture_orders ) <> 1.
+      console->write( 'STOP: applySupplierResponse fixture could not be read.' ).
+      RETURN.
+    ENDIF.
+    DATA(order_key) = fixture_orders[ 1 ]-%tky.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE approve FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_approve_asr).
+    IF failed_approve_asr IS NOT INITIAL OR save_changes( ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: applySupplierResponse fixture could not be approved.' ).
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE sendToSupplier FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_send_asr).
+    IF failed_send_asr IS NOT INITIAL OR save_changes( ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: sendToSupplier failed on the applySupplierResponse fixture.' ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE delivery_id, order_revision, supplier FROM zjp_po_h
+      WHERE purchase_order_uuid = @order_uuid INTO @DATA(base).
+
+    " Drive the order to SENT through the production boundary, not by hand.
+    DATA(correlation) = cl_system_uuid=>create_uuid_x16_static( ).
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE recordDeliveryResult
+        FROM VALUE #( ( %tky                     = order_key
+                        %param-DeliveryUUID      = base-delivery_id
+                        %param-OrderRevision     = base-order_revision
+                        %param-IntegrationStatus = 'DELIVERED'
+                        %param-CorrelationId     = correlation ) )
+      FAILED DATA(failed_delivered_asr).
+    IF failed_delivered_asr IS NOT INITIAL OR save_changes( ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: the fixture could not be driven to SENT.' ).
+      RETURN.
+    ENDIF.
+
+    " The PortalOrderUUID guard reads the intent, so the fixture needs one. The
+    " coordinator writes it from a real receipt; here there is no receipt, so
+    " the guard is exercised against whatever the intent actually holds.
+    SELECT SINGLE portal_order_uuid, dispatch_state FROM zjp_po_dlv
+      WHERE purchase_order_uuid = @order_uuid
+        AND delivery_uuid       = @base-delivery_id
+      INTO @DATA(intent).
+
+    SELECT SINGLE status FROM zjp_po_h
+      WHERE purchase_order_uuid = @order_uuid INTO @DATA(sent_status).
+    IF sent_status <> 'SENT'.
+      console->write( name = 'Status' data = sent_status ).
+      console->write( 'STOP: the fixture is not SENT; the supplier could not answer it.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: setup - fixture is SENT with a delivery intent.' ).
+
+    DATA(response_one) = cl_system_uuid=>create_uuid_x16_static( ).
+    DATA(response_two) = cl_system_uuid=>create_uuid_x16_static( ).
+    GET TIME STAMP FIELD DATA(responded_at).
+
+    " ---------- 1: a foreign supplier is refused ----------
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                    = order_key
+                        %param-ResponseUUID     = response_one
+                        %param-OrderRevision    = base-order_revision
+                        %param-DeliveryUUID     = base-delivery_id
+                        %param-PortalOrderUUID  = intent-portal_order_uuid
+                        %param-Supplier         = 'SUP999'
+                        %param-ResponseVersion  = 1
+                        %param-SupplierResponse = 'ACCEPTED'
+                        %param-RespondedAt      = responded_at ) )
+      FAILED DATA(failed_supplier).
+    IF failed_supplier IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a response from a foreign supplier was accepted.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+    console->write( 'PASS: 1 - a foreign supplier is refused.' ).
+
+    " ---------- 2: a foreign delivery identity is refused ----------
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                    = order_key
+                        %param-ResponseUUID     = response_one
+                        %param-OrderRevision    = base-order_revision
+                        %param-DeliveryUUID     = VALUE sysuuid_x16( )
+                        %param-PortalOrderUUID  = intent-portal_order_uuid
+                        %param-Supplier         = base-supplier
+                        %param-ResponseVersion  = 1
+                        %param-SupplierResponse = 'ACCEPTED'
+                        %param-RespondedAt      = responded_at ) )
+      FAILED DATA(failed_delivery).
+    IF failed_delivery IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a response for a different delivery was accepted.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+    console->write( 'PASS: 2 - a foreign delivery identity is refused.' ).
+
+    " ---------- 3: a foreign portal order is refused ----------
+    " This is the guard that reads ZJP_PO_DLV rather than the header.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                    = order_key
+                        %param-ResponseUUID     = response_one
+                        %param-OrderRevision    = base-order_revision
+                        %param-DeliveryUUID     = base-delivery_id
+                        %param-PortalOrderUUID  = cl_system_uuid=>create_uuid_x16_static( )
+                        %param-Supplier         = base-supplier
+                        %param-ResponseVersion  = 1
+                        %param-SupplierResponse = 'ACCEPTED'
+                        %param-RespondedAt      = responded_at ) )
+      FAILED DATA(failed_portal).
+    IF failed_portal IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a response for a different portal order was accepted.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+    console->write( 'PASS: 3 - a foreign portal order is refused.' ).
+
+    " ---------- 4: a foreign revision is refused ----------
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                    = order_key
+                        %param-ResponseUUID     = response_one
+                        %param-OrderRevision    = base-order_revision + 99
+                        %param-DeliveryUUID     = base-delivery_id
+                        %param-PortalOrderUUID  = intent-portal_order_uuid
+                        %param-Supplier         = base-supplier
+                        %param-ResponseVersion  = 1
+                        %param-SupplierResponse = 'ACCEPTED'
+                        %param-RespondedAt      = responded_at ) )
+      FAILED DATA(failed_revision).
+    IF failed_revision IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a response for a different revision was accepted.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+    console->write( 'PASS: 4 - a foreign revision is refused.' ).
+
+    " ---------- 5: an unsupported decision is refused ----------
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                    = order_key
+                        %param-ResponseUUID     = response_one
+                        %param-OrderRevision    = base-order_revision
+                        %param-DeliveryUUID     = base-delivery_id
+                        %param-PortalOrderUUID  = intent-portal_order_uuid
+                        %param-Supplier         = base-supplier
+                        %param-ResponseVersion  = 1
+                        %param-SupplierResponse = 'MAYBE'
+                        %param-RespondedAt      = responded_at ) )
+      FAILED DATA(failed_decision).
+    IF failed_decision IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: an unsupported decision was accepted.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+    console->write( 'PASS: 5 - an unsupported decision is refused.' ).
+
+    " ---------- 6: a rejection without a reason is refused ----------
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                    = order_key
+                        %param-ResponseUUID     = response_one
+                        %param-OrderRevision    = base-order_revision
+                        %param-DeliveryUUID     = base-delivery_id
+                        %param-PortalOrderUUID  = intent-portal_order_uuid
+                        %param-Supplier         = base-supplier
+                        %param-ResponseVersion  = 1
+                        %param-SupplierResponse = 'REJECTED'
+                        %param-RespondedAt      = responded_at ) )
+      FAILED DATA(failed_noreason).
+    IF failed_noreason IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a rejection without a reason was accepted.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+    console->write( 'PASS: 6 - a rejection without a reason is refused.' ).
+
+    " ---------- 7: ACCEPTED without a date - SENT stays SENT ----------
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                    = order_key
+                        %param-ResponseUUID     = response_one
+                        %param-OrderRevision    = base-order_revision
+                        %param-DeliveryUUID     = base-delivery_id
+                        %param-PortalOrderUUID  = intent-portal_order_uuid
+                        %param-Supplier         = base-supplier
+                        %param-ResponseVersion  = 1
+                        %param-SupplierResponse = 'ACCEPTED'
+                        %param-RespondedAt      = responded_at ) )
+      FAILED DATA(failed_accept).
+    IF failed_accept IS NOT INITIAL OR save_changes( ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a valid supplier acceptance was refused.' ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE status, supplier_response, estimated_delivery_date,
+                  supplier_responded_at, last_response_id, last_response_version
+      FROM zjp_po_h WHERE purchase_order_uuid = @order_uuid INTO @DATA(after_accept).
+    console->write( name = 'After ACCEPTED' data = after_accept ).
+
+    IF after_accept-status <> 'SENT'.
+      console->write( 'STOP: acceptance moved the business status; it must stay SENT.' ).
+      RETURN.
+    ENDIF.
+    IF after_accept-supplier_response <> 'ACCEPTED'
+       OR after_accept-last_response_id <> response_one
+       OR after_accept-last_response_version <> 1
+       OR after_accept-supplier_responded_at IS INITIAL.
+      console->write( 'STOP: the acceptance was not recorded correctly.' ).
+      RETURN.
+    ENDIF.
+    IF after_accept-estimated_delivery_date IS NOT INITIAL.
+      console->write( 'STOP: a date was invented for an acceptance that carried none.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: 7 - ACCEPTED recorded, Status still SENT, no date invented.' ).
+
+    " ---------- 8: identical replay is ALREADY_APPLIED, with no mutation -----
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                    = order_key
+                        %param-ResponseUUID     = response_one
+                        %param-OrderRevision    = base-order_revision
+                        %param-DeliveryUUID     = base-delivery_id
+                        %param-PortalOrderUUID  = intent-portal_order_uuid
+                        %param-Supplier         = base-supplier
+                        %param-ResponseVersion  = 1
+                        %param-SupplierResponse = 'ACCEPTED'
+                        %param-RespondedAt      = responded_at ) )
+      FAILED DATA(failed_replay).
+    IF failed_replay IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: an identical replay was refused; it must be harmless.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      ROLLBACK ENTITIES.
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE status, supplier_response, last_response_id, last_response_version
+      FROM zjp_po_h WHERE purchase_order_uuid = @order_uuid INTO @DATA(after_replay).
+    IF after_replay-last_response_version <> 1
+       OR after_replay-last_response_id <> response_one
+       OR after_replay-status <> 'SENT'.
+      console->write( 'STOP: the replay changed persisted state.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: 8 - identical replay is ALREADY_APPLIED and changes nothing.' ).
+
+    " ---------- 9: the same responseId with different content conflicts ------
+    " The assertion that gives idempotency its meaning: same identity, changed
+    " commercial content, refused rather than silently applied.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                          = order_key
+                        %param-ResponseUUID           = response_one
+                        %param-OrderRevision          = base-order_revision
+                        %param-DeliveryUUID           = base-delivery_id
+                        %param-PortalOrderUUID        = intent-portal_order_uuid
+                        %param-Supplier               = base-supplier
+                        %param-ResponseVersion        = 1
+                        %param-SupplierResponse       = 'ACCEPTED'
+                        %param-EstimatedDeliveryDate  = '20261231'
+                        %param-RespondedAt            = responded_at ) )
+      FAILED DATA(failed_conflict).
+    IF failed_conflict IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a conflicting response reused an applied identity.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+    console->write( 'PASS: 9 - same responseId with different content is refused.' ).
+
+    " ---------- 10: a stale version is refused ----------
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                         = order_key
+                        %param-ResponseUUID          = response_two
+                        %param-OrderRevision         = base-order_revision
+                        %param-DeliveryUUID          = base-delivery_id
+                        %param-PortalOrderUUID       = intent-portal_order_uuid
+                        %param-Supplier              = base-supplier
+                        %param-ResponseVersion       = 1
+                        %param-SupplierResponse      = 'ACCEPTED'
+                        %param-EstimatedDeliveryDate = '20261201'
+                        %param-RespondedAt           = responded_at ) )
+      FAILED DATA(failed_stale).
+    IF failed_stale IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a stale response version overwrote newer state.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+    console->write( 'PASS: 10 - an equal or older response version is refused.' ).
+
+    " ---------- 11: a date update without a date is refused ----------
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                    = order_key
+                        %param-ResponseUUID     = response_two
+                        %param-OrderRevision    = base-order_revision
+                        %param-DeliveryUUID     = base-delivery_id
+                        %param-PortalOrderUUID  = intent-portal_order_uuid
+                        %param-Supplier         = base-supplier
+                        %param-ResponseVersion  = 2
+                        %param-SupplierResponse = 'ACCEPTED'
+                        %param-RespondedAt      = responded_at ) )
+      FAILED DATA(failed_nodate).
+    IF failed_nodate IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a date update without a date was accepted.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+    console->write( 'PASS: 11 - a later acceptance without a date is refused.' ).
+
+    " ---------- 12: the date update applies ----------
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                         = order_key
+                        %param-ResponseUUID          = response_two
+                        %param-OrderRevision         = base-order_revision
+                        %param-DeliveryUUID          = base-delivery_id
+                        %param-PortalOrderUUID       = intent-portal_order_uuid
+                        %param-Supplier              = base-supplier
+                        %param-ResponseVersion       = 2
+                        %param-SupplierResponse      = 'ACCEPTED'
+                        %param-EstimatedDeliveryDate = '20261115'
+                        %param-RespondedAt           = responded_at ) )
+      FAILED DATA(failed_update).
+    IF failed_update IS NOT INITIAL OR save_changes( ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a valid date update was refused.' ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE status, supplier_response, estimated_delivery_date,
+                  last_response_id, last_response_version
+      FROM zjp_po_h WHERE purchase_order_uuid = @order_uuid INTO @DATA(after_update).
+    console->write( name = 'After date update' data = after_update ).
+
+    IF after_update-status <> 'SENT'
+       OR after_update-supplier_response <> 'ACCEPTED'
+       OR after_update-estimated_delivery_date <> '20261115'
+       OR after_update-last_response_id <> response_two
+       OR after_update-last_response_version <> 2.
+      console->write( 'STOP: the date update did not apply as specified.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: 12 - date updated, Status still SENT, response still ACCEPTED.' ).
+
+    " ---------- 13: REJECTED on a second fixture ----------
+    " A separate order, because rejection is terminal and would end the first
+    " fixture's usefulness for anything after it.
+    DATA(reject_uuid) = create_decision_fixture( 'SUP061' ).
+    IF reject_uuid IS INITIAL.
+      console->write( 'STOP: rejection fixture could not be created.' ).
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = reject_uuid ) )
+        RESULT DATA(reject_orders)
+      FAILED DATA(failed_reject_read).
+    IF failed_reject_read IS NOT INITIAL OR lines( reject_orders ) <> 1.
+      console->write( 'STOP: rejection fixture could not be read.' ).
+      RETURN.
+    ENDIF.
+    DATA(reject_key) = reject_orders[ 1 ]-%tky.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE approve FROM VALUE #( ( %tky = reject_key ) )
+      FAILED DATA(failed_reject_approve).
+    IF failed_reject_approve IS NOT INITIAL OR save_changes( ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: rejection fixture could not be approved.' ).
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE sendToSupplier FROM VALUE #( ( %tky = reject_key ) )
+      FAILED DATA(failed_reject_send).
+    IF failed_reject_send IS NOT INITIAL OR save_changes( ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: rejection fixture could not be sent.' ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE delivery_id, order_revision, supplier FROM zjp_po_h
+      WHERE purchase_order_uuid = @reject_uuid INTO @DATA(reject_base).
+
+    DATA(reject_correlation) = cl_system_uuid=>create_uuid_x16_static( ).
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE recordDeliveryResult
+        FROM VALUE #( ( %tky                     = reject_key
+                        %param-DeliveryUUID      = reject_base-delivery_id
+                        %param-OrderRevision     = reject_base-order_revision
+                        %param-IntegrationStatus = 'DELIVERED'
+                        %param-CorrelationId     = reject_correlation ) )
+      FAILED DATA(failed_reject_delivered).
+    IF failed_reject_delivered IS NOT INITIAL OR save_changes( ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: rejection fixture could not be driven to SENT.' ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE portal_order_uuid FROM zjp_po_dlv
+      WHERE purchase_order_uuid = @reject_uuid
+        AND delivery_uuid       = @reject_base-delivery_id
+      INTO @DATA(reject_portal).
+
+    DATA(reject_response) = cl_system_uuid=>create_uuid_x16_static( ).
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                    = reject_key
+                        %param-ResponseUUID     = reject_response
+                        %param-OrderRevision    = reject_base-order_revision
+                        %param-DeliveryUUID     = reject_base-delivery_id
+                        %param-PortalOrderUUID  = reject_portal
+                        %param-Supplier         = reject_base-supplier
+                        %param-ResponseVersion  = 1
+                        %param-SupplierResponse = 'REJECTED'
+                        %param-Reason           = 'Capacity unavailable for this quantity.'
+                        %param-RespondedAt      = responded_at ) )
+      FAILED DATA(failed_rejected).
+    IF failed_rejected IS NOT INITIAL OR save_changes( ) = abap_false.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: a valid supplier rejection was refused.' ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE status, supplier_response, rejection_origin, rejection_reason,
+                  supplier_responded_at, last_response_id, last_response_version
+      FROM zjp_po_h WHERE purchase_order_uuid = @reject_uuid INTO @DATA(after_reject).
+    console->write( name = 'After REJECTED' data = after_reject ).
+
+    IF after_reject-status <> 'REJECTED'
+       OR after_reject-supplier_response <> 'REJECTED'
+       OR after_reject-rejection_origin <> 'SUPPLIER'
+       OR after_reject-rejection_reason IS INITIAL
+       OR after_reject-last_response_id <> reject_response
+       OR after_reject-last_response_version <> 1
+       OR after_reject-supplier_responded_at IS INITIAL.
+      console->write( 'STOP: the supplier rejection was not recorded correctly.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: 13 - REJECTED terminal, RejectionOrigin SUPPLIER, reason stored.' ).
+
+    " ---------- 14: an exact REJECTED replay is ALREADY_APPLIED ----------
+    " The ordering assertion. After a rejection the order is no longer SENT, so
+    " if the state guard ran before the idempotency check this exact replay
+    " would be refused - and a duplicate delivery of a response the supplier
+    " really sent would look like a failure. The handler checks the response
+    " identity FIRST and returns before any state guard, and this is what
+    " proves it rather than the code reading as though it does.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                    = reject_key
+                        %param-ResponseUUID     = reject_response
+                        %param-OrderRevision    = reject_base-order_revision
+                        %param-DeliveryUUID     = reject_base-delivery_id
+                        %param-PortalOrderUUID  = reject_portal
+                        %param-Supplier         = reject_base-supplier
+                        %param-ResponseVersion  = 1
+                        %param-SupplierResponse = 'REJECTED'
+                        %param-Reason           = 'Capacity unavailable for this quantity.'
+                        %param-RespondedAt      = responded_at ) )
+      FAILED DATA(failed_reject_replay).
+    IF failed_reject_replay IS NOT INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: an exact REJECTED replay was refused; it must be harmless.' ).
+      RETURN.
+    ENDIF.
+    IF save_changes( ) = abap_false.
+      ROLLBACK ENTITIES.
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE status, supplier_response, rejection_origin, rejection_reason,
+                  last_response_id, last_response_version
+      FROM zjp_po_h WHERE purchase_order_uuid = @reject_uuid INTO @DATA(after_reject_replay).
+
+    IF after_reject_replay-status <> 'REJECTED'
+       OR after_reject_replay-supplier_response <> 'REJECTED'
+       OR after_reject_replay-rejection_origin <> 'SUPPLIER'
+       OR after_reject_replay-rejection_reason <> after_reject-rejection_reason
+       OR after_reject_replay-last_response_id <> reject_response
+       OR after_reject_replay-last_response_version <> 1.
+      console->write( name = 'After REJECTED replay' data = after_reject_replay ).
+      console->write( 'STOP: the REJECTED replay changed persisted state.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: 14 - an exact REJECTED replay is ALREADY_APPLIED and changes nothing.' ).
+
+    " ---------- 15: no further response is accepted once REJECTED ----------
+    " The state guard, proven from the far side: a rejected order is no longer
+    " SENT, so nothing further can be applied to it.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                    = reject_key
+                        %param-ResponseUUID     = cl_system_uuid=>create_uuid_x16_static( )
+                        %param-OrderRevision    = reject_base-order_revision
+                        %param-DeliveryUUID     = reject_base-delivery_id
+                        %param-PortalOrderUUID  = reject_portal
+                        %param-Supplier         = reject_base-supplier
+                        %param-ResponseVersion  = 2
+                        %param-SupplierResponse = 'ACCEPTED'
+                        %param-RespondedAt      = responded_at ) )
+      FAILED DATA(failed_after_reject).
+    IF failed_after_reject IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: an acceptance was applied to a rejected order.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+    console->write( 'PASS: 15 - a rejected order accepts no further response.' ).
+
+    " ---------- 16: an accepted order cannot then be rejected ----------
+    " CAP cannot produce this response at all - its accept/reject guard requires
+    " status RECEIVED, so an order already ACCEPTED in the portal has no path to
+    " rejection. SAP refuses it anyway, because the SAP status is still SENT
+    " after an acceptance and would not have caught it: the guard has to read
+    " SupplierResponse, not Status. Without this test the gap is invisible,
+    " since every other scenario leaves the two in agreement.
+    "
+    " Back on the FIRST fixture, which is ACCEPTED at version 2 and still SENT.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE applySupplierResponse
+        FROM VALUE #( ( %tky                    = order_key
+                        %param-ResponseUUID     = cl_system_uuid=>create_uuid_x16_static( )
+                        %param-OrderRevision    = base-order_revision
+                        %param-DeliveryUUID     = base-delivery_id
+                        %param-PortalOrderUUID  = intent-portal_order_uuid
+                        %param-Supplier         = base-supplier
+                        %param-ResponseVersion  = 3
+                        %param-SupplierResponse = 'REJECTED'
+                        %param-Reason           = 'Late refusal that CAP could never have sent.'
+                        %param-RespondedAt      = responded_at ) )
+      FAILED DATA(failed_accept_then_reject).
+    IF failed_accept_then_reject IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: an accepted order was rejected; CAP cannot send that.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+
+    SELECT SINGLE status, supplier_response FROM zjp_po_h
+      WHERE purchase_order_uuid = @order_uuid INTO @DATA(still_accepted).
+    IF still_accepted-status <> 'SENT' OR still_accepted-supplier_response <> 'ACCEPTED'.
+      console->write( name = 'After refused rejection' data = still_accepted ).
+      console->write( 'STOP: the refused rejection still disturbed the order.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: 16 - an accepted order cannot then be rejected.' ).
+
+    success = abap_true.
+
   ENDMETHOD.
 
 ENDCLASS.

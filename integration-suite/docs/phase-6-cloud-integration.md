@@ -1,6 +1,6 @@
 # Phase 6 — Cloud Integration as the mediation layer
 
-Status: **Phases 6.1, 6.2, 6.3 and 6.4 are all runtime-verified. Phase 6 is NOT complete** — 6.5, the inbound supplier response, has not started. A real HTTPS request reached a deployed iFlow in a real tenant, was converted, validated against the source contract, and answered with a controlled response carrying the caller's own correlation ID — and an invalid contract was rejected by the schema instead of being answered. **Phase 6.2 added the mapping**: a Graphical Message Mapping turns the validated source into the CAP order contract, with semantic parity against the Phase 5 ABAP mapper and **no Groovy anywhere**. **Phase 6.3 closed the loop**: Cloud Integration now calls the protected CAP `IntegrationService` over OAuth 2.0 client credentials and returns CAP's real receipt, with a `201` create, a `200` idempotent replay, a truthful `409` conflict and a controlled `502` for technical failures. No SAP ABAP object changed and no CAP object changed in any of the three subphases. **Phase 6.4 cut SAP over.** The post-commit coordinator now posts the persisted `PayloadSnapshot` **verbatim** to Cloud Integration over destination `ZJP_CI_ORDER_DELIVERY`, so Integration Suite owns mapping on the **active production path** and the ABAP mapper has left it. Phase 5's direct SAP-to-CAP objects are all preserved as the fallback and the parity reference. **Phase 6 is still not complete**: `PIH_SupplierResponse_v1`, the inbound supplier response, is Phase 6.5 and has not started.
+Status: **PHASE 6 IS COMPLETE. Subphases 6.1 to 6.5f are runtime-verified; 6.5g is deployed with its state guard runtime-verified and its transport transitions covered by automated tests.** Cloud Integration is the mediation layer in both directions and Postman is off the business path entirely. Outbound: SAP posts the persisted `PayloadSnapshot` verbatim over destination `ZJP_CI_ORDER_DELIVERY`, Cloud Integration validates and maps it and calls the protected CAP `IntegrationService` over OAuth 2.0 client credentials, returning CAP’s real receipt — a `201` create, a `200` idempotent replay, a truthful `409` conflict and a controlled `502` for technical failures. Inbound: a supplier decision committed in CAP/HANA travels through `PIH_SupplierResponse_v1` into the RAP business object, and **all three decision types have run end to end** — an acceptance, a date update at version 2, and a terminal rejection. Idempotency is proven on both legs, a conflicting replay is refused truthfully on both, and **CAP has no direct dependency on SAP in either direction**. Phase 5’s direct objects survive as the documented fallback and the parity reference.
 
 Phase 5 is no longer the active path, but every one of its objects survives as the rollback and the reference: `ZJP_CL_OUTBOUND_TRANSPORT` and the seam are unchanged and still carry the traffic, destination `ZJP_CAP_BASE` still points at CAP directly and is still exercised by `ZJP_CL_HTTP_TRANSPORT_TEST`, and `ZJP_CL_DLV_SNAPSHOT_READER` and `ZJP_CL_CAP_ORDER_MAPPER` are untouched and still tested.
 
@@ -481,12 +481,318 @@ Only the coordinator's network section and the harness. The coordinator used to 
 
 **Nothing returns from the supplier yet.** `PIH_SupplierResponse_v1` does not exist and `applySupplierResponse` has not been written. That is Phase 6.5.
 
-## 8. Remaining subphases
+## 8. Phase 6.5a — the inbound contract, frozen (DESIGN ONLY)
 
-**6.5, and it is the only one left in Phase 6** — inbound `PIH_SupplierResponse_v1`, which needs `applySupplierResponse` and does not exist yet. **NOT STARTED.**
+**This section was written as a design freeze and is kept as written.** When 6.5a produced it, every object named here was DESIGN / NOT YET CREATED. That is no longer true: 6.5b to 6.5d are built and runtime-verified, and 6.5e is built and locally verified. Section 8a below records what each leg has actually proven. The freeze itself held — nothing in the contract below was re-litigated during implementation.
 
-## 9. Open items
+This is the return leg that makes the architecture bidirectional:
 
+```text
+CAP supplier decision (accept / reject / updateEstimatedDeliveryDate)
+  → SupplierResponseDeliveries row, state PENDING        [exists since Phase 4.4]
+  → CAP sender                                           [6.5e, built, local evidence only]
+  → POST /http/pih/v1/supplier-responses
+      → PIH_SupplierResponse_v1                          [6.5d, deployed and runtime-verified]
+          → RAP OData V4 bound action applySupplierResponse  [6.5b, runtime-verified]
+```
+
+**Most of this was designed years of phases ago and is being collected, not invented.** `API_CONTRACTS.md` already fixed the sender path, the payload and the CI-to-RAP parameter mapping; `ARCHITECTURE.md` already specified the return iFlow and the HTTP receiver; and the header has carried `SupplierResponse`, `EstimatedDeliveryDate`, `LastResponseId`, `LastResponseVersion`, `RejectionOrigin` and `RejectionReason` **since Phase 1 with nothing ever writing them**. Phase 5.1 labelled them *"5.3+ — inbound only"*. 6.5 is where they finally get written.
+
+### Acceptance does not add a status, and that is the decision worth explaining
+
+| Event | `Status` | `SupplierResponse` | Other |
+| --- | --- | --- | --- |
+| Supplier **accepts** | **stays `SENT`** | `ACCEPTED` | `EstimatedDeliveryDate` if supplied |
+| Supplier **updates the date** (later `ACCEPTED`) | **stays `SENT`** | stays `ACCEPTED` | `EstimatedDeliveryDate` replaced |
+| Supplier **rejects** | **`REJECTED`** | `REJECTED` | `RejectionOrigin = 'SUPPLIER'`, `RejectionReason` from the payload |
+
+**No `CONFIRMED` status is introduced.** `SENT` already represents the successful outbound commercial state, and `SupplierResponse` is the field reserved for exactly this fact — a new lifecycle value would duplicate information the model already carries and widen the core vocabulary for nothing. `status` is `char(12)` so `CONFIRMED` would have fitted; it was rejected on design grounds, not technical ones.
+
+**Rejection is asymmetric on purpose.** A supplier rejection is a **terminal commercial outcome**, so it does move `Status`. It reuses the existing `REJECTED` value and is told apart from a buyer rejection by `RejectionOrigin`, which is what that field has always been for — the behaviour pool says so in a comment written in Phase 2.7C: *"Supplier-side rejection is a separate mechanism and sets RejectionOrigin to SUPPLIER in a later phase."* **The buyer's `reject` action is not reinterpreted, reused or touched.** Supplier rejection arrives only through the new inbound action.
+
+### The proposed action and its parameter entity — DESIGN / NOT YET CREATED
+
+One action, `applySupplierResponse`, on `ZJP_I_PurchaseOrder`. **No second action for date updates**: a date update is an `ACCEPTED` response with a higher `ResponseVersion`, which the version rules below already order correctly. A second action would need the same guards, the same idempotency receipt and the same conflict rules, and would add a way for the two to disagree.
+
+Proposed parameter entity **`ZJP_A_ApplySupplierResponse`** — the project convention (`ZJP_A_RemoveItem`, `ZJP_A_Reject`, `ZJP_A_RecordDeliveryResult`), 27 characters, within the 30-character limit.
+
+| Parameter | Proposed type | Role |
+| --- | --- | --- |
+| `ResponseUUID` | `sysuuid_x16` | The idempotency identity. Persisted as `LastResponseId` |
+| `OrderRevision` | `abap.int4` | Guard against the header's `OrderRevision` |
+| `DeliveryUUID` | `sysuuid_x16` | Guard against the header's `DeliveryId` |
+| `PortalOrderUUID` | `sysuuid_x16` | Guard against the **intent's** `PortalOrderUUID` |
+| `Supplier` | `abap.char(10)` | Guard against the header's `Supplier` |
+| `ResponseVersion` | `abap.int4` | Ordering. Persisted as `LastResponseVersion` |
+| `SupplierResponse` | `abap.char(8)` | Closed vocabulary `ACCEPTED` / `REJECTED`. Exactly the persisted width |
+| `EstimatedDeliveryDate` | `abap.dats` | Optional on the wire; initial `00000000` means absent |
+| `Reason` | `abap.char(255)` | Mandatory for `REJECTED`, empty otherwise |
+| `RespondedAt` | `timestampl` — **to confirm against the target** | Supplier decision time |
+
+**`PurchaseOrderUUID` is deliberately not a parameter.** It is the key of the bound instance, so RAP already carries it in `%tky`; passing it again would create a second copy that could disagree with the one being acted on. `ZJP_A_RecordDeliveryResult` made the same choice for the same reason.
+
+**There is no correlation parameter.** `X-Correlation-ID` stays transport metadata, as on the outbound leg. The documented CI-to-RAP mapping lists eleven fields and none of them is a correlation id, and the header's `LastCorrelationId` belongs to the **outbound attempt** written by `recordDeliveryResult`. Inventing an inbound correlation member would put a transport concern into a business contract.
+
+**One guard reads a different entity, and it is the one finding that changes the handler shape.** `PortalOrderUUID` is **not on the header** — it is persisted on `ZJP_PO_DLV`, the delivery intent, written by `recordDeliveryResult` when the receipt came back. So validating it means reading the intent as well as the order. The other three guards are header fields.
+
+### Identity and guards
+
+`PurchaseOrderUUID` (the payload's `sourceOrderId`) **locates** the order and is the only lookup key. `PurchaseOrderNumber` is a display number and is never integration identity. `DeliveryUUID`, `PortalOrderUUID`, `Supplier` and `OrderRevision` are **guards, not lookups**: a response whose guards do not match the persisted business identity is refused rather than applied to whatever the key happens to point at.
+
+### Idempotency and versioning
+
+`LastResponseId` and `LastResponseVersion` on the header are the SAP idempotency receipt, and CAP holds the mirror image: `@assert.unique` on `responseId` and on `(order, version)` in `SupplierResponseDeliveries`.
+
+| Case | Condition | Outcome | Business mutation |
+| --- | --- | --- | --- |
+| **A** | Same `ResponseUUID`, same effective response | success, `ALREADY_APPLIED` | **none** |
+| **B** | Same `ResponseUUID`, conflicting content | **409** | none |
+| **C** | `ResponseVersion` lower than or equal to an already-applied **different** response | **409**, stale | none |
+| **D** | New `ResponseUUID`, higher `ResponseVersion` | apply exactly once | yes, then persist `LastResponseId` and `LastResponseVersion` |
+
+**Never overwrite newer state.** Case C is the rule that makes out-of-order delivery safe, and it is why `ResponseVersion` rather than `RespondedAt` is the ordering key — timestamps from a different system are not an ordering guarantee. **No blind retry semantics live inside RAP**: the action applies or refuses, and retry is the caller's concern.
+
+### Estimated delivery date
+
+The SAP field is `estimated_delivery_date : abap.dats not null` while the wire contract makes `estimatedDeliveryDate` optional, so **absent maps to the initial DATS value `00000000`**, which is the ABAP representation of "not supplied". On a first `ACCEPTED` the date is optional. On `REJECTED` no date is required and none is invented. On a later `ACCEPTED` with a higher `ResponseVersion` — CAP's `updateEstimatedDeliveryDate` path — the date **must** be supplied and replaces the stored one, while `Status` stays `SENT` and `SupplierResponse` stays `ACCEPTED`. **A date update must not create a second commercial acceptance event.**
+
+### Error semantics
+
+| Condition | Result |
+| --- | --- |
+| Unknown `PurchaseOrderUUID` | business rejection, 4xx |
+| `DeliveryUUID` mismatch | business rejection, 4xx |
+| `PortalOrderUUID` mismatch | business rejection, 4xx |
+| `Supplier` mismatch | business rejection, 4xx |
+| `OrderRevision` mismatch / stale source revision | **409** |
+| Unsupported `SupplierResponse` value | **400** |
+| Same response already applied | success, `ALREADY_APPLIED` |
+| Same `ResponseUUID`, different effective content | **409** |
+| Older or conflicting `ResponseVersion` | **409** |
+| SAP unreachable, or CI cannot execute the call | **not a business outcome** — CI's controlled `502 INTEGRATION_TECHNICAL_ERROR`, retryable |
+
+The last row is ADR-039 applied to the return leg: a business refusal and a technical failure are different answers and must not collapse into one. RAP's own OData errors keep the OData error format and CI maps them at the REST boundary, as the error policy already states.
+
+### Subphases
+
+| Checkpoint | Objects / files expected to change | Runtime evidence required | Unchanged |
+| --- | --- | --- | --- |
+| **6.5a** | documentation only | none — design freeze | everything |
+| **6.5b** | `ZJP_A_ApplySupplierResponse` (new), `zjp_i_purchaseorder.bdef`, `zbp_i_purchaseorder.clas.locals_imp.abap`, a **restricted integration projection**, service definition and **OData V4 Web API binding**, `ZJP_CL_PO_EML_TEST` | ADT activation, `$metadata`, and an **EML/console proof before any HTTP** | outbound path, Phase 5 objects, buyer UI service |
+| **6.5c** | none, or a console probe | **auth and CSRF proven** from an external HTTP client against the RAP action, in isolation | all sources |
+| **6.5d** | `integration-suite/` iFlow, XSD, mapping | deployed `PIH_SupplierResponse_v1` reaching SAP | SAP and CAP |
+| **6.5e** | CAP sender draining `SupplierResponseDeliveries` | a row leaving `PENDING` | SAP and the iFlow |
+| **6.5f** | documentation | real `ACCEPTED`, `REJECTED` and date-update end to end | — |
+
+**6.5b's EML proof before HTTP is deliberate**, and it is the same discipline that made 6.1 to 6.4 diagnosable: prove the business action in isolation, then prove the endpoint, then prove the mediation. **6.5c exists because SAP inbound authentication has never been exercised in this project** — the outbound leg proved SAP-to-CI, which says nothing about CI-to-SAP.
+
+### Open at 6.5a, and how each one was answered
+
+- ~~**CI → SAP authentication.**~~ **Answered by 6.5c and 6.5d.** The route reaches SAP through the SAP Cloud Connector, and the call is proven from an external HTTP client and then through the deployed iFlow.
+- ~~**CSRF on OData V4 writes.**~~ **Answered, and the suspicion was correct.** The OData V4 modifying request does require a token, so the flow performs a `GET` on the instance to fetch one and **preserves the SAP session cookie** across the two calls. Fetching the token without carrying the session forward does not work; that pairing is the substance of the answer, not an implementation detail.
+- ~~**CAP → CI authentication and the sender shape.**~~ **Answered by 6.5e.** HTTP Basic with a Process Integration Runtime client identity against the CI HTTPS sender, whose User Role is `ESBMessaging.send`, proven manually. The sender is the explicit flush command ARCHITECTURE.md called for, not a scheduler. **This is the development-phase mechanism**; a client-credentials token flow remains a later hardening step and is deliberately not implemented, because standing up an unproven second authentication path beside a proven one only adds a way for the first end-to-end run to fail.
+- ~~**`RespondedAt` type and null encoding.**~~ **Frozen in 6.5b-1** and now carried by the sender as RFC 3339 at second precision.
+
+**Still genuinely open: nothing has yet run from the CAP database through Cloud Integration to RAP.** That is 6.5f, and no amount of local testing substitutes for it.
+
+## 8a. Phase 6.5b to 6.5e — what is built, and what each one proved
+
+### 6.5b to 6.5d, runtime-verified
+
+**6.5b-1 — the RAP action.** `applySupplierResponse` is activated and proven by EML before any HTTP, the same discipline that made 6.1 to 6.4 diagnosable. The one defect it surfaced is worth keeping: `SupplierRespondedAt` stayed initial because the behavior definition's **explicit `mapping for` block** did not list it. RAP accepted the `UPDATE FIELDS` — the element exists on the projection — and silently dropped the value. No syntax error, no dump, no failed key. A field absent from that block is not a compile-time problem, and that is exactly why it cost a runtime round to find.
+
+**6.5b-2 — the restricted integration surface.** `ZJP_API_PurchaseOrder` over `ZJP_I_PurchaseOrder`, exposing one action and no writable field, published as an OData V4 **Web API** binding separate from the buyer's UI service. `$metadata` verified.
+
+**6.5c — the endpoint, authentication and CSRF, in isolation.** Proven from an external HTTP client against the RAP action with no iFlow in the way, which is what made 6.5d's failures attributable to mediation rather than to the endpoint.
+
+**6.5d — the deployed flow.** `POST /http/pih/v1/supplier-responses` reaching `PIH_SupplierResponse_v1`, which performs:
+
+```text
+CAP-style JSON
+  → validation and mapping
+  → SAP Cloud Connector
+  → GET the OData instance, fetching a CSRF token
+  → preserve the SAP session cookie
+  → POST the bound applySupplierResponse
+  → HTTP 204
+```
+
+**The idempotent replay is the evidence that matters.** A real replay returned `204`, and the `GET` that followed showed the order unmoved: `Status SENT`, `SupplierResponse ACCEPTED`, `EstimatedDeliveryDate 2026-11-15`, `SupplierRespondedAt 2026-09-20T03:08:45Z`, `LastResponseVersion 2`, with `LastChangedAt` and `LocalLastChangedAt` unchanged. An unchanged `LastChangedAt` is the strong part: it says RAP recognised the response and returned without writing, rather than rewriting the same values.
+
+**No credential, token, session cookie or service-key content appears in this repository**, and none may. What is recorded is the mechanism, the role name `ESBMessaging.send`, the service name and plan, the field names and the non-secret path.
+
+### 6.5e — the CAP sender, source and local evidence only
+
+**This is the subphase that removes Postman from the business path**, and it is implemented but **not yet proven against the deployed environment**. Nothing below is runtime evidence.
+
+ARCHITECTURE.md already fixed the shape — *"A CAP development command can similarly flush a committed response. Automatic scheduling is a later enhancement"* — so the sender is an explicit command, not a timer, a queue worker or an HTTP route. An administrative endpoint that drains the outbox would need authorizing and would be a far larger surface than a command an operator runs against a bound application.
+
+| File | What it is |
+| --- | --- |
+| `cap-supplier-portal/srv/lib/supplier-response.ts` | the frozen payload and the classification table, as pure functions |
+| `cap-supplier-portal/srv/lib/ci-transport.ts` | the only file that opens a socket or reads a credential |
+| `cap-supplier-portal/srv/lib/response-sender.ts` | reads the outbox, sends, classifies, records |
+| `cap-supplier-portal/srv/lib/cds-bootstrap.ts` | programmatic CAP boot order, with its own test |
+| `cap-supplier-portal/scripts/flush-supplier-responses.ts` | the explicit command |
+
+**The transport is an interface, and that is what makes the state machine testable.** `ResponseTransport` has one method; the tests drive the whole delivery lifecycle through a fake that answers from a script, so `npm test` never reaches a Cloud Integration tenant and the 2xx, 409, 503 and timeout branches are all exercised deterministically. It is the same seam that let Phase 6.4's coordinator be proven with `ZJP_CL_TRANSPORT_FAKE`.
+
+**Classification is the ABAP `classify` method read in the other direction**, deliberately, because API_CONTRACTS.md's error policy governs both legs and two systems disagreeing about what a `502` means is how an outbox mints a second delivery for something the receiver already committed.
+
+| Outcome | State | Why |
+| --- | --- | --- |
+| any **2xx**, including the verified `204` | `DELIVERED` | the contract says any 2xx; hard-coding `204` would turn a harmless iFlow change into a false failure |
+| `400` `401` `403` `404` `409` `412` `413` | `FAILED` | deterministic; replaying unchanged content changes no answer |
+| `429` `502` `503` | `PENDING` | congestion, so the row returns to the queue and nothing business-facing moves |
+| `500` `504`, and **no answer at all** | `UNKNOWN` | the receiver may already have committed — a timeout never proves non-delivery |
+
+**Three rules the code exists to keep.**
+
+**A transport outcome never touches the supplier's committed decision.** The sender writes `state`, `attempts`, `lastAttemptAt`, `lastError` and `lastCorrelationId` on the outbox row and nothing else. `Orders` is never updated — not on success, not on a refusal, not on a conflict. A failed delivery means SAP has not heard about a decision, not that the decision is any less made.
+
+**A retry never manufactures a new `responseId`.** The crash window between SAP applying a response and CAP recording `DELIVERED` cannot be closed by a sender, so it is survived instead: the durable row keeps its identity, the next run replays it, and RAP answers `ALREADY_APPLIED` — which 6.5d has proven, over HTTP, with `LastChangedAt` unmoved.
+
+**One attempt, one fresh `X-Correlation-ID`.** It identifies the attempt in the Cloud Integration message log and is persisted as `lastCorrelationId` so an `UNKNOWN` row can be reconciled later. It is transport metadata and never business identity; the payload's `responseId` is what SAP deduplicates on. An `Idempotency-Key` carrying that same `responseId` is sent alongside it, **read from the payload object rather than passed as a second argument**, so the contract's rule that a present header must equal the body identity is unrepresentable to violate rather than merely checked. The body stays authoritative: an adapter that drops custom headers must not change how SAP deduplicates.
+
+**Ordering is enforced within one run, and the scope matters.** Once a response for an order does not reach SAP, later responses for that same order are held back **for the rest of that run**. Sending version 2 while version 1 is still `PENDING` would make SAP refuse version 1 on a later run as stale, leaving a row permanently `FAILED` for a decision that was superseded rather than rejected. Other orders are unaffected.
+
+**Across runs the guard does not apply, deliberately.** A version 1 that ended `FAILED` or `UNKNOWN` leaves the `PENDING` set, so the next run sees version 2 with nothing in front of it and sends it. That is contract-permitted — a newer response *"contains the complete current supplier response, so version gaps can be applied after validating the allowed state"* — and blocking it would strand the order behind a failure the newer response already supersedes. **It is not a guarantee that SAP sees every version in order**, and must not be read as one; reconciling a `FAILED` or `UNKNOWN` row against what SAP actually holds is a 6.5f obligation.
+
+**Single-runner, and stated rather than assumed.** There is no lease, no claim and no worker identity, because the architecture calls for an explicit development command and this phase does not introduce scheduling. **Two concurrent flushes would both read the same PENDING rows and both send them.** That is safe at the receiver — RAP's idempotency handles the duplicate — but the two runs would race on the `state` update and the attempt count would be wrong. Run one at a time. A claim or lease belongs with automatic scheduling, when it arrives.
+
+**Four columns were added to `SupplierResponseDeliveries`**, and three of them close a note the domain model has carried since Phase 4.4: that table already specified *"state PENDING/DELIVERED/FAILED/UNKNOWN; attempt count; last error; timestamps"* and Phase 4.4 pulled forward only the first, because nothing attempted a delivery then. `attempts`, `lastError` and `lastAttemptAt` complete the documented set. `lastCorrelationId` is the one addition beyond it, and it is there because reconciling an `UNKNOWN` row in 6.5f means finding its message processing log, which nothing else in the row can locate. All four are nullable or defaulted, so the HDI deployer adds them to the existing table without touching a row.
+
+**The first deployed dry-run failed, and the defect is worth keeping.** `cf run-task ... --dry-run` exited 2 inside `@cap-js/hana`:
+
+```text
+Query was not inferred and includes `*` in the columns.
+For which there is no column name available.
+```
+
+**`cds.connect.to("db")` captures whatever `cds.model` holds at that instant, and a later assignment never reaches the service.** Measured on `@sap/cds` 10.1.0: `db.model` had no definitions at connect, `cds.model` had 47 after the assignment, and `db.model` still had none. A database service holding a model with no definitions cannot resolve the columns behind `SELECT *`, so HANA refused to render the statement — before any HTTP request, which is why none of Integration Suite, the credential, the Cloud Connector, CSRF or the iFlow was implicated.
+
+**Local SQLite hid it, and the way it hid it is the lesson.** `cds.deploy(...).to(db)` repairs `db.model` as a side effect — measured `none` before, 27 definitions after — and the deploy runs *only* on the in-memory profile. So the single environment that deliberately never deploys was the single environment that never got a usable model. **A boot order exercised only on the masked path is exactly the kind of defect that reaches production**, which is why the order now lives in `cds-bootstrap.ts` with a test that asserts it directly against a recorder rather than by running the command.
+
+The fix also switched `cds.linked` to **`cds.compile.for.nodejs`**, matching the pattern this app`s earlier successful HANA verification tasks used; it applies the runtime transformations the database layer reads. `cds.deploy` still receives its own freshly loaded CSN, because it runs the relational transformation itself and flattening an already-flattened model is a compiler error (`Generated foreign key element "order_ID" ... conflicts with existing element`).
+
+**What local verification is worth here.** `npm run typecheck`, `npm test` — 114 tests, 0 failures — and `npx cds build --production` all pass, and the sender's tests drive it over rows that a real supplier decision committed through the HTTP service, not over hand-inserted fixtures. That is real evidence about the payload, the classification, the persistence and the replay. It is **not** evidence about the deployed iFlow, the HANA container or the credential, and this project does not treat local Node execution as equivalent to SAP runtime evidence.
+
+## 8b. Phase 6.5f — the first real end-to-end delivery
+
+**The architecture became bidirectional here.** A supplier decision committed in CAP/HANA travelled through Cloud Integration into SAP RAP and changed a purchase order, with no Postman anywhere on the path.
+
+### The delivery
+
+| | |
+| --- | --- |
+| `responseId` | `1cb091be-2db9-4fca-adaa-d9c443725970` |
+| `portalOrderId` | `9efeb598-03cf-44f8-81e5-24c68bcbc176` |
+| SAP `PurchaseOrderUUID` | `37fc3fa8-eb2d-1fd1-ad92-f2fc9e60f34d` |
+| supplier | `RTTEST001` |
+| decision / version / date | `ACCEPTED` / `1` / `2026-11-15` |
+
+**The outbox proves the transport, not just the business result.** The row reached `state DELIVERED` with **`attempts = 1`** — one attempt, one success, no retry — `lastCorrelationId = 426779ed-e8e3-401b-8cf3-59025f17a327` and `lastError = null`. That is the durable record the Phase 4.4 outbox existed to make possible, finally carrying a terminal state written by a real sender.
+
+### The replay, and why `LastChangedAt` is the strong evidence
+
+An identical replay — same `responseId`, same commercial content — returned **`HTTP 204`** and SAP's business state did not move. **`LastChangedAt` remained exactly `2026-09-20T17:06:29.954186Z`.** An unchanged `LastChangedAt` is what separates *recognised and ignored* from *rewritten with identical values*: RAP identified the response as already applied and returned without writing. Idempotency was designed in 6.5a, proven by EML in 6.5b-1, proven over HTTP in 6.5d, and is now proven on the real production path.
+
+### The conflict, and the defect it exposed
+
+A replay of the **same `responseId` with `EstimatedDeliveryDate` changed from `2026-11-15` to `2026-11-16`** was refused by RAP with **`HTTP 400`, `SABP_BEHV/100`**, *"A different response was already applied under thi..."*. Correct: same identity, different content, and the contract has always called that a conflict.
+
+**But CAP did not see a `400`.** The HTTP receiver ran with `Throw Exception on Failure = true`, so Cloud Integration turned the deterministic downstream refusal into an external **`500`** — which the sender classifies `UNKNOWN`, the label reserved for *"SAP may or may not have applied this"*. A permanent, decided refusal was arriving dressed as an ambiguous one. **The 6.5e audit predicted this from the export before it ever happened**, and 6.5f is where it was produced for real and fixed.
+
+### The hardening, and why it is deliberately narrow
+
+**Only the receiver that invokes `applySupplierResponse` changed.**
+
+| Receiver | Method | `throwExceptionOnFailure` | Why |
+| --- | --- | --- | --- |
+| `SAP_RAP_Action` / `MessageFlow_719` | `POST` | **`false`** (changed) | RAP's own answer is the business answer and must reach CAP as itself |
+| CSRF fetch / `MessageFlow_705` | `GET` | **`true`** (unchanged) | failing to obtain a token is a technical failure with no business answer to pass through |
+
+`retryOnException` stays **`false`** on both: retrying is the outbox's job, under the same `responseId`, not the iFlow's.
+
+**After redeployment the same conflict was retested: SAP `400` → CI `400`.** The sender classifies that `FAILED`, which is the truth. And the original state was untouched throughout — `Status SENT`, `SupplierResponse ACCEPTED`, `EstimatedDeliveryDate 2026-11-15`, `LastResponseId 1cb091be-2db9-4fca-adaa-d9c443725970`, `LastResponseVersion 1`, `LastChangedAt 2026-09-20T17:06:29.954186Z`. **A rejected conflict changed nothing**, which is the other half of what idempotency has to guarantee.
+
+This is ADR-039 applied to the return leg at last, and the asymmetry it removes is exactly the one the outbound leg settled in Phase 6.4.
+
+### The exported artifact is the evidence
+
+[`iflows/PIH_SupplierResponse_v1.zip`](../iflows/PIH_SupplierResponse_v1.zip) is the runtime export taken after the hardening, and every claim above is checkable in it rather than taken on trust: `MessageFlow_719` carries `httpMethod POST` with `throwExceptionOnFailure false`, `MessageFlow_705` carries `httpMethod GET` with `throwExceptionOnFailure true`, both carry `retryOnException false` and `authenticationMethod Basic` with `credentialName PIH_SAP_BASIC`. **The alias is the only credential fact in the repository** — `parameters.prop` is empty, and a scan of every file in the export finds no password, secret, token or cookie value.
+
+**One non-blocking observation, recorded rather than fixed.** The export contains two session-cookie scripts, `BuildSAPSessionCookie.groovy` and `BuildSAPSessionCookie (1).groovy`, and the `.iflw` references **only the second**. The first is an earlier, simpler version that assumes `Set-Cookie` is a plain String and splits it on `;`; the referenced one normalizes Collection, array and String forms and extracts the cookies by regex — which is what made the session actually survive to the `POST`. The orphan is therefore dead weight in the deployed artifact, not a second code path. **It is deliberately not removed here**: this file is a runtime export and editing it by hand would make the repository copy stop being a faithful record of what is deployed. Cleaning it up belongs in the Cloud Integration designer, followed by a fresh export.
+
+## 8c. Phase 6.5f closed — every decision type proven on the real path
+
+**All three supplier decisions have now run end to end**, from a CAP/HANA transaction through Cloud Integration into SAP RAP. Each one is a different shape and each was proven separately, because agreeing in EML is not the same as agreeing over the wire.
+
+### A date update — `ACCEPTED` at version 2
+
+Portal order `9efeb598-03cf-44f8-81e5-24c68bcbc176`, already `ACCEPTED` at version 1 with `2026-11-15`, moved to `2026-11-20` through `SupplierService.updateEstimatedDeliveryDate` under `responseId 11108278-d0b8-4db6-b52a-9d57ab7adc2f`.
+
+CAP ended `ACCEPTED` / version 2 / `2026-11-20`, with a fresh outbox row at version 2, `PENDING`, `attempts 0` — and **the version-1 row stayed `DELIVERED` and untouched**, which is the part worth checking: a date update supersedes a delivery, it does not revise one.
+
+The dry run reported `scanned 1, skipped 1` — the ordering guard holding version 2 back while nothing had confirmed version 1 in that run — and the real flush then delivered it with `HTTP 204` under correlation `d0c5cf89-1fc1-442b-af94-0b13b843e9ec`.
+
+SAP afterwards: `Status SENT`, `SupplierResponse ACCEPTED`, `EstimatedDeliveryDate 2026-11-20`, `SupplierRespondedAt 2026-09-20T18:46:50Z`, `LastResponseId 11108278-…`, `LastResponseVersion 2`, `LastChangedAt 2026-09-20T18:50:25.924892Z`. **`Status` stayed `SENT` across both versions**, exactly as 6.5a froze it — a date update is not a second commercial acceptance.
+
+### A rejection — the terminal outcome
+
+Portal order `92a4d059-00ba-4eb2-bbba-803fde8eabfb` (`PO00000127`), SAP `37fc3fa8-eb2d-1fd1-ad92-8973260a322e`, supplier `RTTEST001`. It began `RECEIVED` at version 0 with no response rows, and SAP held it at `Status SENT` with an empty `SupplierResponse` and a zero `LastResponseId`.
+
+`SupplierService.reject` recorded *"Supplier cannot fulfill the requested delivery"* under `responseId 9acb2cde-a62f-4c86-9cab-2b5d29274b6d`. CAP ended `REJECTED` / version 1 with that reason, and the outbox row carried `decision REJECTED`, `state PENDING`, `attempts 0`. The flush then reported `scanned 1, delivered 1, failed 0, pending 0, unknown 0, skipped 0`, exit 0.
+
+SAP afterwards: **`Status REJECTED`**, `SupplierResponse REJECTED`, `EstimatedDeliveryDate null`, `SupplierRespondedAt 2026-09-20T19:09:10Z`, `LastResponseId 9acb2cde-…`, `LastResponseVersion 1`, `LastChangedAt 2026-09-20T19:11:09.837479Z`.
+
+**This is the asymmetry 6.5a designed, finally exercised.** An acceptance leaves `Status` at `SENT` and speaks only through `SupplierResponse`; a rejection is a terminal commercial outcome and does move `Status`. The header fields that had carried no value since Phase 1 — `SupplierResponse`, `EstimatedDeliveryDate`, `SupplierRespondedAt`, `LastResponseId`, `LastResponseVersion` — are now all written by the real inbound path, for both outcomes.
+
+### `UNKNOWN` reconciliation, and exactly what is proven about it
+
+The command is implemented and **deployed**. The reconciliation work — the command, the updated sender and the guarded compare-and-set bookkeeping — was built with `mbt build -p=cf` and deployed with `cf deploy`, which completed successfully, so **the running droplet contains all three**. Its state guard is then **runtime-verified in that deployed environment**: task `pih-reconcile-delivered` against `responseId 1cb091be-2db9-4fca-adaa-d9c443725970`, which is `DELIVERED`, answered *"Response 1cb091be-2db9-4fca-adaa-d9c443725970 is DELIVERED, not UNKNOWN"* and exited `2`. So the artifact exists in the droplet, reads the real row and enforces the rule that only an `UNKNOWN` delivery may be replayed.
+
+**What is NOT proven, and must not be read into the above: no real `UNKNOWN` transport condition was ever induced in production.** Nothing was timed out on purpose and no receiver was made to fail, so the `UNKNOWN → DELIVERED` and `UNKNOWN → FAILED` transitions have **automated-test evidence only** — the suite drives all of them through a fake transport, including the replay of an identical payload and the compare-and-set race. That is real evidence about the code and it is not evidence about the deployed transport. The distinction is kept deliberately.
+
+## 9. Phase 6 acceptance criteria
+
+**All satisfied. Phase 6 is complete.**
+
+| Subphase | Criterion this document set | Evidence |
+| --- | --- | --- |
+| **6.1** | a real HTTPS request reaching a deployed iFlow | runtime-verified |
+| **6.2** | mapping with semantic parity against the ABAP mapper | runtime-verified |
+| **6.3** | CI calling the protected CAP service and returning its real receipt | runtime-verified — `201`, `200` replay, `409` conflict, controlled `502` |
+| **6.4** | SAP cut over; the coordinator posts the snapshot verbatim | runtime-verified |
+| **6.5a** | the inbound contract and action design, frozen | design freeze, never re-litigated |
+| **6.5b-1** | `applySupplierResponse` proven by EML before any HTTP | runtime-verified |
+| **6.5b-2** | a restricted OData V4 Web API binding | published, `$metadata` verified |
+| **6.5c** | authentication and CSRF proven from an external client | runtime-verified |
+| **6.5d** | `PIH_SupplierResponse_v1` reaching SAP | runtime-verified |
+| **6.5e** | a row leaving `PENDING` | runtime-verified — `DELIVERED`, `attempts 1` |
+| **6.5f** | real `ACCEPTED`, `REJECTED` and date update, end to end | **all three runtime-verified** |
+| **6.5g** | `UNKNOWN` reconciliation | implemented, **deployed to Cloud Foundry**, state guard **runtime-verified**; transport transitions **test-proven only** |
+
+**The architecture is bidirectional and Postman is off the business path in both directions.** SAP submits an order, Cloud Integration mediates it into CAP, a supplier decides, and the decision travels back through Cloud Integration into the RAP business object — with idempotency proven on both legs, conflicts refused truthfully on both legs, and no direct dependency between CAP and SAP in either direction.
+
+**What Phase 6 deliberately did not do.** Retry and resilience remain unexercised: the receivers run on platform-default retry, and no timeout, transient `5xx` or redelivery has been tested on either leg. The outbox classifies a retryable answer back to `PENDING` so a later run *may* pick it up, and that is classification, not recovery. `retryDelivery` does not exist. Scheduling does not exist either — both senders are explicit commands, as ARCHITECTURE.md intended for this stage.
+
+## 10. Open items
+
+- ~~**`PIH_SupplierResponse_v1` is not exported into this repository.**~~ **Closed.** [`iflows/PIH_SupplierResponse_v1.zip`](../iflows/PIH_SupplierResponse_v1.zip) is a real export and carries the deployed `.iflw`, `PrepareRAPSupplierResponse.groovy` and the session-cookie scripts. The route is confirmed as `urlPath /pih/v1/supplier-responses` with `senderAuthType RoleBased` and `userRole ESBMessaging.send`, and the action path the flow builds is `/PurchaseOrders({uuid})/com.sap.gateway.srvd_a2x.zjp_api_supplierresponse.v0001.applySupplierResponse` — which independently confirms that 6.5b-2`s `expose ZJP_API_PurchaseOrder as PurchaseOrders` alias was the right choice, since the alias is baked into that URL.
+- ~~**The inbound flow has NO Exception Subprocess, and `Throw Exception on Failure` is ON.**~~ **Closed by the 6.5f hardening, and the prediction was exactly right.** The 6.5e audit predicted that a deterministic RAP refusal would reach CAP as a generic `5xx` and classify `UNKNOWN` rather than `FAILED`. 6.5f then produced it for real: a conflicting replay was refused by RAP with `HTTP 400 SABP_BEHV/100` and Cloud Integration converted it into an external **`500`**. The fix was **narrow on purpose** — `throwExceptionOnFailure` was disabled on the action receiver alone (`SAP_RAP_Action`, `MessageFlow_719`), while the CSRF-fetch receiver (`MessageFlow_705`) keeps it **ON**, because a failure to obtain a token is a genuine technical failure with no business answer to pass through. After redeployment the same conflict returned **`400` to CAP**, which the sender classifies `FAILED`. The inbound leg is now aligned with ADR-039 where it matters and deliberately not where it does not.
+- **`UNKNOWN` is never automatically retried, and reconciling one is an explicit operator action.** The command is implemented and **deployed**, and its state guard is **runtime-proven**: run in the deployed environment against `responseId 1cb091be-2db9-4fca-adaa-d9c443725970`, which is `DELIVERED`, it answered `REFUSED NOT_UNKNOWN` and exited `2`. **What is deliberately NOT claimed: no real `UNKNOWN` transport condition was ever induced in production.** Nothing was timed out on purpose and no receiver was made to fail, so the `UNKNOWN → DELIVERED` and `UNKNOWN → FAILED` transitions carry **automated-test evidence only**, through a fake transport. That is evidence about the code, not about the deployed transport, and the two are kept apart here on purpose.
+
+  **It resolves the ambiguity by replaying, not by reading SAP.** That is the architectural point: CAP acquires no direct dependency on SAP and Cloud Integration stays the only mediation layer. The same durable response is sent again through the same transport, under the **same `responseId`**, with a fresh `X-Correlation-ID` for the new attempt. This is safe because RAP's idempotency is runtime-proven rather than assumed — 6.5f showed the same `responseId` with the same content returning `HTTP 204` with `LastChangedAt` unmoved. So if the original landed, the replay is a no-op; if it never landed, the replay applies it; and **if the answer is ambiguous again the row simply stays `UNKNOWN`**, which is a legitimate outcome and not a failure.
+
+  **The result goes through the normal classification, unchanged.** `reconcileSupplierResponse` and the flush share one `attempt` function, so the payload, the fresh correlation ID, `classify`, `describe` and the guarded write are the same code in both paths — any 2xx to `DELIVERED`, `400`/`401`/`403`/`404`/`409`/`412`/`413` to `FAILED`, `429`/`502`/`503` to `PENDING`, `500`/`504`/no answer to `UNKNOWN`. Bookkeeping is identical too: `attempts` increments once, `lastAttemptAt`, `lastCorrelationId` and `lastError` all move. **There is no loop after `PENDING` or `UNKNOWN`** — one command, one attempt.
+
+  **Only `UNKNOWN` is reconcilable**, and the other three are refused for reasons of their own: `DELIVERED` already reached SAP and replaying it would be a pointless duplicate; `FAILED` was refused deterministically, so an identical replay earns an identical refusal and what has to change first is the payload or the order state, which is a business decision rather than a transport one; `PENDING` is still the flush's to send. Nothing commercial is re-decided anywhere on this path — no new `responseId`, no new version, and `Orders` is never written.
+
+  **Concurrency is handled by a compare-and-set, not a lock.** The write is `UPDATE … WHERE ID = ? AND state = ?`, where the expected state is whatever the row was read in — `PENDING` for the flush, `UNKNOWN` for a reconciliation. If anything moved the row in between, the statement matches nothing, returns `0` and **writes nothing**: the concurrent result stands and the losing attempt reports a conflict instead of overwriting. Nothing is lost when that happens, because the row keeps its `responseId` and remains replayable. This also tightens the single-runner limitation the flush has always carried: two concurrent flushes can still both send, which the idempotent receiver absorbs, but they can no longer corrupt each other's bookkeeping.
+- ~~**The CAP sender has no deployed-runtime evidence.**~~ **Closed by 6.5f.** A real row went `PENDING → DELIVERED` with `attempts = 1` against the deployed HANA container and the real Cloud Integration sender.
+- ~~**`REJECTED` and the date update have no production evidence.**~~ **Closed.** Both ran for real: a date update to `2026-11-20` at `ResponseVersion 2` leaving `Status` at `SENT`, and a terminal rejection moving `Status` to `REJECTED` with `SupplierRespondedAt 2026-09-20T19:09:10Z`. See section 8c.
+- **Two concurrent flushes would double-send.** There is no claim, lease or worker identity in 6.5e, deliberately. The receiver is idempotent so no duplicate response is applied, but the two runs would race on the row's `state` and attempt count. Single-runner is the documented limitation, and a lease belongs with automatic scheduling.
 - ~~**Header ownership transfer.**~~ **Closed by Phase 6.3, and the premise was wrong.** CI sets `Content-Type` and `X-Correlation-ID` and does **not** send `Idempotency-Key` — yet 6.3b deduplicated and 6.3c conflicted correctly, because `deliveryId` is the key of the `Orders` entity in the body and is what CAP actually deduplicates on. No header ownership needs transferring at cutover.
 - ~~**Receipt shape.**~~ **Closed by Phase 6.3 as recommended.** *Prepare Delivery Receipt Response* sets headers only and leaves CAP's receipt as the body, so CI reshapes nothing and the coordinator's runtime-verified `read_receipt` keeps working unchanged at cutover. Any later reshaping remains a separate decision that would now be a deliberate break.
 - ~~**Exported iFlow artifact.**~~ **Closed.** [`iflows/PIH_OrderDelivery_v1.zip`](../iflows/PIH_OrderDelivery_v1.zip) is a real export and contains the deployed `.iflw`, the source XSD, the OpenAPI target and the `.mmap` mapping. The repository copies under `mappings/` are now extracted from that export rather than derived by hand.

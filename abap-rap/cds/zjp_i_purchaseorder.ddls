@@ -36,6 +36,7 @@ define root view entity ZJP_I_PurchaseOrder
       last_correlation_id     as LastCorrelationId,
       last_response_id        as LastResponseId,
       last_response_version   as LastResponseVersion,
+      supplier_responded_at   as SupplierRespondedAt,
       rejection_origin       as RejectionOrigin,
       rejection_reason       as RejectionReason,
       _Items

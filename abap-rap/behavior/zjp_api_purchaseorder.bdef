@@ -1,0 +1,23 @@
+// Phase 6.5b-2. The integration behavior projection.
+//
+// WHAT IS ABSENT IS THE POINT. There is no `use create`, no `use update`, no
+// `use delete`, no `use association _Items` and not one buyer action: no
+// submit, approve, reject, cancel or removeItem, and neither sendToSupplier nor
+// recordDeliveryResult, which belong to the outbound coordinator and to nobody
+// else. An integration client gets exactly one verb.
+//
+// NO `use draft;`, deliberately. ZJP_I_PurchaseOrder is draft-enabled for the
+// buyer UI, but a projection is free to expose the active instances only, and
+// Cloud Integration has no business reaching a buyer's unsaved draft. The
+// action carries its own draft guard as well, so this is defence in depth
+// rather than the only lock - but the surface should not offer the door at all.
+projection;
+
+strict ( 2 );
+
+define behavior for ZJP_API_PurchaseOrder
+{
+  // The whole API. Authorization delegates to the root's update authorization,
+  // as declared on the base behavior definition.
+  use action applySupplierResponse;
+}

@@ -81,7 +81,7 @@ sequenceDiagram
 
 Phase 5 bypasses CI using the same boundaries and a small mapping adapter. Phase 6 moves mapping into CI. Each machine-to-machine exchange is synchronous request/reply. The overall human process spans multiple transactions and requests.
 
-The first coordinator can be an explicitly run ABAP console application outside BO handlers: claim through EML, commit, send using a released HTTP client, then record the receipt through EML and commit. A CAP development command can similarly flush a committed response. Automatic scheduling is a later enhancement; scheduling API choice depends on the ABAP release. This makes the commit boundaries observable while keeping the initial HTTP implementation small.
+The first coordinator can be an explicitly run ABAP console application outside BO handlers: claim through EML, commit, send using a released HTTP client, then record the receipt through EML and commit. A CAP development command can similarly flush a committed response — **implemented as Phase 6.5e** (`npm run flush-responses`) and runtime-verified end to end in 6.5f, with `npm run reconcile-response` added in 6.5g to resolve an `UNKNOWN` delivery by replaying it. Automatic scheduling is a later enhancement; scheduling API choice depends on the ABAP release. Because this phase has no claim or lease, the CAP sender is explicitly **single-runner**: concurrent flushes would both send, which the idempotent receiver absorbs but the attempt bookkeeping does not. This makes the commit boundaries observable while keeping the initial HTTP implementation small.
 
 ## Transaction and recovery boundary
 
