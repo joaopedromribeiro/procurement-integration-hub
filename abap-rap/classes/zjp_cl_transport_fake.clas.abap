@@ -14,8 +14,8 @@ CLASS zjp_cl_transport_fake DEFINITION
   PUBLIC SECTION.
     INTERFACES zjp_if_outbound_transport.
 
-    " The four scenarios the inventory requires. Callers use these constants
-    " rather than literals: zjp_cl_transport_fake=>scenario-created.
+    " The scenarios the inventory requires. Callers use these constants rather
+    " than literals: zjp_cl_transport_fake=>scenario-created.
     CONSTANTS:
       BEGIN OF scenario,
         " 201 - CAP accepted a new delivery and returned a receipt.
@@ -26,6 +26,14 @@ CLASS zjp_cl_transport_fake DEFINITION
         conflict   TYPE string VALUE 'CONFLICT',
         " The receiver never answered. Not a failed delivery - an unknown one.
         unanswered TYPE string VALUE 'UNANSWERED',
+        " 502 - ANSWERED, and retryable. Added in Phase 6.4d because the four
+        " original scenarios could not reach the coordinator's 429/502/503 ->
+        " PENDING branch at all: "unanswered" is answered = false and classifies
+        " as UNKNOWN, which is a different outcome on the opposite side of the
+        " retry decision. Phase 6.3 proved the deployed iFlow really does emit
+        " this shape from its Exception Subprocess, so the scenario scripts a
+        " real observed response rather than an invented one.
+        retryable  TYPE string VALUE 'RETRYABLE',
       END OF scenario.
 
     " Configuration is constructor injection and nothing else: one instance is
@@ -48,6 +56,12 @@ CLASS zjp_cl_transport_fake DEFINITION
     " The 409 body, in the API_CONTRACTS error envelope. DELIVERY_PAYLOAD_CONFLICT
     " is the code CAP actually returned to SAP in the Phase 5.1 outbound probe.
     METHODS conflict_body
+      RETURNING VALUE(body) TYPE string.
+
+    " The controlled 502 body. Copied from the response the DEPLOYED Exception
+    " Subprocess returned in Phase 6.3, including retryable = true, so a test
+    " asserting on it is asserting on Cloud Integration's real error contract.
+    METHODS technical_error_body
       RETURNING VALUE(body) TYPE string.
 
 ENDCLASS.
@@ -86,6 +100,14 @@ CLASS zjp_cl_transport_fake IMPLEMENTATION.
         response-answered = abap_true.
         response-status   = 409.
         response-body     = conflict_body( ).
+
+      WHEN scenario-retryable.
+        " ANSWERED, unlike scenario-unanswered. Integration Suite considered the
+        " request and replied that the failure was technical and may be retried;
+        " the coordinator must classify that as PENDING rather than UNKNOWN.
+        response-answered = abap_true.
+        response-status   = 502.
+        response-body     = technical_error_body( ).
 
       WHEN scenario-unanswered.
         " answered = abap_false is the one distinction this interface exists to
@@ -127,6 +149,17 @@ CLASS zjp_cl_transport_fake IMPLEMENTATION.
         && 'unchanged; use a new deliveryId for a corrected snapshot.",'
         && '"correlationId":"00000000-0000-0000-0000-000000000004",'
         && '"retryable":false}}'.
+  ENDMETHOD.
+
+
+  METHOD technical_error_body.
+    " Byte-for-byte the Phase 6.3 deployed response, minus its correlation id,
+    " which is per attempt. Deliberately carries NO exception text: the real
+    " subprocess does not expose one and a fake that did would let a test pass
+    " against a contract the deployed flow does not honour.
+    body = '{"error":{"code":"INTEGRATION_TECHNICAL_ERROR",'
+        && '"message":"A technical error occurred while delivering the order.",'
+        && '"retryable":true}}'.
   ENDMETHOD.
 
 ENDCLASS.

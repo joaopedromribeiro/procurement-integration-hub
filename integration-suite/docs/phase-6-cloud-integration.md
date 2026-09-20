@@ -1,8 +1,8 @@
 # Phase 6 — Cloud Integration as the mediation layer
 
-Status: **Phases 6.1, 6.2 and 6.3 are all SAP Integration Suite runtime-verified.** A real HTTPS request reached a deployed iFlow in a real tenant, was converted, validated against the source contract, and answered with a controlled response carrying the caller's own correlation ID — and an invalid contract was rejected by the schema instead of being answered. **Phase 6.2 added the mapping**: a Graphical Message Mapping turns the validated source into the CAP order contract, with semantic parity against the Phase 5 ABAP mapper and **no Groovy anywhere**. **Phase 6.3 closed the loop**: Cloud Integration now calls the protected CAP `IntegrationService` over OAuth 2.0 client credentials and returns CAP's real receipt, with a `201` create, a `200` idempotent replay, a truthful `409` conflict and a controlled `502` for technical failures. No SAP ABAP object changed and no CAP object changed in any of the three subphases. **Cloud Integration is still not in the real outbound path** — SAP has not been cut over, which is Phase 6.4.
+Status: **Phases 6.1, 6.2, 6.3 and 6.4 are all runtime-verified. Phase 6 is NOT complete** — 6.5, the inbound supplier response, has not started. A real HTTPS request reached a deployed iFlow in a real tenant, was converted, validated against the source contract, and answered with a controlled response carrying the caller's own correlation ID — and an invalid contract was rejected by the schema instead of being answered. **Phase 6.2 added the mapping**: a Graphical Message Mapping turns the validated source into the CAP order contract, with semantic parity against the Phase 5 ABAP mapper and **no Groovy anywhere**. **Phase 6.3 closed the loop**: Cloud Integration now calls the protected CAP `IntegrationService` over OAuth 2.0 client credentials and returns CAP's real receipt, with a `201` create, a `200` idempotent replay, a truthful `409` conflict and a controlled `502` for technical failures. No SAP ABAP object changed and no CAP object changed in any of the three subphases. **Phase 6.4 cut SAP over.** The post-commit coordinator now posts the persisted `PayloadSnapshot` **verbatim** to Cloud Integration over destination `ZJP_CI_ORDER_DELIVERY`, so Integration Suite owns mapping on the **active production path** and the ABAP mapper has left it. Phase 5's direct SAP-to-CAP objects are all preserved as the fallback and the parity reference. **Phase 6 is still not complete**: `PIH_SupplierResponse_v1`, the inbound supplier response, is Phase 6.5 and has not started.
 
-Phase 5 remains the working baseline and the rollback: SAP still posts directly to CAP through `ZJP_CL_OUTBOUND_TRANSPORT` and `ZJP_CAP_BASE`, and nothing in this phase has touched that.
+Phase 5 is no longer the active path, but every one of its objects survives as the rollback and the reference: `ZJP_CL_OUTBOUND_TRANSPORT` and the seam are unchanged and still carry the traffic, destination `ZJP_CAP_BASE` still points at CAP directly and is still exercised by `ZJP_CL_HTTP_TRANSPORT_TEST`, and `ZJP_CL_DLV_SNAPSHOT_READER` and `ZJP_CL_CAP_ORDER_MAPPER` are untouched and still tested.
 
 ---
 
@@ -173,7 +173,7 @@ At the 6.1 checkpoint no mapping existed, and the `VALIDATED` body was a stand-i
 
 **Phase 6.2 is runtime-verified.** The Graphical Message Mapping turns the validated source into the CAP order contract and reaches **semantic parity** with the Phase 5 ABAP mapper. It was proven with a **one-item and a two-item** payload, and it needed **no Groovy**.
 
-Still no SAP cutover, no CAP receiver, no coordinator change, no destination change, and **no deletion of the ABAP mapper** — `ZJP_CL_CAP_ORDER_MAPPER` remains the runtime-verified **parity oracle**, and it stops being the oracle only when CI actually takes over the outbound path in 6.4.
+At this checkpoint there was still no SAP cutover, no CAP receiver, no coordinator change and no destination change, and the ABAP mapper was not deleted — `ZJP_CL_CAP_ORDER_MAPPER` was the runtime-verified **parity oracle** until CI took over the outbound path in 6.4. **Phase 6.4 has since done that**, and the mapper is now kept as the Phase 5 parity reference rather than as the live oracle. It was never deleted.
 
 ### CSRF protection on the HTTPS Sender, and a 403 that never reached the flow
 
@@ -418,19 +418,80 @@ The caller's `X-Correlation-ID` is captured into `PihCorrelationId`, forwarded t
 
 ### What Phase 6.3 does **not** prove
 
-**SAP has not been cut over.** `ZJP_CL_DISPATCH_COORDINATOR` still posts directly to CAP over `ZJP_CAP_BASE`, and every 6.3 run was driven by a test client, not by ABAP. Phase 5 remains the working path and the rollback. The receipt has not been consumed by the coordinator through CI, `PIH_SupplierResponse_v1` does not exist, and no retry or resilience behaviour beyond the platform default was configured or tested.
+**At the 6.3 checkpoint SAP had not been cut over**: `ZJP_CL_DISPATCH_COORDINATOR` still posted directly to CAP over `ZJP_CAP_BASE`, every 6.3 run was driven by a test client rather than by ABAP, and Phase 5 was still the working path. **Phase 6.4 has since cut SAP over**, and Phase 5 is now the rollback rather than the live path. The receipt has not been consumed by the coordinator through CI, `PIH_SupplierResponse_v1` does not exist, and no retry or resilience behaviour beyond the platform default was configured or tested.
 
-## 7. Remaining subphases
+## 7. Phase 6.4 — the SAP cutover, runtime-verified
 
-**6.4** — SAP cutover: a new destination, and the coordinator posts the persisted snapshot to CI. **6.5** — inbound `PIH_SupplierResponse_v1`, which needs `applySupplierResponse` and does not exist yet.
+**SAP now delivers through Cloud Integration.** The post-commit coordinator posts the persisted `PayloadSnapshot` verbatim to `PIH_OrderDelivery_v1`, which maps it and calls the portal. This is the step the whole phase was built toward, and it was done in four checkpoints so that a failure could never be ambiguous about which hop caused it.
 
-## 8. Open items
+### The production flow, end to end
+
+```text
+RAP sendToSupplier                     (inside the order's own LUW, no network)
+  → durable DeliveryIntent + immutable PayloadSnapshot + SHA-256
+  → post-commit coordinator     (transaction A: claim under a lease, COMMIT)
+      → destination ZJP_CI_ORDER_DELIVERY   (host, port 443, TLS, OAuth 2.0; Path Prefix EMPTY)
+      → POST /http/pih/v1/order-deliveries
+          → Integration Suite PIH_OrderDelivery_v1  (validate, map, call CAP)
+              → CAP Supplier Portal                 (ingest, persist, receipt)
+      → receipt returned unchanged through CI
+  → recordDeliveryResult        (transaction B: outcome onto intent and order, COMMIT)
+```
+
+**No RAP behaviour handler performs HTTP, `COMMIT WORK` or `ROLLBACK WORK`**, which is the rule the whole outbox exists to keep. The BDEF, the handlers, the seam `ZJP_IF_OUTBOUND_TRANSPORT` and the adapter `ZJP_CL_OUTBOUND_TRANSPORT` were **not changed by the cutover at all** — the seam needed no new field and no new method, which is ADR-032's fourth decision paying off for the second time.
+
+### What actually changed in ABAP
+
+Only the coordinator's network section and the harness. The coordinator used to reconstruct a DTO and re-shape it into the CAP contract; it now assigns `request-body = row-payload_snapshot` and sends it. Two coordinator-owned constants supply the route `/http/pih/v1/order-deliveries` and `Content-Type: application/json`, because the mapper that used to own every wire concern is no longer on the path.
+
+**`ZJP_CL_DLV_SNAPSHOT_READER` and `ZJP_CL_CAP_ORDER_MAPPER` are unchanged and were not deleted.** They are the Phase 5 fallback and the mapping-parity reference, and test D still exercises them directly — reader, serializer and mapper — on every harness run. They are simply no longer in the active coordinator network path.
+
+**The snapshot is sent verbatim and is never deserialized and re-serialized.** A round trip through the reader and the serializer is byte-identical today, so it would buy nothing, and it would put a transformation back in front of the bytes whose SHA-256 was recorded with the approval. What was approved is what is sent.
+
+**No `Idempotency-Key` is sent.** Delivery identity is the `deliveryId` **in the body**, which is the key of CAP's `Orders` entity and what CAP actually deduplicates on. The header was never the mechanism, and the cutover does not reproduce it.
+
+### Outcome classification, unchanged by the cutover
+
+| Transport result | Intent | Order |
+| --- | --- | --- |
+| `201` created | `DELIVERED` | `APPROVED` → `SENT` |
+| `200` idempotent replay | `DELIVERED` | `APPROVED` → `SENT` |
+| `409` conflict (also 400, 401, 403, 413) | `FAILED` | `ERROR` |
+| unanswered — timeout, DNS, TLS | `UNKNOWN` | `ERROR` |
+| `429`, `502`, `503` retryable | `PENDING` | unchanged |
+| `500` ambiguous | `UNKNOWN` | `ERROR` |
+
+**`classify()` was not modified for the cutover.** The table was written in Phase 5.1 against CAP's status codes and turned out to fit Cloud Integration unchanged, including the `502` that CI's Exception Subprocess emits deliberately. That is worth stating precisely rather than as a success: the fit was **confirmed**, not designed for CI, and it holds because CI passes downstream answers through as themselves (ADR-039) so the codes arriving at ABAP still mean what the table assumed.
+
+### Runtime evidence
+
+**6.4a — connectivity and authorization, in isolation.** A standalone transport probe reached CAP through CI over `ZJP_CI_ORDER_DELIVERY` and returned `201`, proving the SM59 destination, its OAuth 2.0 client-credentials configuration and the ABAP-supplied path before any coordinator code changed.
+
+**6.4b — the production coordinator.** The real coordinator sent the persisted snapshot verbatim through CI.
+
+**6.4c — real `201`, then a real `200` replay.** The full-harness test E returned `HTTP 201` with `FINAL_STATE DELIVERED`, `BUSINESS_STATUS SENT`, `PortalOrderUUID` persisted, the attempt correlation persisted and the lease cleared; the order ended `STATUS SENT` / `INTEGRATION_STATUS DELIVERED`. Test K then replayed **the exact persisted snapshot under the same `deliveryId`** and CAP answered `HTTP 200` with a receipt naming the **same delivery and the same `portalOrderId`**, with the delivered intent untouched. **No new `deliveryId`, no new source order, no second `DeliveryIntent` and no mutation of the immutable snapshot** — which is the whole claim idempotency makes.
+
+**6.4d — real conflict, and the classification branches.** Test L sent the same `deliveryId` with one changed mapped business field, altered **only in a local test copy**, and CI returned CAP's real `HTTP 409 DELIVERY_PAYLOAD_CONFLICT` with the stored order unchanged. The coordinator's own state handling is proven deterministically rather than by damaging real evidence: `409` → `FAILED`/`ERROR` (G), unanswered → `UNKNOWN`/`ERROR` with a fresh correlation per attempt and the delivery identity preserved (H/I), and an **answered `502`** → `PENDING` with the intent returned to `PENDING`, the lease cleared and the order still `APPROVED` (M).
+
+**Why K and L drive the transport directly.** A `DELIVERED` intent is deliberately terminal: `find_eligible` will not return it and `claim` refuses it. Forcing a reclaim would weaken the outbox's own rule to suit a test, so K and L are **transport and portal evidence** while F and G remain the coordinator state-machine evidence. Splitting them that way is what let the real `409` be proven without writing a failure onto a delivery that genuinely succeeded.
+
+### What Phase 6.4 does **not** prove
+
+**Retry and resilience remain unexercised.** The receiver runs on platform-default retry, and nothing has tested a timeout, a transient `5xx`, a redelivery or any bounded retry budget. The `502` evidence is about **classification**, not recovery: it proves the coordinator returns an intent to `PENDING` so a later run *may* pick it up, and separately that CI reports a technical failure cleanly. **Neither is evidence that the platform retries anything**, and the two must not be read as one.
+
+**Nothing returns from the supplier yet.** `PIH_SupplierResponse_v1` does not exist and `applySupplierResponse` has not been written. That is Phase 6.5.
+
+## 8. Remaining subphases
+
+**6.5, and it is the only one left in Phase 6** — inbound `PIH_SupplierResponse_v1`, which needs `applySupplierResponse` and does not exist yet. **NOT STARTED.**
+
+## 9. Open items
 
 - ~~**Header ownership transfer.**~~ **Closed by Phase 6.3, and the premise was wrong.** CI sets `Content-Type` and `X-Correlation-ID` and does **not** send `Idempotency-Key` — yet 6.3b deduplicated and 6.3c conflicted correctly, because `deliveryId` is the key of the `Orders` entity in the body and is what CAP actually deduplicates on. No header ownership needs transferring at cutover.
 - ~~**Receipt shape.**~~ **Closed by Phase 6.3 as recommended.** *Prepare Delivery Receipt Response* sets headers only and leaves CAP's receipt as the body, so CI reshapes nothing and the coordinator's runtime-verified `read_receipt` keeps working unchanged at cutover. Any later reshaping remains a separate decision that would now be a deliberate break.
 - ~~**Exported iFlow artifact.**~~ **Closed.** [`iflows/PIH_OrderDelivery_v1.zip`](../iflows/PIH_OrderDelivery_v1.zip) is a real export and contains the deployed `.iflw`, the source XSD, the OpenAPI target and the `.mmap` mapping. The repository copies under `mappings/` are now extracted from that export rather than derived by hand.
 - **Final inbound security posture, including CSRF.** Phase 6.2 runs with **CSRF protection disabled** on the HTTPS Sender, because an authenticated machine-to-machine POST was rejected with HTTP 403 before reaching the flow while it was enabled. That is the current verified configuration and **not** a declared production posture. The decision to make later: either the caller implements the CSRF token fetch-and-use flow, or the security architecture picks another supported machine-to-machine approach. Belongs with the Phase 8 security work and the 6.4 cutover, not with mapping.
-- **`EA → PCE` will exist in two places** until cutover — ABAP and CI. Acceptable while both run; it needs an explicit end date at 6.4.
-- **Retry and resilience are untested.** Phase 6.3 left the receiver on platform-default retry and introduced no custom behaviour, and nothing exercised a timeout, a transient 5xx or a redelivery. The `502` path proves a technical failure is *reported* cleanly, not that it is *recovered from*. Belongs with 6.4, where the coordinator's retry semantics meet CI's.
-- **The `502` contract is CI's alone.** `INTEGRATION_TECHNICAL_ERROR` with `retryable: true` is not yet mapped to anything in the coordinator's Section 6.4 receipt classification, which was written against CAP's status codes. 6.4 must decide how an unanswered-versus-502 distinction is classified, since both mean *the portal may or may not have the order*.
-- **Cutover consequence worth planning for now:** once CI owns mapping, the coordinator posts the persisted snapshot **verbatim**, so both `ZJP_CL_DLV_SNAPSHOT_READER` and `ZJP_CL_CAP_ORDER_MAPPER` leave the outbound path entirely. That is ADR-032's two-hop split paying off exactly as designed, and it makes 6.4 a smaller change than it looks.
+- ~~**`EA → PCE` will exist in two places**~~ **Resolved by the 6.4 cutover.** Only Cloud Integration performs the mapping on the active path now. `ZJP_CL_CAP_ORDER_MAPPER` still contains the rule, but as a **reference exercised by tests**, not as a second live implementation, so the divergence risk that needed an end date is gone.
+- **Retry and resilience are still untested, and 6.4 did not change that.** The receiver remains on platform-default retry with no custom behaviour, and nothing has exercised a timeout, a transient `5xx` or a redelivery. What 6.4 added is **classification** evidence: an answered `502` returns the intent to `PENDING` with the lease cleared. **Returning an intent to `PENDING` is not a retry** — no component has yet been shown to pick it up again, and `retryDelivery` does not exist. Keep the two apart when reading this row.
+- ~~**The `502` contract is CI's alone.**~~ **Closed by Phase 6.4d.** The coordinator classifies an **answered** `502` as `PENDING` and an **unanswered** call as `UNKNOWN`, and the distinction holds because the seam reports `answered` and `status` separately rather than a single success flag. `classify()` needed no change. The remaining question was never classification but recovery, which is the retry row above.
+- ~~**Cutover consequence worth planning for now**~~ **Done, and it was as small as predicted.** The coordinator posts the persisted snapshot verbatim and both `ZJP_CL_DLV_SNAPSHOT_READER` and `ZJP_CL_CAP_ORDER_MAPPER` left the outbound path, with the seam and the transport adapter unchanged. ADR-032's two-hop split is what made a cutover of this size possible.

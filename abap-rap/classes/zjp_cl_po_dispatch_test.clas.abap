@@ -130,6 +130,41 @@ CLASS zjp_cl_po_dispatch_test DEFINITION
     METHODS test_h_unanswered_and_corr
       RETURNING VALUE(success) TYPE abap_bool.
 
+    " ---- Phase 6.4c / 6.4d ----
+
+    " Test E's delivery, remembered so K and L can replay the SAME persisted
+    " snapshot. They deliberately do NOT create their own fixture: the whole
+    " point is that a replay needs no new deliveryId and no second intent.
+    DATA e_delivery_uuid TYPE sysuuid_x16.
+
+    " The CI route and content type, the same two values the coordinator owns.
+    " Duplicated here rather than exposed from the coordinator, because making
+    " them public purely for a test would widen a production API for no
+    " production reason.
+    CONSTANTS ci_delivery_path TYPE string VALUE '/http/pih/v1/order-deliveries'.
+    CONSTANTS content_type     TYPE string VALUE 'application/json'.
+
+    " P5, SAP-verified, the same conversion the coordinator uses.
+    METHODS uuid_text
+      IMPORTING uuid        TYPE sysuuid_x16
+      RETURNING VALUE(text) TYPE string.
+
+    " Builds the CI request the coordinator would build, for a body supplied by
+    " the caller. Content-Type and a FRESH X-Correlation-ID, and deliberately no
+    " Idempotency-Key: Phase 6.3 proved CAP deduplicates on the body deliveryId.
+    METHODS ci_request
+      IMPORTING body            TYPE string
+      RETURNING VALUE(request)  TYPE zjp_if_outbound_transport=>ty_request.
+
+    METHODS test_k_real_replay
+      RETURNING VALUE(success) TYPE abap_bool.
+
+    METHODS test_l_real_conflict
+      RETURNING VALUE(success) TYPE abap_bool.
+
+    METHODS test_m_retryable_pending
+      RETURNING VALUE(success) TYPE abap_bool.
+
 ENDCLASS.
 
 
@@ -162,6 +197,15 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
       RETURN.
     ENDIF.
     IF test_h_unanswered_and_corr( ) = abap_false.
+      RETURN.
+    ENDIF.
+    IF test_k_real_replay( ) = abap_false.
+      RETURN.
+    ENDIF.
+    IF test_l_real_conflict( ) = abap_false.
+      RETURN.
+    ENDIF.
+    IF test_m_retryable_pending( ) = abap_false.
       RETURN.
     ENDIF.
 
@@ -573,6 +617,9 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
     DATA(outcome) = coordinator->run_once( fixture-delivery_uuid ).
     console->write( name = 'E outcome' data = outcome ).
 
+    " Remembered for K and L, which replay THIS delivery rather than making one.
+    e_delivery_uuid = fixture-delivery_uuid.
+
     IF outcome-claimed = abap_false OR outcome-dispatched = abap_false.
       stop( |E did not dispatch; reason { outcome-skip_reason }| ).
       RETURN.
@@ -860,6 +907,308 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
     ENDIF.
 
     console->write( 'PASS: I - new correlation per attempt, delivery identity unchanged.' ).
+
+    success = abap_true.
+
+  ENDMETHOD.
+
+
+  METHOD uuid_text.
+    " P5, SAP-verified. On this target the C36 form comes back UPPERCASE.
+    DATA uuid_c36 TYPE sysuuid_c36.
+
+    cl_system_uuid=>convert_uuid_x16_static(
+      EXPORTING uuid     = uuid
+      IMPORTING uuid_c36 = uuid_c36 ).
+
+    text = uuid_c36.
+  ENDMETHOD.
+
+
+  METHOD ci_request.
+
+    " A FRESH correlation id per attempt, exactly as the coordinator mints one.
+    " P14, SAP-verified.
+    DATA(correlation) = cl_system_uuid=>create_uuid_x16_static( ).
+
+    request-path = ci_delivery_path.
+    request-body = body.
+
+    request-headers = VALUE #(
+      ( name = 'Content-Type'     value = content_type )
+      ( name = 'X-Correlation-ID' value = uuid_text( correlation ) ) ).
+
+  ENDMETHOD.
+
+
+  METHOD test_k_real_replay.
+
+    " ---------- K: REAL 200 idempotent replay through Integration Suite -------
+    " Phase 6.4c. E proved a real 201; this proves the SAME persisted delivery
+    " can be sent again through the same hop and CAP answers 200 instead of
+    " creating a second order.
+    "
+    " WHY THIS BYPASSES THE COORDINATOR. E left the intent DELIVERED, which is
+    " deliberately TERMINAL: find_eligible will not return it and claim will
+    " refuse it. Forcing a reclaim would mean weakening the outbox's own rule to
+    " suit a test, so this test drives the PRODUCTION TRANSPORT directly with the
+    " PERSISTED body. It is transport and portal evidence, not coordinator
+    " state-machine evidence - F already covers the latter, deterministically.
+    success = abap_false.
+    console->write( '' ).
+    console->write( '--- K: REAL 200 idempotent replay through Integration Suite ---' ).
+
+    IF e_delivery_uuid IS INITIAL.
+      stop( 'K has no delivery from E to replay.' ).
+      RETURN.
+    ENDIF.
+
+    DATA(before) = intent_row( e_delivery_uuid ).
+
+    IF before-dispatch_state <> 'DELIVERED'.
+      stop( |K expected E's intent to be DELIVERED, found { before-dispatch_state }| ).
+      RETURN.
+    ENDIF.
+    IF before-payload_snapshot IS INITIAL.
+      stop( 'K found no persisted payload snapshot to replay.' ).
+      RETURN.
+    ENDIF.
+    IF before-portal_order_uuid IS INITIAL.
+      stop( 'K found no persisted portalOrderId from E.' ).
+      RETURN.
+    ENDIF.
+
+    " VERBATIM. Not read, not re-serialized, not reformatted - the exact bytes
+    " whose SHA-256 was recorded with the approval. Any transformation here
+    " would change the hash CAP compares and turn this into an accidental 409.
+    DATA real_transport TYPE REF TO zjp_if_outbound_transport.
+    real_transport = NEW zjp_cl_outbound_transport( destination_name = destination ).
+
+    DATA(response) = real_transport->post( ci_request( before-payload_snapshot ) ).
+
+    console->write( name = 'K status' data = response-status ).
+    console->write( name = 'K body'   data = response-body ).
+
+    IF response-answered = abap_false.
+      console->write( name = 'K failure text' data = response-failure_text ).
+      stop( 'Integration Suite did not answer the replay.' ).
+      RETURN.
+    ENDIF.
+    IF response-status <> 200.
+      stop( |K expected HTTP 200 for an exact replay, got { response-status }| ).
+      RETURN.
+    ENDIF.
+
+    " Identity assertions without a second JSON parser. The coordinator's
+    " read_receipt is private and duplicating it here would be a parser written
+    " for a test; a containment check on the canonical ids answers the only two
+    " questions K asks. CAP emits them LOWERCASE while this target's C36
+    " conversion yields UPPERCASE, which is the Phase 5.2g finding - so the
+    " comparison is made in one case deliberately, not casually.
+    DATA(delivery_text) = uuid_text( e_delivery_uuid ).
+    DATA(portal_text)   = uuid_text( before-portal_order_uuid ).
+    TRANSLATE delivery_text TO LOWER CASE.
+    TRANSLATE portal_text   TO LOWER CASE.
+
+    DATA(body_lower) = response-body.
+    TRANSLATE body_lower TO LOWER CASE.
+
+    IF body_lower NS delivery_text.
+      stop( 'the replay receipt does not carry the same deliveryId.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: K1 - the replay receipt names the SAME delivery.' ).
+
+    IF body_lower NS portal_text.
+      stop( 'the replay receipt names a DIFFERENT portal order - a duplicate was created.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: K2 - the replay receipt names the SAME portal order; no duplicate.' ).
+
+    " The replay must not have disturbed the durable evidence.
+    DATA(after) = intent_row( e_delivery_uuid ).
+    IF after-payload_snapshot <> before-payload_snapshot
+       OR after-payload_hash <> before-payload_hash
+       OR after-portal_order_uuid <> before-portal_order_uuid
+       OR after-dispatch_state <> before-dispatch_state.
+      stop( 'the replay changed the persisted intent.' ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: K - real 200 replay, same delivery, same portal order, intent untouched.' ).
+
+    success = abap_true.
+
+  ENDMETHOD.
+
+
+  METHOD test_l_real_conflict.
+
+    " ---------- L: REAL 409 payload conflict through Integration Suite -------
+    " Phase 6.4d-1. Same deliveryId, one changed mapped business field, valid
+    " against the source XSD. CAP compares a hash that covers the line's product
+    " code, so this must come back 409 DELIVERY_PAYLOAD_CONFLICT.
+    "
+    " TRANSPORT EVIDENCE ONLY. The 409 is deliberately NOT fed back into the
+    " intent: E's delivery is DELIVERED and correct, and writing a failure onto
+    " it to satisfy a test would corrupt real evidence. G already proves the
+    " coordinator turns a 409 into FAILED / ERROR, deterministically.
+    success = abap_false.
+    console->write( '' ).
+    console->write( '--- L: REAL 409 payload conflict through Integration Suite ---' ).
+
+    IF e_delivery_uuid IS INITIAL.
+      stop( 'L has no delivery from E to conflict with.' ).
+      RETURN.
+    ENDIF.
+
+    DATA(before) = intent_row( e_delivery_uuid ).
+    IF before-payload_snapshot IS INITIAL.
+      stop( 'L found no persisted payload snapshot.' ).
+      RETURN.
+    ENDIF.
+
+    " A LOCAL COPY. The persisted snapshot is immutable and nothing here writes
+    " to the database. make_fixture always builds its item with MAT001, and the
+    " material reaches CAP as the line product code, which IS part of the hash
+    " CAP compares - so this is a change that must be noticed rather than a
+    " field that happens to be ignored.
+    DATA(altered) = before-payload_snapshot.
+
+    REPLACE FIRST OCCURRENCE OF '"material":"MAT001"'
+      IN altered WITH '"material":"MAT999"'.
+
+    " If the anchor ever stops matching, the body would go out IDENTICAL and CAP
+    " would answer 200 - a pass that proves the opposite of what L claims. Fail
+    " loudly instead.
+    IF sy-subrc <> 0 OR altered = before-payload_snapshot.
+      stop( 'L could not alter the local copy; the material anchor did not match.' ).
+      RETURN.
+    ENDIF.
+
+    DATA real_transport TYPE REF TO zjp_if_outbound_transport.
+    real_transport = NEW zjp_cl_outbound_transport( destination_name = destination ).
+
+    DATA(response) = real_transport->post( ci_request( altered ) ).
+
+    console->write( name = 'L status' data = response-status ).
+    console->write( name = 'L body'   data = response-body ).
+
+    IF response-answered = abap_false.
+      console->write( name = 'L failure text' data = response-failure_text ).
+      stop( 'Integration Suite did not answer the conflicting replay.' ).
+      RETURN.
+    ENDIF.
+    IF response-status <> 409.
+      stop( |L expected HTTP 409 for changed content, got { response-status }| ).
+      RETURN.
+    ENDIF.
+    IF response-body NS 'DELIVERY_PAYLOAD_CONFLICT'.
+      stop( 'L got a 409 without the DELIVERY_PAYLOAD_CONFLICT code.' ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: L1 - real 409 DELIVERY_PAYLOAD_CONFLICT through Integration Suite.' ).
+
+    " The stored order must be unchanged, which is the whole promise of the 409.
+    DATA(after) = intent_row( e_delivery_uuid ).
+    IF after-payload_snapshot <> before-payload_snapshot
+       OR after-payload_hash <> before-payload_hash
+       OR after-portal_order_uuid <> before-portal_order_uuid
+       OR after-dispatch_state <> 'DELIVERED'.
+      stop( 'the conflicting replay disturbed the persisted intent.' ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: L - conflict refused, E''s delivered intent untouched.' ).
+
+    success = abap_true.
+
+  ENDMETHOD.
+
+
+  METHOD test_m_retryable_pending.
+
+    " ---------- M: retryable 502 returns the intent to PENDING ----------
+    " Phase 6.4d-3, and the one classification branch nothing had ever reached.
+    " Deterministic on purpose: Phase 6.3 already proved the DEPLOYED iFlow emits
+    " this exact controlled 502 from its Exception Subprocess, so breaking the
+    " receiver route again would re-prove Cloud Integration rather than prove the
+    " coordinator.
+    "
+    " The distinction being tested is not "did it fail" but WHICH failure. 502 is
+    " ANSWERED and retryable, so the intent must go back to PENDING for a later
+    " run and the ORDER MUST NOT MOVE - unlike a 409, which is FAILED and drives
+    " the order to ERROR.
+    success = abap_false.
+    console->write( '' ).
+    console->write( '--- M: retryable 502 returns intent to PENDING ---' ).
+
+    DATA(fixture) = make_fixture( 'RTTEST001' ).
+    IF fixture-delivery_uuid IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    DATA retry_transport TYPE REF TO zjp_if_outbound_transport.
+    retry_transport = NEW zjp_cl_transport_fake(
+      for_scenario = zjp_cl_transport_fake=>scenario-retryable ).
+
+    DATA(coordinator) = NEW zjp_cl_dispatch_coordinator(
+      transport     = retry_transport
+      lease_seconds = lease_seconds ).
+
+    DATA(outcome) = coordinator->run_once( fixture-delivery_uuid ).
+    console->write( name = 'M outcome' data = outcome ).
+
+    IF outcome-claimed = abap_false OR outcome-dispatched = abap_false.
+      stop( |M did not dispatch; reason { outcome-skip_reason }| ).
+      RETURN.
+    ENDIF.
+    IF outcome-answered = abap_false.
+      stop( 'M expected an ANSWERED 502, not an unanswered call.' ).
+      RETURN.
+    ENDIF.
+    IF outcome-http_status <> 502.
+      stop( |M expected HTTP 502, got { outcome-http_status }| ).
+      RETURN.
+    ENDIF.
+    IF outcome-final_state <> 'PENDING'.
+      stop( |M expected FINAL_STATE PENDING, got { outcome-final_state }| ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: M1 - an answered 502 classifies as PENDING, not UNKNOWN.' ).
+
+    DATA(intent) = intent_row( fixture-delivery_uuid ).
+    DATA(header) = header_row( fixture-order_uuid ).
+    console->write( name = 'M intent' data = intent ).
+    console->write( name = 'M header' data = header ).
+
+    IF intent-dispatch_state <> 'PENDING'.
+      stop( |a retryable 502 left DispatchState { intent-dispatch_state }| ).
+      RETURN.
+    ENDIF.
+
+    " A retryable intent that still advertises a lease can never be picked up.
+    IF intent-lease_owner IS NOT INITIAL OR intent-lease_expires_at IS NOT INITIAL.
+      stop( 'a PENDING intent still holds a lease; it could never be retried.' ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: M2 - intent back to PENDING with the lease cleared.' ).
+
+    " The order must be untouched. A retryable technical failure is not a
+    " business outcome: it is neither a delivery nor a refusal.
+    IF header-status = 'SENT'.
+      stop( 'a retryable 502 wrongly marked the order SENT.' ).
+      RETURN.
+    ENDIF.
+    IF header-status <> 'APPROVED'.
+      stop( |a retryable 502 moved the order to { header-status }| ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: M - 502 is retryable: intent PENDING, order still APPROVED.' ).
 
     success = abap_true.
 
