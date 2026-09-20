@@ -1,9 +1,11 @@
-" Phase 5.2g - the coordinator harness, object 11 of the Phase 5.1 section 10
-" inventory: "the coordinator, run explicitly; claim, dispatch, record, commit".
-" Reserved for this purpose since Phase 5.2c and used for it now.
+" The coordinator harness, object 11 of the Phase 5.1 section 10 inventory:
+" "the coordinator, run explicitly; claim, dispatch, record, commit". Reserved
+" for this purpose since Phase 5.2c, built in Phase 5.2g, and cut over to
+" Integration Suite in Phase 6.4.
 "
-" *** THIS CLASS MAKES REAL NETWORK CALLS. Test E posts to the deployed CAP
-" *** portal over destination ZJP_CAP_BASE and creates a real order there.
+" *** THIS CLASS MAKES REAL NETWORK CALLS. Test E posts through Integration Suite
+" *** over destination ZJP_CI_ORDER_DELIVERY and reaches the CAP Supplier Portal
+" *** downstream.
 " *** Every other test drives the deterministic fake and touches no network.
 " *** Nothing here runs unless you press F9 deliberately.
 "
@@ -30,9 +32,13 @@ CLASS zjp_cl_po_dispatch_test DEFINITION
 
     DATA console TYPE REF TO if_oo_adt_classrun_out.
 
-    " The base destination proven by Phase 5.2e. Host, port, TLS and OAuth live
-    " there; the route comes from the mapper.
-    CONSTANTS destination TYPE rfcdest VALUE 'ZJP_CAP_BASE'.
+    " The Integration Suite destination. Host, port 443, TLS and OAuth 2.0 client
+    " credentials live there, and its Path Prefix is EMPTY so that the coordinator
+    " supplies the whole application route.
+    "
+    " ZJP_CL_HTTP_TRANSPORT_TEST remains the Phase 5 direct-to-CAP harness and
+    " keeps that path runnable and verifiable alongside this one.
+    CONSTANTS destination TYPE rfcdest VALUE 'ZJP_CI_ORDER_DELIVERY'.
 
     " An INJECTED test value, not a production timeout. Phase 5.2g introduces no
     " lease default and no configuration object.
@@ -133,9 +139,9 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
 
     console = out.
 
-    out->write( '=== Phase 5.2g - dispatch coordinator ===' ).
-    out->write( '*** TEST E MAKES A REAL HTTP POST to the deployed CAP portal ***' ).
-    out->write( |*** over destination { destination }, and creates a real order there. ***| ).
+    out->write( '=== Phase 6.4 - dispatch coordinator through Integration Suite ===' ).
+    out->write( '*** TEST E MAKES A REAL HTTP POST through Integration Suite ***' ).
+    out->write( |*** over destination { destination }, reaching the CAP portal downstream. ***| ).
     out->write( '*** Tests A-D and F-J use the network-free fake. ***' ).
     out->write( |Injected lease_seconds = { lease_seconds } (test value, not a default).| ).
     out->write( '' ).
@@ -160,7 +166,7 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
     ENDIF.
 
     out->write( '' ).
-    out->write( 'PASS: Phase 5.2g dispatch coordinator verified.' ).
+    out->write( 'PASS: Phase 6.4 dispatch coordinator through Integration Suite verified.' ).
 
   ENDMETHOD.
 
@@ -531,8 +537,15 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
 
     success = abap_false.
     console->write( '' ).
-    console->write( '--- E: REAL HTTP delivery (this contacts the deployed portal) ---' ).
+    console->write( '--- E: REAL HTTP delivery through Integration Suite ---' ).
 
+    " PHASE 6.4b: the assertions below are UNCHANGED, and that is the point of
+    " this test after the cutover. The same fixture must still produce a 201, a
+    " DELIVERED intent, an APPROVED -> SENT order, a stored portalOrderId and a
+    " persisted attempt correlation id - only the hop in the middle is different,
+    " because CI returns CAP's receipt contract unchanged. A changed assertion
+    " here would mean the cutover altered the outcome contract, which it must not.
+    "
     " RTTEST001, NOT an invented supplier and not a production one. The first
     " real run used SUP041 and the deployed portal answered HTTP 400
     " UNKNOWN_SUPPLIER: "supplierCode SUP041 is not an active supplier in this
@@ -569,7 +582,7 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
     " first ingestion and CAP answers 201 rather than a replay 200.
     IF outcome-answered = abap_false.
       console->write( name = 'E failure text' data = outcome-error_text ).
-      stop( 'the portal did not answer; check the destination and OAuth.' ).
+      stop( 'Integration Suite did not answer; check the destination and OAuth.' ).
       RETURN.
     ENDIF.
     IF outcome-http_status <> 201.
@@ -613,7 +626,7 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
       RETURN.
     ENDIF.
 
-    console->write( 'PASS: E - real 201, intent DELIVERED, order SENT, receipt stored.' ).
+    console->write( 'PASS: E - real 201 via Integration Suite, intent DELIVERED, order SENT, receipt stored.' ).
 
     success = abap_true.
 

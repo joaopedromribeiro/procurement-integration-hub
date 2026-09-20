@@ -146,6 +146,20 @@ CLASS zjp_cl_dispatch_coordinator DEFINITION
 
   PRIVATE SECTION.
 
+    " The Integration Suite route, owned here since Phase 6.4b because the
+    " mapper that used to own it is no longer on this path. Deliberately a
+    " constant and not a constructor parameter: Phase 5.2g introduced no
+    " configuration object and this phase introduces none either, so the route
+    " sits where ZJP_CL_CAP_ORDER_MAPPER's ingestion_path always sat. The
+    " path-less destination supplies everything else.
+    "
+    " SM59 destination ZJP_CI_ORDER_DELIVERY, runtime-verified in Phase 6.4a,
+    " carries the Integration Suite host, port 443, TLS and OAuth 2.0 client
+    " credentials, with its Path Prefix EMPTY so that this value is the whole
+    " application route.
+    CONSTANTS ci_delivery_path TYPE string VALUE '/http/pih/v1/order-deliveries'.
+    CONSTANTS content_type     TYPE string VALUE 'application/json'.
+
     DATA transport     TYPE REF TO zjp_if_outbound_transport.
     DATA lease_seconds TYPE i.
     DATA run_uuid      TYPE sysuuid_x16.
@@ -623,28 +637,38 @@ CLASS zjp_cl_dispatch_coordinator IMPLEMENTATION.
 
     " ---------- NETWORK ----------
     " No database work from here until transaction B.
+    "
+    " PHASE 6.4b CUTOVER. The persisted snapshot now goes on the wire VERBATIM.
+    "
+    " Until 6.4a this section reconstructed a DTO with ZJP_CL_DLV_SNAPSHOT_READER
+    " and re-shaped it into the CAP contract with ZJP_CL_CAP_ORDER_MAPPER. Both
+    " still exist, are unchanged, and remain SAP runtime-verified - they are the
+    " Phase 5 fallback and the mapping-parity reference, and ZJP_CL_PO_DISPATCH_TEST
+    " test D still exercises them directly. They are simply no longer on this path.
+    "
+    " This is ADR-032's two-hop split paying off rather than a shortcut. The
+    " snapshot was deliberately frozen as the SOURCE ORDER DELIVERY in SAP-native
+    " values, precisely so that it would outlive the endpoint; Cloud Integration
+    " now owns the mapping hop that Phase 5 had to perform here. The snapshot's
+    " member set is the CI source contract, so no adaptation is correct here -
+    " and any adaptation would be a second, divergent mapping of a payload whose
+    " whole purpose is to be immutable.
+    "
+    " DO NOT deserialize and re-serialize the snapshot "to be safe". A round trip
+    " through the reader and ZJP_CL_DLV_SNAPSHOT_JSON is byte-identical today, so
+    " it would buy nothing, and it would put a transformation back in the path
+    " that could drift from the bytes whose SHA-256 was recorded with the
+    " approval. What was approved is what is sent.
 
-    " The persisted snapshot, not a rebuilt one.
-    DATA(read_result) = NEW zjp_cl_dlv_snapshot_reader( )->read( row-payload_snapshot ).
-
-    IF read_result-success = abap_false.
-      " Nothing was sent, so nothing can have been delivered. A snapshot that
-      " cannot be read will not become readable on a retry, so this is FAILED
-      " rather than UNKNOWN.
-      outcome-final_state = state-failed.
-      outcome-error_code  = read_result-error_code.
-      outcome-error_text  = read_result-error_text.
-      outcome-business_status = business_status_for( outcome-final_state ).
-      record( EXPORTING row = row CHANGING outcome = outcome ).
-      RETURN.
-    ENDIF.
-
-    DATA(map_result) = NEW zjp_cl_cap_order_mapper( )->map( read_result-delivery ).
-
-    IF map_result-success = abap_false.
-      outcome-final_state = state-failed.
-      outcome-error_code  = map_result-error_code.
-      outcome-error_text  = map_result-error_text.
+    " Nothing was sent, so nothing can have been delivered. An intent with no
+    " snapshot will not grow one on a retry, so this is FAILED rather than
+    " UNKNOWN - the same reasoning the reader's failure branch used before the
+    " cutover, kept because removing the reader must not silently turn a
+    " definite non-delivery into an ambiguous one.
+    IF row-payload_snapshot IS INITIAL.
+      outcome-final_state     = state-failed.
+      outcome-error_code      = 'EMPTY_SNAPSHOT'.
+      outcome-error_text      = 'The persisted PayloadSnapshot is empty; nothing was sent.'.
       outcome-business_status = business_status_for( outcome-final_state ).
       record( EXPORTING row = row CHANGING outcome = outcome ).
       RETURN.
@@ -652,17 +676,28 @@ CLASS zjp_cl_dispatch_coordinator IMPLEMENTATION.
 
     " A FRESH correlation id for THIS attempt. The delivery identity is
     " untouched: "a retry may get a new correlation ID while preserving the
-    " business delivery ID".
+    " business delivery ID". Unchanged by the cutover - CI propagates this value
+    " and mints nothing, so attempt identity still belongs to this coordinator.
     outcome-correlation_uuid = cl_system_uuid=>create_uuid_x16_static( ).
 
-    DATA(request) = map_result-request.
+    " The mapper used to own every wire concern, so with it off the path the
+    " route and the content type move here, to the one object that now knows
+    " where a delivery is sent. The destination still owns host, port, TLS and
+    " OAuth and carries NO path, exactly as P15 settled in Phase 5.2e, so the
+    " seam and the transport adapter needed no change at all for this cutover.
+    "
+    " NO Idempotency-Key. Phase 6.3 proved CAP deduplicates on the deliveryId in
+    " the BODY - integration-service.cds calls it the "Idempotency-Key
+    " equivalent" - and that CI never sends the header. Adding one here would
+    " ship a header nothing reads.
+    DATA request TYPE zjp_if_outbound_transport=>ty_request.
 
-    " Content-Type and Idempotency-Key are already set by the mapper, which owns
-    " every wire concern. The correlation header is the coordinator's, because
-    " it identifies an attempt rather than a message.
-    APPEND VALUE #( name  = 'X-Correlation-ID'
-                    value = uuid_text( outcome-correlation_uuid ) )
-      TO request-headers.
+    request-path = ci_delivery_path.
+    request-body = row-payload_snapshot.
+
+    request-headers = VALUE #(
+      ( name = 'Content-Type'     value = content_type )
+      ( name = 'X-Correlation-ID' value = uuid_text( outcome-correlation_uuid ) ) ).
 
     outcome-dispatched = abap_true.
 
