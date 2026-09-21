@@ -4,10 +4,12 @@ Phase 7 makes the bidirectional integration proven in Phase 6 operationally robu
 
 **Subphase 7.1 is frozen design. No executable source was changed by it.** This document is that freeze: the fault model, the four failure categories, the CSRF investigation, the timeout reconciliation, and the terminology and direction decisions that subphases 7.2 through 7.9 must hold to.
 
+**Subphase 7.2 is COMPLETE and runtime-verified**, executed 2026-09-21 against the deployed droplet, the deployed `PIH_SupplierResponse_v1` and the real SAP system, with all nine acceptance criteria satisfied and no repository code changed. Its result and evidence are recorded in the Phase 7.2 section below. **Subphase 7.3, attempt history, is next and has not started.**
+
 | Subphase | Objective | State |
 | --- | --- | --- |
 | **7.1** | Fault model and acceptance criteria | **frozen — this document** |
-| 7.2 | Runtime-proven `UNKNOWN` and reconciliation, via a deterministic injected state-machine-facing unanswered observation over a real send | designed, not executed |
+| **7.2** | Runtime-proven `UNKNOWN` and reconciliation, via a deterministic injected state-machine-facing unanswered observation over a real send | **COMPLETE — runtime-verified 2026-09-21** |
 | 7.3 | Attempt history | designed, not implemented |
 | 7.4 | Retry / transient failure policy | designed, not implemented |
 | 7.5 | Inbound concurrency hardening | designed, not implemented |
@@ -589,12 +591,170 @@ The following are **procedural gates, not business-state criteria**, and must no
 - Cloud Integration evidence confirms that the execution the task produced reached `applySupplierResponse` — **at Tier 2** (temporary Trace, correlation **A** read directly) or, if Trace is declined, **at Tier 1** (uniqueness of window plus `COMPLETED`, recorded as **inference**);
 - reconciliation is forbidden until every one of those gates has passed.
 
+### Phase 7.2 runtime result — COMPLETE
+
+**Executed 2026-09-21 against the deployed droplet, the deployed `PIH_SupplierResponse_v1` and the real SAP system.** No repository code was changed, nothing was deployed, and no SAP, CAP or Integration Suite artifact was modified to make it pass.
+
+The claim this run earns, and nothing wider:
+
+> **Runtime-proven `UNKNOWN` and reconciliation via a deterministic injected state-machine-facing unanswered observation over a real CAP → Cloud Integration → SAP send.**
+
+#### The fixture
+
+| | |
+| --- | --- |
+| External order | `PO00000123` |
+| CAP `portalOrderId` | `ed267da7-83e2-4a38-8cb3-dfe095f7a5fc` |
+| SAP order UUID | `37FC3FA8-EB2D-1FD1-ACF8-86475DCE323D` |
+| Delivery UUID | `37FC3FA8-EB2D-1FD1-ACF8-86475DCFD23D` |
+| Supplier | `RTTEST001` |
+| Decision | `ACCEPTED`, `2026-12-15` |
+| `responseId` | `a1bd862a-573f-461e-b337-5e39aa595a61` |
+
+**`PO00000123` was used only after its CAP and SAP identity and baseline were independently revalidated** — see the abandoned `PO00000121` diagnostic below for why that revalidation was not a formality. CAP precheck: `status RECEIVED`, `responseVersion 0`, `supplierCode RTTEST001`, `supplierActive true`, `responseRows 0`, and **`PENDING_TOTAL 0`**. The SAP `ZJP_PO_DLV` intent was checked directly and its `PORTAL_ORDER_UUID` `ED267DA783E24A388CB3DFE095F7A5FC` matches the CAP `portalOrderId` exactly under canonical formatting, with `DISPATCH_STATE DELIVERED`.
+
+SAP baseline before the decision: `Status SENT`, `SupplierResponse ""`, `EstimatedDeliveryDate null`, `SupplierRespondedAt null`, `LastResponseId 00000000-0000-0000-0000-000000000000`, `LastResponseVersion 0`.
+
+```
+L0 = 2026-09-19T00:51:08.288116Z
+```
+
+#### The decision and the safety gate
+
+The decision committed through the deployed `SupplierService`: `status ACCEPTED`, `responseVersion 1`, `respondedAt 2026-09-21T16:04:53.736Z`, `responseDeliveryStatus PENDING`. The durable row was `state PENDING`, `attempts 0`, `lastCorrelationId null`, `v1`, `dec ACCEPTED`, with `PENDING_TOTAL 1`.
+
+Both parts of the 7.1 safety gate passed. Part B — the normal-deadline dry run — selected **exactly** `a1bd862a-…` and reported `scanned 1 … skipped 1`, exit `0`.
+
+#### The single real send, and the injected observation
+
+`PIH_CI_TIMEOUT_MS` was **unset for the task process only**; no application environment was mutated, and `readCiConfig` resolved the normal deadline. The task reported `CONFIG timeoutMs=30000 path=/http/pih/v1/supplier-responses`.
+
+| Observation | Value |
+| --- | --- |
+| Correlation **A** | `d57bf9b0-9f22-46b8-818e-87234115c75e` |
+| Flush result | `scanned=1 delivered=0 failed=0 pending=0 unknown=1 skipped=0` **`sends=1`** |
+| Row immediately after `record()` | `state UNKNOWN`, `attempts 1`, `corr A` |
+| **Retained real transport settlement** | **`answered=true`, `status=204`** |
+| Row re-read after that settlement | `state UNKNOWN`, `attempts 1`, `corr A` — **unchanged** |
+| Gate | `REAL_SEND_GATE PASS`, exit `0` |
+
+`sends=1` is the machine-checked proof that the real `HttpResponseTransport.send` was invoked **exactly once**. The row remaining `UNKNOWN` after the `204` settled is the proof that the eventual success could not, and did not, move the durable state by itself — the only writer is `record()`, driven by the value the composite returned.
+
+#### Cloud Integration evidence — Tier 1
+
+Exactly one relevant `PIH_SupplierResponse_v1` message existed in the execution window:
+
+| Field | Value |
+| --- | --- |
+| `StartTime` | `Mon Sep 21 16:09:04.230 UTC 2026` |
+| `StopTime` | `Mon Sep 21 16:09:05.642 UTC 2026` |
+| `OverallStatus` | `COMPLETED` |
+| `MessageGuid` | `AGqxVqAxtbJ2F-jLgG_R2m19ILXd` |
+| `ContextName` | `PIH_SupplierResponse_v1` |
+| `TransactionId` | `3b7800a537f8404996dc50778f90a578` |
+| `IntermediateError` | `false` |
+| `LogLevel` | **`INFO`** |
+
+**This is Tier-1 execution-window evidence, and its limits are stated rather than glossed.** The message carries a Cloud Integration `CorrelationId` of `AGqxVqA416DICAQJfhQtlzAAGf7F`. **That is a CPI-internal identifier and it is NOT equal to the application `X-Correlation-ID`, correlation A.** No claim of equality is made anywhere. Custom correlation indexing is Phase 7.7 work and has not happened.
+
+**Trace was not enabled and was not required for this run.** `LogLevel INFO` above records that. Tier 2 was therefore not used, and the association between correlation **A** and this message rests on the execution window, the correct iFlow, exactly one relevant execution, `COMPLETED` status, and the real transport's own `HTTP 204` — an evidence chain, not a direct correlation read.
+
+#### SAP after the first real send
+
+`Status SENT`, `SupplierResponse ACCEPTED`, `EstimatedDeliveryDate 2026-12-15`, `SupplierRespondedAt 2026-09-21T16:04:53Z`, `LastResponseId a1bd862a-573f-461e-b337-5e39aa595a61`, **`LastResponseVersion 1`**.
+
+```
+L1 = 2026-09-21T16:09:00.120564Z        L0 → L1 changed
+```
+
+The first real delivery applied the business response, which is the strong branch the design aimed for.
+
+#### Reconciliation
+
+The **deployed** reconciliation command replayed the same durable `responseId` at the normal deadline: *"Replaying `a1bd862a-…` v1 ACCEPTED (attempt 2)"* → `DELIVERED`, `HTTP 204`, *"Resolved: SAP holds this response."*, exit `0`.
+
+```
+A = d57bf9b0-9f22-46b8-818e-87234115c75e
+B = e4159f7c-1007-49b5-93b3-0fb9a6febefa        A ≠ B
+```
+
+#### SAP idempotency — the at-most-once proof
+
+Final SAP read: `Status SENT`, `SupplierResponse ACCEPTED`, `EstimatedDeliveryDate 2026-12-15`, `SupplierRespondedAt 2026-09-21T16:04:53Z`, `LastResponseId a1bd862a-573f-461e-b337-5e39aa595a61`, **`LastResponseVersion 1`**.
+
+```
+L0 = 2026-09-19T00:51:08.288116Z
+L1 = 2026-09-21T16:09:00.120564Z        L0 ≠ L1
+L2 = 2026-09-21T16:09:00.120564Z        L1 == L2
+```
+
+`LastResponseVersion` stayed exactly **1** and `LastResponseId` stayed exactly the same. **The reconciliation replay did not apply the supplier response a second time.** This is the runtime at-most-once evidence Phase 7.2 required, and it comes from SAP rather than from CAP's own bookkeeping.
+
+#### Final CAP state
+
+```
+responseId a1bd862a-573f-461e-b337-5e39aa595a61
+state DELIVERED   attempts 2   lastCorrelationId e4159f7c-…   version 1
+decision ACCEPTED   estimatedDeliveryDate 2026-12-15
+PENDING_TOTAL 0
+ALL_STATES { "DELIVERED": 4, "UNKNOWN": 1 }
+```
+
+The remaining `UNKNOWN` is the unrelated `PO00000121` diagnostic below. **It is left in place deliberately** as honest runtime evidence and is not hidden, deleted or reinterpreted.
+
+#### The nine acceptance criteria
+
+| # | Criterion | Result |
+| --- | --- | --- |
+| 1 | a real `SupplierResponseDeliveries` row reaches `UNKNOWN` | **PASS** |
+| 2 | `attempts = 1` | **PASS** |
+| 3 | correlation **A** stored | **PASS** — `d57bf9b0-9f22-46b8-818e-87234115c75e` |
+| 4 | the same `responseId` is reconciled | **PASS** — `a1bd862a-573f-461e-b337-5e39aa595a61` |
+| 5 | correlation **B ≠ A** | **PASS** — `e4159f7c-1007-49b5-93b3-0fb9a6febefa` |
+| 6 | `attempts = 2` | **PASS** |
+| 7 | final state `DELIVERED` | **PASS** |
+| 8 | SAP response applied **at most once** | **PASS** — `LastResponseVersion` stayed `1`, same `LastResponseId` |
+| 9 | `LastChangedAt` moves **at most once** | **PASS** — `L0 ≠ L1`, `L1 == L2` |
+
+Procedural gates: one `PENDING` row before the run; `sends=1`; retained send settled `answered=true` / `204`; row still `UNKNOWN` / `attempts 1` / correlation **A** afterwards; Tier-1 Cloud Integration evidence; reconciliation run only after all of those passed. **All satisfied.**
+
+#### What this run did NOT prove
+
+Unchanged from §B and §G, and worth restating beside the result so no later reader over-reads it. The socket stayed open, the real HTTP client waited normally and received `HTTP 204`. **No genuine socket timeout, `AbortSignal` timeout, caller disconnect, client abandonment or lost HTTP response was produced, and Cloud Integration's behaviour after a vanished caller was not observed.** Those remain **Phase 7.9**. The Phase 6 gap is closed on its lifecycle half only.
+
+**The successful proof did not depend on a shortened `PIH_CI_TIMEOUT_MS`.** The retired fixed-timeout strategy played no part in it and must not be restored.
+
+### The abandoned `PO00000121` diagnostic — not an acceptance run
+
+Phase 7.2 was first attempted against `PO00000121`. **That attempt is not the Phase 7.2 proof and is not counted as one.** It is recorded because it is honest runtime evidence and because it uncovered a real defect in legacy persisted data.
+
+The deterministic state-machine injection itself worked exactly as designed: `responseId e0ae42d3-7aef-4299-9d82-80ff7e30b2e7`, correlation **A** `4bb7a6a2-4f4c-4459-995a-1acadd332487`, row `state UNKNOWN`, `attempts 1`. But the retained real transport settled `answered=true`, **`status=400`**, so the mandatory real-send gate returned **`FAIL_HTTP_400`**.
+
+**The gate did its job. Reconciliation was correctly NOT performed, SAP was NOT manually repaired, and no second fixture was consumed on that row.** SAP remained at its original business baseline throughout. A `400` is a deterministic refusal — category **B** in the fault model — and **not** an `UNKNOWN` transport ambiguity; the row's `UNKNOWN` state reflects the injected observation, not the receiver's answer.
+
+The SAP OData error was runtime-proven through `/IWFND/ERROR_LOG`: *"Response belongs to a different portal order."* The Integration Suite transaction ID for that failed send matched the Gateway error-log transaction ID.
+
+**Root cause: legacy delivery-intent identity corruption in `ZJP_PO_DLV`**, not a Phase 7 regression.
+
+| Order | Correct CAP `portalOrderId` | Persisted `PORTAL_ORDER_UUID` |
+| --- | --- | --- |
+| `PO00000121` | `533572B10BED4083804EE81C917E995A` | `53357200000000000000000000000000` |
+| `PO00000122` | `93933DD0AAD349FFBC925DE9787A55C2` | `93933000000000000000000000000000` |
+| `PO00000123` | `ED267DA783E24A388CB3DFE095F7A5FC` | **complete** |
+| `PO00000132` | `9EFEB59803CF44F881E524C68BCBC176` | **complete** |
+
+Each corrupted value stops at the first lowercase hexadecimal letter of the canonical UUID. The current dispatch-coordinator source already documents the cause: on this SAP target `CL_SYSTEM_UUID=>CONVERT_UUID_C36_STATIC` accepted lowercase canonical input, raised no exception, and could silently return a truncated X16.
+
+**The current coordinator already protects this boundary** — it copies the receipt `portal_order_id` to `SYSUUID_C36`, translates to upper case, converts C36 → X16 and back to C36, and rejects or clears the result if the round trip differs. **No fix is introduced in Phase 7.2**; the defect lives in rows persisted before that guard existed, and the `PO00000121` attempt merely exposed them.
+
+**The `PO00000121` `UNKNOWN` row is left untouched on purpose.** It is why the final census reads `DELIVERED 4, UNKNOWN 1`. Its existence does not affect the isolated `PO00000123` proof, which ran with `PENDING_TOTAL 0` beforehand and `PENDING_TOTAL 0` afterwards.
+
 ## Phase 7 acceptance matrix
 
 | Subphase | Runtime acceptance criterion | Blocked by |
 | --- | --- | --- |
 | **7.1** | Not runtime. **Gate: this document is frozen, every matrix row carries an evidence level, and no executable source changed.** | — |
-| 7.2 | **The safety gate passed before anything was sent** — exactly one eligible `PENDING` row, proven to be the fixture by both a read-only query and a normal-deadline dry run. A real `UNKNOWN` row exists in HANA at `attempts 1` carrying correlation **A**; **the retained real send settled `answered = true` with `HTTP 204`** and the row was still `UNKNOWN` afterwards; Cloud Integration evidence confirms that the single execution in the task's window reached `applySupplierResponse`, with correlation **A** read directly under temporary Trace or, if Trace is declined, established by uniqueness and recorded as inference; reconciliation then returns `DELIVERED` at `attempts 2` with the **same** `responseId` and a **fresh** correlation **B ≠ A**; `L0 ≠ L1` and `L1 == L2`, so SAP's `LastChangedAt` moved **at most once** end to end; **no unrelated supplier response changed state**. The unanswered observation is injected at the `ResponseTransport` seam, not at the HTTP client, which waits normally and receives the real result — a real timeout, socket abort, caller disconnect or client abandonment is **not** claimed here and stays in 7.9 | 7.1 |
+| 7.2 | **The safety gate passed before anything was sent** — exactly one eligible `PENDING` row, proven to be the fixture by both a read-only query and a normal-deadline dry run. A real `UNKNOWN` row exists in HANA at `attempts 1` carrying correlation **A**; **the retained real send settled `answered = true` with `HTTP 204`** and the row was still `UNKNOWN` afterwards; Cloud Integration evidence confirms that the single execution in the task's window reached `applySupplierResponse`, with correlation **A** read directly under temporary Trace or, if Trace is declined, established by uniqueness and recorded as inference; reconciliation then returns `DELIVERED` at `attempts 2` with the **same** `responseId` and a **fresh** correlation **B ≠ A**; `L0 ≠ L1` and `L1 == L2`, so SAP's `LastChangedAt` moved **at most once** end to end; **no unrelated supplier response changed state**. The unanswered observation is injected at the `ResponseTransport` seam, not at the HTTP client, which waits normally and receives the real result — a real timeout, socket abort, caller disconnect or client abandonment is **not** claimed here and stays in 7.9. **ACHIEVED 2026-09-21** on fixture `PO00000123` / `responseId a1bd862a-573f-461e-b337-5e39aa595a61`: `sends=1`, correlation **A** `d57bf9b0-…`, retained real send `answered=true status=204`, row still `UNKNOWN`/`attempts 1` afterwards, **Cloud Integration evidence taken at Tier 1** (`LogLevel INFO`, Trace not enabled and not required), reconciliation `DELIVERED`/`attempts 2` under **B** `e4159f7c-…`, `LastResponseVersion` stayed `1`, `L0 ≠ L1` and `L1 == L2`, `PENDING_TOTAL 0` | 7.1 |
 | 7.3 | A deployed flush writes exactly one attempt row per attempt; a losing compare-and-set writes **none**; 7.2's sequence replayed yields two attempt rows with two distinct correlation IDs | 7.2 |
 | 7.4 | A `PENDING` row is skipped before it is due and attempted after; an exhausted row is skipped indefinitely and appears as retry-exhausted; `UNKNOWN` is never auto-retried; a category-A failure lands in `PENDING`, not `UNKNOWN` | 7.3 |
 | 7.5 | Two concurrent deployed flushes: one claims, one skips; no row sent twice unnecessarily; a killed runner's row is reclaimed after its lease and completes | 7.4 |
@@ -611,4 +771,4 @@ The following are **procedural gates, not business-state criteria**, and must no
 
 **OQ-3 — what is the real round-trip latency? RESOLVED BY MEASUREMENT, AND IT RETIRED THE MECHANISM THAT ASKED IT.** Three real message-processing logs were captured under temporary Trace, **one of them (Probe A) matched against a CAP-side elapsed measurement**; B and C have Cloud Integration timings only. `T2 − T0` spans 468–1789 ms and `T4 − T0` spans 869–2943 ms. A conservative cross-run argument — using A's **directly measured 963 ms CAP-observed round trip** and nothing but `δout ≥ 0` for B and C — shows that a guaranteed-post-`T2` timeout for B requires `timeout > 1789 ms` while making A's run unanswered requires `timeout < 963 ms`. **No fixed value satisfies both**, and the shortened-`PIH_CI_TIMEOUT_MS` mechanism is therefore **retired**. The derivation is in §C of the Phase 7.2 section; it uses no `T4`-derived bound and makes **no assumption that A's overhead applies to B or C**. `Δ_total_A = 94 ms` is retained there as a measured diagnostic fact only. The question is closed and nothing further needs measuring for 7.2.
 
-**Nothing blocks 7.2.** It requires no code change, no deployment, no SAP change and no Integration Suite change. `ResponseTransport` is a required injectable option on `flushSupplierResponses`, so a one-off scratch task can compose the deployed `HttpResponseTransport` behind a state-machine-facing unanswered observation — reusing the deployed payload builder, transport, classifier and guarded write without duplicating any of them. The real transport send is **not** interrupted: it runs concurrently to completion and its retained result must settle `HTTP 204`. `PIH_CI_TIMEOUT_MS` is **not** set by that task, because the real send needs the normal 30-second deadline in order to finish.
+**7.2 is complete, and the design held.** It required no code change, no deployment, no SAP change and no Integration Suite change. `ResponseTransport` is a required injectable option on `flushSupplierResponses`, so the one-off scratch task composed the deployed `HttpResponseTransport` behind a state-machine-facing unanswered observation — reusing the deployed payload builder, transport, classifier and guarded write without duplicating any of them. The real transport send was **not** interrupted: it ran concurrently to completion and its retained result settled `HTTP 204`. `PIH_CI_TIMEOUT_MS` was **not** set by that task, and the real send used the normal 30-second deadline. **Next: 7.3, attempt history, not started.**
