@@ -7,7 +7,7 @@ Phase 7 makes the bidirectional integration proven in Phase 6 operationally robu
 | Subphase | Objective | State |
 | --- | --- | --- |
 | **7.1** | Fault model and acceptance criteria | **frozen — this document** |
-| 7.2 | Real `UNKNOWN` and reconciliation, on the deployed droplet | designed, not executed |
+| 7.2 | Runtime-proven `UNKNOWN` and reconciliation, via a deterministic injected state-machine-facing unanswered observation over a real send | designed, not executed |
 | 7.3 | Attempt history | designed, not implemented |
 | 7.4 | Retry / transient failure policy | designed, not implemented |
 | 7.5 | Inbound concurrency hardening | designed, not implemented |
@@ -183,7 +183,7 @@ Classification is [`classify`](../cap-supplier-portal/srv/lib/supplier-response.
 | Connection refused | `UNKNOWN` | **`PENDING`** via `ECONNREFUSED` | **source-only** | the condition and the reclassification |
 | TLS handshake failure | `UNKNOWN` | **`PENDING`** via TLS cause codes | **source-only** | the condition and the reclassification |
 | **CSRF fetch failure** | **`UNKNOWN`** — semantically wrong | **`PENDING`**, requires a CI change — see OQ-2 | **inference** — see the investigation below | **the external status CI returns** |
-| Client timeout | `UNKNOWN` | unchanged — irreducibly ambiguous | **automated-test** | **the condition — this is 7.2** |
+| Client timeout | `UNKNOWN` | unchanged — irreducibly ambiguous | **automated-test** | **the condition — this is 7.9, not 7.2.** Phase 7.2 injects the unanswered observation at the `ResponseTransport` seam and never produces a real timeout, so it leaves this row untouched |
 | Connection reset after transmission | `UNKNOWN` | unchanged — correct | **automated-test** | the condition |
 | `400` | `FAILED` | unchanged | **runtime-verified** (6.5f, conflicting replay, `SABP_BEHV/100`) | — |
 | `401` / `403` | `FAILED` | unchanged | **automated-test**; 6.5c proved auth positively only | the negative case |
@@ -345,85 +345,256 @@ The frozen constraints on the future action:
 - It must not downgrade a terminal business result if a valid receipt or callback arrived in the meantime.
 - `ZJP_CL_PO_EML_TEST` is updated with it, as every RAP behaviour change requires.
 
-## Phase 7.2 — the real `UNKNOWN` test, and its mandatory safety gate
+## Phase 7.2 — runtime-proven `UNKNOWN` and reconciliation
 
-Phase 6 never induced a real `UNKNOWN` transport condition in production, so the `UNKNOWN → DELIVERED` transition has automated-test evidence only. 7.2 closes that, and it does so **without changing any code, deploying anything, or touching SAP or Cloud Integration**.
+The claim this subphase is permitted to make, in full and without paraphrase:
 
-### Mechanism
+> **Runtime-proven `UNKNOWN` and reconciliation via a deterministic injected state-machine-facing unanswered observation over a real CAP → Cloud Integration → SAP send.**
 
-`readCiConfig()` defaults its parameter to `process.env` and is called at run time by both scripts, and the client deadline comes from **`PIH_CI_TIMEOUT_MS`**, defaulting to 30 000 ms. A Cloud Foundry task command runs in a shell, so prefixing **one** invocation with a smaller value shortens that attempt's deadline and nothing else. The application's own environment, the droplet and every other runner are untouched.
+The injection point is the `ResponseTransport` seam, and nowhere else. Stated as three layers, because the middle one is the only thing that changes:
 
-The request is genuinely dispatched. The client abort fires while it is in flight, `fetch` throws, the catch returns `answered: false`, `classify` returns `UNKNOWN`, and the guarded write records a real `UNKNOWN` row with a real correlation ID. This is the actual "receiver may have committed" condition, not a simulation of one — and TI-1 shows it is a condition the production configuration already makes reachable, since Cloud Integration is allowed 60 s for a call the sender abandons at 30 s.
+| Layer | Behaviour |
+| --- | --- |
+| **The real HTTP client** | continues waiting normally and receives the actual result |
+| **The `ResponseTransport` seam** | presents `answered = false` to the delivery state machine |
+| **The delivery state machine** | classifies that presented result as `UNKNOWN` |
 
-### The safety gate — mandatory, and the test aborts if it fails
+Nothing is injected *at the HTTP client*.
 
-A shortened `PIH_CI_TIMEOUT_MS` applies to **the whole task**, and `flushSupplierResponses` has no per-response filter: it drains every `PENDING` row it finds. **An unrelated supplier response caught in that run would be driven to `UNKNOWN` by a deliberately broken deadline, through no fault of its own, and would then require operator reconciliation.** That is an unacceptable side effect of a test.
+It must **not** be described as a real `UNKNOWN` transport condition, a real socket failure, a real `AbortSignal` timeout, a caller disconnect, a lost HTTP response, client abandonment, request cancellation, the HTTP client stopping its wait, or proof of Cloud Integration's behaviour after its caller disconnects. Those are genuine transport-failure scenarios and they remain **Phase 7.9** work.
 
-**Therefore, before any shortened-timeout flush is executed, it must be proven that the only eligible `PENDING` row is the dedicated Phase 7 fixture.** The gate has two parts and both are read-only:
+### The distinction a future reader must not miss
 
-**Part A — a read-only query** over `SupplierResponseDeliveries` establishing that exactly one row is in `state = 'PENDING'`, and that its `responseId` is the fixture's.
+Two things happen concurrently, and **only one of them is artificial**:
 
-**Part B — a dry run at the normal timeout**, using the deployed sender's own reporting: `flush-supplier-responses --dry-run --limit 1`. A dry run builds the payload and reports it **without sending anything**, and each outcome carries its `responseId`. The run must report `scanned: 1` and that one `responseId` must be the fixture's.
+| | What it does |
+| --- | --- |
+| **The delivery state machine** | observes `answered = false` **immediately**, because the composite hands it that value. This observation is **injected and artificial**. |
+| **The real HTTP transport** | **continues waiting normally**, on an open socket, at the normal 30-second deadline. Its promise is retained separately and must later resolve `answered = true` with `HTTP 204`. Nothing about it is artificial, interrupted or cancelled. |
 
-Part B exists because Part A alone proves what the database holds, while Part B proves what **the deployed code would actually select** — including the within-run version-ordering guard, which can hold a row back for reasons a raw query does not show.
+Nothing stops waiting. Nothing is abandoned, cancelled or disconnected. **The real client waits out the full exchange and receives the real answer**; what is injected is a *state-machine-facing unanswered observation over a concurrently retained real transport send*. The retained result is not discarded — it is checked, and the mandatory real-send gate below refuses to let the experiment continue unless it settled `204`.
 
-**The test MUST abort, with nothing sent, if any of the following is true:**
+### A. What Phase 7.2 proves
 
-- more than one `PENDING` row exists;
-- any eligible row other than the fixture exists;
-- the fixture cannot be uniquely identified by its `responseId`;
-- Part A and Part B disagree about which row would be sent;
-- the dry run reports anything other than `scanned: 1`.
+A real supplier response leaves real CAP through the **deployed** transport under a real correlation ID, reaches Cloud Integration and SAP, and is really applied. The deployed classifier and the deployed guarded compare-and-set persist a real `UNKNOWN` row in real HANA with `attempts 1`. An operator reconciliation then replays the same `responseId` with a fresh correlation ID, RAP answers idempotently, the row reaches `DELIVERED` at `attempts 2`, and SAP's commercial response is applied **at most once** with `LastChangedAt` moving at most once.
 
-**When the gate fails, the correct response is to wait or to investigate — never to clear the way.** Other `PENDING` rows must not be deleted, edited, drained at the normal timeout to get them out of the way, or moved to another state to make the fixture unique. Those are writes to committed business decisions performed for the convenience of a test, and the resulting evidence would be worth less than the state it disturbed.
+The production payload builder, classifier, description logic, guarded record path and reconciliation implementation are reused unchanged, and the real HTTP send is performed by the deployed `HttpResponseTransport`. **The only injected value is the unanswered transport observation presented to the delivery state machine.** The boundary is exact:
 
-`--limit 1` is then passed to the real run as a second barrier, not as the primary one: the gate is what makes the run safe, and the limit is what contains a gate that was wrong.
+| | |
+| --- | --- |
+| **Real** | payload construction (`buildSupplierResponsePayload`); the `HttpResponseTransport` send; the Cloud Integration execution; SAP `applySupplierResponse`; the `classify` implementation; the guarded `record` implementation; the HANA row; the reconciliation command; RAP idempotency |
+| **Injected** | the state-machine-facing transport result — **`answered = false`**, and nothing else |
 
-### Can 7.2 reuse the existing sender for exactly one `responseId`?
+Everything in the first row runs in the deployed droplet against the bound HDI container, the deployed iFlow and the real SAP system.
 
-**No — and the limitation is the 6.5g guard working correctly, not a defect.**
+### B. What Phase 7.2 does not prove
 
-The module exports exactly two entry points, and neither sends one nominated `PENDING` row:
+That any genuine transport failure occurred. The socket stays open, the real HTTP client waits normally, and it receives `HTTP 204`. The unanswered condition exists **only in what the delivery state machine is told**: the composite returns `answered = false` to the sender while the real transport send continues concurrently. The real answer is **not** discarded — it is retained and must later settle `204`, which the mandatory real-send gate enforces.
 
-| Export | Selects | Why it does not fit |
-| --- | --- | --- |
-| `flushSupplierResponses(options)` | `SELECT … where({ state: 'PENDING' }).orderBy('createdAt','version').limit(limit)` | `FlushOptions` is `{ transport, limit, dryRun, newCorrelationId, log }` — **there is no `responseId` filter**. `limit: 1` takes the *oldest* `PENDING` row, whichever that is |
-| `reconcileSupplierResponse(options)` | one row by `responseId` | Refuses anything that is not `UNKNOWN`. For a `PENDING` row it returns `NOT_UNKNOWN` with the reason *"it is still queued and the normal flush will send it"* |
+**The Phase 6 gap is therefore split, not closed.** Phase 6 recorded that no deliberately induced `UNKNOWN` had been executed in production. Phase 7.2 closes the **lifecycle** half of that gap — `UNKNOWN` → operator reconciliation → `DELIVERED`, with at-most-once application, against real systems. The **transport-condition** half remains uninduced and is listed in G.
 
-The one function that takes a single `responseId` is precisely the one that refuses `PENDING`, by design. `attempt()` and `record()` — which hold the payload build, the transport call, `classify`, `describe` and the guarded write — are **module-private and not exported**, so no task script can reach them without duplicating transport and classification logic, which is exactly what must not happen.
+### C. Why the shortened-timeout mechanism was retired
 
-**A second and decisive reason:** 7.2 runs against the **already-deployed droplet**. Even a small addition such as a `responseId` filter on `FlushOptions` would exist only in the working tree until a rebuild and `cf deploy` — and 7.2 must not deploy. Any design requiring new code is therefore not a 7.2 design at all.
+The original 7.1 design shortened `PIH_CI_TIMEOUT_MS` for one task so the client deadline would expire after the `applySupplierResponse` POST had been dispatched but before the answer returned. Three real Cloud Integration message-processing logs, captured under temporary Trace on `PIH_SupplierResponse_v1`, retired it on evidence.
 
-**Recommendation: keep the full flush, and make the read-only gate above mandatory.** The runtime shape is a single Cloud Foundry task that performs Part A, aborts on any gate failure, and only then runs `flushSupplierResponses` at the shortened deadline with `limit: 1`. The sender's own transport and classification logic is reused untouched, and no repository code is added.
+`T0` is the Cloud Integration message start, `T1` the CSRF `GET` end, `T2` the `applySupplierResponse` POST start, `T3` its end, `T4` the message end. The measured offsets, **as observed inside Cloud Integration and nothing more**:
 
-### Sequence — design only, not executed
+| Probe | `T2 − T0` | `T3 − T0` | `T4 − T0` | Matched CAP-side elapsed |
+| --- | --- | --- | --- | --- |
+| **A** (fast) | 468 ms | 854 ms | 869 ms | **963 ms** |
+| **B** (slow) | 1789 ms | 2917 ms | 2943 ms | not measured |
+| **C** | 1171 ms | 2107 ms | 2122 ms | not measured |
 
-| | Step | Establishes |
-| --- | --- | --- |
-| 0 | Measure a known-good delivery's total processing time from its Cloud Integration message log; set the shortened deadline to roughly 40–60% of it | the value is measured, not invented (OQ-3) |
-| 1 | Seed the labelled Phase 7 fixture order; capture the SAP header baseline: `SupplierResponse`, `EstimatedDeliveryDate`, `SupplierRespondedAt`, `LastResponseId`, `LastResponseVersion`, `LastChangedAt` | a clean before-state |
-| 2 | Record the supplier decision through the deployed service; capture the `responseId` and the `PENDING` row | the decision committed normally |
-| 3 | **Safety gate, Parts A and B.** Abort on any failure | exactly one eligible row, and it is the fixture |
-| 4 | Shortened-deadline flush, `limit: 1` | **a real `UNKNOWN` row** with a real correlation ID, `attempts 1` |
-| 5 | Read SAP — **observe only, do not act** | which branch of the ambiguity ran |
-| 6 | `reconcile-supplier-response --response-id <same uuid>` at the **normal** deadline | `UNKNOWN → DELIVERED`, `attempts 2`, a **fresh** correlation ID, the **same** `responseId` |
-| 7 | Read SAP a third time | `LastResponseVersion` never exceeded the response's version; `LastChangedAt` moved **at most once** across steps 1→7 |
+**Only Probe A has a matched CAP-side elapsed measurement**, and the proof below uses it directly rather than deriving anything from `T4`. Its outside-MPL overhead, `963 − 869 = 94 ms`, is recorded as **Δ_total_A = 94 ms** and kept as a measured diagnostic fact; **it is not used in the argument**, and **A's value must never be carried across to B or C** — the outbound overhead is a per-run quantity that varies with TLS handshake and connection reuse.
 
-### Why the test cannot fail unsafely
+The argument needs **no assumption about the outbound overhead of B or C**. Write `δout_i` for the outbound CAP → CI overhead of run *i*, so that a CAP-relative deadline of `timeout` reaches Cloud Integration's `Tx` when `timeout = δout_i + (Tx − T0)`.
 
-Once the gate has passed there are exactly two outcomes, and both are valid:
+**From Probe A — the measured CAP response deadline.** CAP observed a successful `HTTP 204` after **963 ms**. For that same observed run to have become unanswered at the CAP caller instead, a shortened deadline would have to satisfy
 
-- **The abort lands after SAP applied.** Reconciliation replays the same `responseId`, RAP's runtime-proven idempotency answers `204` without writing, `LastChangedAt` does not move, the row reaches `DELIVERED`.
-- **The abort lands before SAP applied.** Reconciliation replays, RAP applies it, `LastChangedAt` moves once, the row reaches `DELIVERED`.
+```
+timeout  <  963 ms
+```
 
-Both end `DELIVERED` and both prove *applied at most once*; they differ only in which branch ran, and SAP's `LastChangedAt` reveals which afterwards. A badly chosen deadline changes the branch, never the safety. **The unsafe failure mode is not a mis-timed abort — it is a shortened deadline reaching a row that was never part of the test**, which is the single thing the gate exists to prevent.
+This is a direct statement about what CAP actually measured. **No `T4`-derived bound is used**, and none would be correct: `T4` is the end of the Cloud Integration message, not the instant the answer arrives at CAP, and a deadline falling between the two would still be a valid unanswered condition.
+
+**From Probe B — a lower bound, using only `δout ≥ 0`.** The CAP-relative instant at which B's POST starts is `δout_B + 1789 ≥ 1789 ms`, because an overhead cannot be negative. Any timeout **guaranteed** to fire after the SAP POST has started in B must satisfy
+
+```
+timeout  >  1789 ms
+```
+
+**These two requirements are contradictory.** The contradiction rests on one directly measured quantity — A's 963 ms CAP-observed round trip — and one inequality that needs no measurement at all, `δout_B ≥ 0`.
+
+**Probe C reproduces the contradiction independently.** Its POST starts no earlier than `δout_C + 1171 ≥ 1171 ms`, so a guaranteed post-`T2` timeout for C requires `timeout > 1171 ms`, which is likewise incompatible with A's `timeout < 963 ms`.
+
+The shape of the argument is therefore: **A supplies the measured CAP response deadline; B and C supply conservative lower bounds on when the SAP POST can begin.** Nothing else is needed.
+
+**More sampling cannot repair this.** The contradiction between A and B is already fixed by observations that have been made; adding further runs cannot make a single fixed timeout satisfy runs that are *already* mutually incompatible. A new sample can only add further constraints, never withdraw an existing one.
+
+One further limitation is recorded for accuracy, and it does not affect the proof above. **The two clocks are demonstrably unaligned:** Probe A's CAP `endIso` of `12:55:55.501` precedes Cloud Integration's `T4` of `12:55:55.507`, and CAP cannot receive an answer before it was sent. `Δ_total_A` survives this, being the difference of two *durations* each measured on its own clock, but **absolute cross-system timestamp comparisons do not** and none is relied on here.
+
+### D. Why the `ResponseTransport` seam is acceptable
+
+`ResponseTransport` is a one-method interface that `flushSupplierResponses` takes as a **required** option, and `attempt()` calls it exactly once per row. `ci-transport.ts` states the design intent in its own words: the sender *"is written against the `ResponseTransport` interface below and never learns whether it is talking to a tenant or to a test double, which is what lets the whole delivery state machine be proven without a live iFlow."* The automated suite already substitutes it.
+
+Phase 7.2 does **not** substitute a fake. It injects a **composite** that delegates to the real deployed `HttpResponseTransport` and lets that send run to completion, so no transport, payload or classification logic is duplicated anywhere and no real request is cut short. What the composite changes is **only the value handed back to the state machine**, not the behaviour of the HTTP client underneath it. The composite lives only in a one-off scratch Cloud Foundry task, base64-encoded into `--command`, exactly as every Phase 6 and Phase 7 task has. **No repository code is added, nothing is deployed, and no SAP or Integration Suite artifact changes.**
+
+### E. Why the real request must still reach Cloud Integration and SAP
+
+The point of the subphase is that the business path completes while the state machine deliberately retains `UNKNOWN`. If the real request did not reach SAP, the reconciliation would exercise a fresh application rather than RAP's `ALREADY_APPLIED` path, and the at-most-once proof would be about a different thing.
+
+Therefore the composite delegates to the real transport at the **normal** 30-second deadline. **`PIH_CI_TIMEOUT_MS` must not be set by this task at all**; a shortened value could let the real send time out and destroy the guarantee. The task asserts the resolved `timeoutMs` before sending.
+
+### F. Why the scratch task must outlive `flushSupplierResponses`
+
+`scripts/flush-supplier-responses.ts` ends with `main().then(code => process.exit(code))`. **`process.exit()` terminates immediately and abandons in-flight sockets**, so a task copying that shape would kill the real request at an arbitrary point — reintroducing precisely the non-determinism that retired the timeout mechanism. Awaiting the retained promise **is** the determinism guarantee, not a refinement of it.
+
+### G. Phase 7.9 carry-over — unresolved by Phase 7.2
+
+These remain open runtime-resilience items and **Phase 7.2 must not be described as closing any of them**:
+
+- a genuine `AbortSignal` timeout;
+- a genuine socket abort;
+- a caller disconnect;
+- the caller process disappearing while Cloud Integration is still processing;
+- Cloud Integration's behaviour after its caller disconnects;
+- proof that a real transport-level lost response produces the intended `UNKNOWN` semantics.
+
+### The composite transport — required control flow
+
+1. The deployed sender generates correlation ID **A** and passes it to `transport.send(payload, A)`. The composite **passes A straight through** and never generates one of its own — the entire after-the-fact proof rests on the persisted `lastCorrelationId` equalling the message log's `X-Correlation-ID`.
+2. The composite calls the real `HttpResponseTransport.send(payload, A)` **exactly once**.
+3. It retains that promise at task scope.
+4. It attaches a rejection handler **synchronously, in the same tick the promise is created**, so there is never an unhandled-rejection window while `flushSupplierResponses` is still running. `send` is documented to resolve for every outcome and reject for none, but the `Buffer.from(clientId:clientSecret)` authorization line sits **outside** its `try`, so a malformed configuration could reject; under Node's fatal-unhandled-rejection default that would kill the process mid-flight, which is the exact failure being prevented.
+
+   **That handler does not make step 8 safe on its own.** `p.catch(...)` returns a *new* promise; the retained original still rejects, and `await`-ing it would throw. The two concerns are separate and both must be handled: the synchronous handler closes the unhandled-rejection window, and step 8 needs its own protection.
+5. It returns `answered: false` to `flushSupplierResponses` immediately, without awaiting the real promise. **This is the only artificial step.** The real transport send is not cancelled, aborted or shortened by it; the real HTTP client goes on waiting on its open socket for the genuine answer.
+6. The deployed sender performs its normal `classify` → `UNKNOWN` and its normal guarded `record` into HANA. Expected row: `state UNKNOWN`, `attempts 1`, `lastCorrelationId A`.
+7. The task **stays alive**. It must not use the flush CLI's `process.exit` pattern.
+8. It awaits the **same retained promise inside an explicit `try`/`catch`** — or normalises its settlement into a result object — so that a rejection becomes a value the task can act on rather than an exception that ends it. `HttpResponseTransport.send` is **never** called a second time.
+9. It re-reads the row after the real send settles. The row must still be `state UNKNOWN`, `attempts 1`, `lastCorrelationId A`.
+
+The three settlement outcomes are distinguished explicitly, and **an uncaught rejection must never terminate the task before the post-attempt diagnostics have run**:
+
+| Retained promise settles | Outcome |
+| --- | --- |
+| resolves `answered = true`, `status = 204` | **the real-send gate passes** |
+| resolves with **any other** result | **controlled STOP** |
+| **rejects** | **controlled STOP** — caught, normalised, reported as a `REAL_SEND_GATE` failure |
+
+On either STOP the task logs only a **safe summary** — never a response body, a header or a credential — and then stops. **Do not reconcile. Do not send again. Do not create another response. Do not consume another fixture.** Investigate the experiment instead. The `UNKNOWN` row keeps its identity and remains replayable, so nothing is lost by stopping.
+
+The retained `HttpResponseTransport` execution has **no direct database access** and does not directly update `SupplierResponseDeliveries`: `ci-transport.ts` imports no `@sap/cds` runtime API — its only import is a *type* — and performs no `SELECT` or `UPDATE`. The delivery-state write in this execution is performed by `record()`, using the result presented to `attempt()`.
+
+Three consequences follow, and they are what the design relies on: the background real-send promise **does not independently call `record()`**; it **has no direct HANA write path**; and therefore the eventual `HTTP 204` **cannot silently convert the already-persisted `UNKNOWN` row to `DELIVERED`**. Only the reconciliation command, run deliberately and later, moves that row.
+
+### The safety gate — carried over from 7.1, unchanged
+
+Before anything is sent, it must be proven that the only eligible `PENDING` row is the dedicated Phase 7 fixture: **Part A**, a read-only query showing exactly one row in `state = 'PENDING'` whose `responseId` is the fixture's; and **Part B**, a normal-deadline `--dry-run --limit 1` reporting `scanned: 1` for that same `responseId`. The run aborts if more than one `PENDING` row exists, if any other eligible row exists, if the fixture is not uniquely identifiable, if the two parts disagree, or if the dry run reports anything else. **When the gate fails the correct response is to wait or investigate, never to clear the way** — no other row is deleted, edited, drained or moved to make the fixture unique. `limit: 1` is a second barrier, not the primary one.
+
+### The mandatory real-send gate
+
+**Before reconciliation is permitted, the retained real result must prove `answered = true` and `HTTP status = 204`.**
+
+If it is anything else — `answered = false`, a timeout, an `AbortError`, an HTTP error status, a rejected promise, a missing retained result, or an unexpected status — then **STOP**. Do not reconcile, do not send again, do not create another response, and do not consume another fixture. Investigate the experiment instead.
+
+This gate is what makes the subphase's claim true: Phase 7.2 must prove that the real CAP → Cloud Integration → SAP path **completed successfully** while the state machine deliberately retained `UNKNOWN`. Without the `204` the experiment proves only that a row can be written.
+
+### Correlated Cloud Integration evidence
+
+After the real send succeeds, Cloud Integration evidence must confirm that **the execution produced by the task reached the normal `applySupplierResponse` path**. Under **Tier 2**, temporary Trace additionally proves that this execution carried correlation **A**. Under **Tier 1**, the execution is associated with the task only by uniqueness of the task window and `COMPLETED` status, and **that association remains inference** — correlation **A** is not observed at all.
+
+**Do not claim that `UNKNOWN` was persisted after SAP received the POST.** The ordering is very likely the reverse: the row reaches `UNKNOWN` while the real transport send is still progressing through Cloud Integration, because the state machine was handed its unanswered observation immediately while the real client kept waiting. That ordering is expected and acceptable, and it is why the proof is after-the-fact correlation rather than a claim about sequence.
+
+The proof is an **after-the-fact evidence chain** across four independent observations. Only under Tier 2 may it be called **direct correlation**; under Tier 1 its third link is an association by uniqueness, not an observation of **A**:
+
+- the HANA `UNKNOWN` row carries correlation **A**;
+- the retained real transport send for correlation **A** settled `HTTP 204`;
+- Cloud Integration evidence shows the task's execution reaching `applySupplierResponse` — **carrying A** under Tier 2, **associated by window uniqueness** under Tier 1;
+- SAP holds the expected commercial response.
+
+#### How correlation A is actually located, before Phase 7.7 exists
+
+**Correlation-ID search does not exist yet and must not be assumed.** Phase 7.1 verified from both committed exports that **neither iFlow configures `SAP_MessageProcessingLogCustomHeaderProperty`**, so `X-Correlation-ID` travels through Cloud Integration but is **not indexed** and **cannot be searched** in Monitor. Adding it is Phase 7.7 work and **must not be pulled forward into 7.2.**
+
+**At Info level the incoming `X-Correlation-ID` is not exposed in the message processing log at all.** Without the custom-header property, request headers and exchange properties are captured only under **Trace**. So at Info the log can say *which* execution ran and *that* it completed, but not *which correlation ID it carried*.
+
+That leaves two tiers of evidence, and the difference between them must be recorded honestly.
+
+**Tier 1 — Info level, uniqueness by window. Available with no Trace and no change of any kind.**
+
+1. Record the exact UTC start and end of the Cloud Foundry task.
+2. In Monitor, filter to iFlow `PIH_SupplierResponse_v1` over that window.
+3. **Exactly one message must appear, with status `COMPLETED`.** If more than one appears, **STOP** — the correspondence is no longer unique and nothing may be concluded from it.
+4. `COMPLETED` on this artifact implies the `applySupplierResponse` POST executed, because the committed export is a single linear sequence with no gateway and **no Exception Subprocess**, so `EndEvent_2` is reachable only through `ServiceTask_716`.
+
+This establishes that the one request the task sent reached `applySupplierResponse` — **by uniqueness and by the artifact's shape, not by reading correlation A.** Step 4 is an **inference from a committed artifact**, and the whole tier is weaker than direct evidence. It must be labelled that way and never written up as "the log showed correlation A".
+
+**Tier 2 — a temporary Trace capture for this one controlled execution. Recommended.**
+
+Trace is the only existing mechanism that exposes the incoming `X-Correlation-ID` before 7.7, and it is already an approved, already-exercised tool from the timing probe. For one shot it converts Tier 1's inference into direct evidence — the log shows the request carrying **A**, and the equality with the persisted `lastCorrelationId` is then observed rather than deduced. The conditions are absolute:
+
+- it is **diagnostic evidence collection only** and **changes no iFlow semantics** — no payload, routing, retry, authentication or `throwExceptionOnFailure` change, and no redeployment;
+- **restore the log level to Info immediately after the run**, without waiting for the automatic expiry;
+- **never copy an `Authorization` header, a `Cookie`, a `set-cookie`, an `X-CSRF-Token`, a service key, a client secret or any other credential** out of a Trace panel — not into the repository, not into a report, not into chat. Trace captures headers and payloads, which is exactly why it is switched off again at once;
+- capture only the minimum: the correlation ID, the step names and the status.
+
+**If Trace is declined for this run, the limitation stands and the gate is weakened rather than quietly satisfied.** The procedural gate then reads "Cloud Integration evidence confirms, by uniqueness of window and `COMPLETED` status, that the single execution the task produced reached `applySupplierResponse`", carrying **inference** as its evidence level — and the write-up must not claim that correlation A was observed in Cloud Integration.
+
+**One independent corroboration exists either way**, and it is worth recording because it comes from a third system: after the experiment SAP holds `LastResponseId` equal to the fixture's `responseId`. That proves the response itself reached SAP. It does not identify which correlation ID carried it, so it strengthens the chain without substituting for Tier 2.
+
+### Reconciliation and the at-most-once proof
+
+Only after the real-send `204` gate **and** the post-send HANA re-read have both passed may the deployed reconciliation command run, with the same `responseId`, the normal `HttpResponseTransport`, the normal 30-second deadline and a fresh correlation **B**. Expected: `B ≠ A`, `attempts 2`, `state DELIVERED`.
+
+SAP is read three times: **L0** the baseline before the experiment, **L1** after the first real send has completed and **before** reconciliation, **L2** after reconciliation. For `LastChangedAt` the valid result is
+
+```
+L0 ≠ L1   AND   L1 == L2
+```
+
+**`LastChangedAt` alone is not the whole proof, and the response-identity invariant is checked alongside it.** These are **procedural SAP proofs supporting criteria 8 and 9**, not a tenth business-state acceptance criterion.
+
+| Reading | Must show |
+| --- | --- |
+| **L1** — after the first real send | the expected commercial response applied; `LastResponseId` = the fixture's `responseId`; **`LastResponseVersion` = 1**, because this is the first supplier response version for an untouched fixture; `LastChangedAt` moved from L0 |
+| **L2** — after reconciliation | the **same** `LastResponseId`; **`LastResponseVersion` still 1**; `LastChangedAt` **unchanged** from L1 |
+
+**The reconciliation replay must never produce `LastResponseVersion > 1`.** A replay of one response cannot create a second version, and if it does, the receiver treated an idempotent replay as a new decision.
+
+**STOP** if any of the following holds: `LastResponseId` differs from the fixture's `responseId`; `LastResponseVersion` is not `1` after the successful first real send; `LastResponseVersion` increases during reconciliation; or `LastChangedAt` changes again during reconciliation.
+
+The expected strong branch is that SAP was already applied during the first real send, so reconciliation must be idempotent. A second `LastChangedAt` movement, or any version increase, violates the at-most-once acceptance condition and is **the most important negative finding this experiment could produce** — it must be reported, not worked around.
+
+### Acceptance criteria
+
+The nine business-state criteria are unchanged from the 7.1 freeze:
+
+1. a real `SupplierResponseDeliveries` row reaches `UNKNOWN`;
+2. `attempts = 1`;
+3. correlation **A** stored;
+4. the same `responseId` is reconciled;
+5. correlation **B ≠ A**;
+6. `attempts = 2`;
+7. final state `DELIVERED`;
+8. the SAP commercial response is applied **at most once**;
+9. `LastChangedAt` moves **at most once**.
+
+The following are **procedural gates, not business-state criteria**, and must not be presented as new acceptance conditions:
+
+- exactly one intended `PENDING` row exists before the experiment;
+- the real send is initiated exactly once;
+- the retained real send settles `answered = true` with `HTTP 204`;
+- the row remains `UNKNOWN` / `attempts 1` / correlation **A** after the real send settles;
+- Cloud Integration evidence confirms that the execution the task produced reached `applySupplierResponse` — **at Tier 2** (temporary Trace, correlation **A** read directly) or, if Trace is declined, **at Tier 1** (uniqueness of window plus `COMPLETED`, recorded as **inference**);
+- reconciliation is forbidden until every one of those gates has passed.
 
 ## Phase 7 acceptance matrix
 
 | Subphase | Runtime acceptance criterion | Blocked by |
 | --- | --- | --- |
 | **7.1** | Not runtime. **Gate: this document is frozen, every matrix row carries an evidence level, and no executable source changed.** | — |
-| 7.2 | **The safety gate passed before anything was sent** — exactly one eligible `PENDING` row, proven to be the fixture by both a read-only query and a normal-deadline dry run; a genuine `UNKNOWN` row exists in HANA with a real correlation ID; reconciliation returns `DELIVERED` at `attempts 2` with the **same** `responseId` and a **fresh** correlation ID; SAP's `LastChangedAt` moved **at most once** end to end; **no unrelated supplier response changed state** | 7.1 |
+| 7.2 | **The safety gate passed before anything was sent** — exactly one eligible `PENDING` row, proven to be the fixture by both a read-only query and a normal-deadline dry run. A real `UNKNOWN` row exists in HANA at `attempts 1` carrying correlation **A**; **the retained real send settled `answered = true` with `HTTP 204`** and the row was still `UNKNOWN` afterwards; Cloud Integration evidence confirms that the single execution in the task's window reached `applySupplierResponse`, with correlation **A** read directly under temporary Trace or, if Trace is declined, established by uniqueness and recorded as inference; reconciliation then returns `DELIVERED` at `attempts 2` with the **same** `responseId` and a **fresh** correlation **B ≠ A**; `L0 ≠ L1` and `L1 == L2`, so SAP's `LastChangedAt` moved **at most once** end to end; **no unrelated supplier response changed state**. The unanswered observation is injected at the `ResponseTransport` seam, not at the HTTP client, which waits normally and receives the real result — a real timeout, socket abort, caller disconnect or client abandonment is **not** claimed here and stays in 7.9 | 7.1 |
 | 7.3 | A deployed flush writes exactly one attempt row per attempt; a losing compare-and-set writes **none**; 7.2's sequence replayed yields two attempt rows with two distinct correlation IDs | 7.2 |
 | 7.4 | A `PENDING` row is skipped before it is due and attempted after; an exhausted row is skipped indefinitely and appears as retry-exhausted; `UNKNOWN` is never auto-retried; a category-A failure lands in `PENDING`, not `UNKNOWN` | 7.3 |
 | 7.5 | Two concurrent deployed flushes: one claims, one skips; no row sent twice unnecessarily; a killed runner's row is reclaimed after its lease and completes | 7.4 |
@@ -438,6 +609,6 @@ Both end `DELIVERED` and both prove *applied at most once*; they differ only in 
 
 **OQ-2 — how should Cloud Integration surface a pre-send failure?** Correcting the CSRF misclassification requires the iFlow to answer with something CAP can distinguish, which means an Exception Subprocess on the inbound flow returning a status in the transient class (for example `503` with a distinguishing code) rather than an unhandled `500`. **This is a second Cloud Integration change and is not covered by the approved MPL custom-header ruling.** It needs its own decision. **Does not block 7.2**, and must be settled before 7.4 can claim category A is handled on the inbound leg.
 
-**OQ-3 — what is the real round-trip latency?** 7.2 sets `PIH_CI_TIMEOUT_MS` below the normal round trip, and no committed artifact records what that round trip is. The value must be **measured** from a known-good 6.5f delivery's message-processing log before the test runs, not guessed. **This is a step inside 7.2, not a blocker of it.**
+**OQ-3 — what is the real round-trip latency? RESOLVED BY MEASUREMENT, AND IT RETIRED THE MECHANISM THAT ASKED IT.** Three real message-processing logs were captured under temporary Trace, **one of them (Probe A) matched against a CAP-side elapsed measurement**; B and C have Cloud Integration timings only. `T2 − T0` spans 468–1789 ms and `T4 − T0` spans 869–2943 ms. A conservative cross-run argument — using A's **directly measured 963 ms CAP-observed round trip** and nothing but `δout ≥ 0` for B and C — shows that a guaranteed-post-`T2` timeout for B requires `timeout > 1789 ms` while making A's run unanswered requires `timeout < 963 ms`. **No fixed value satisfies both**, and the shortened-`PIH_CI_TIMEOUT_MS` mechanism is therefore **retired**. The derivation is in §C of the Phase 7.2 section; it uses no `T4`-derived bound and makes **no assumption that A's overhead applies to B or C**. `Δ_total_A = 94 ms` is retained there as a measured diagnostic fact only. The question is closed and nothing further needs measuring for 7.2.
 
-**Nothing blocks 7.2.** It requires no code change, no deployment, no SAP change and no Integration Suite change: `readCiConfig()` reads `PIH_CI_TIMEOUT_MS` from the process environment at call time, so a single task invocation can shorten that one attempt's client deadline without touching the application's own configuration.
+**Nothing blocks 7.2.** It requires no code change, no deployment, no SAP change and no Integration Suite change. `ResponseTransport` is a required injectable option on `flushSupplierResponses`, so a one-off scratch task can compose the deployed `HttpResponseTransport` behind a state-machine-facing unanswered observation — reusing the deployed payload builder, transport, classifier and guarded write without duplicating any of them. The real transport send is **not** interrupted: it runs concurrently to completion and its retained result must settle `HTTP 204`. `PIH_CI_TIMEOUT_MS` is **not** set by that task, because the real send needs the normal 30-second deadline in order to finish.
