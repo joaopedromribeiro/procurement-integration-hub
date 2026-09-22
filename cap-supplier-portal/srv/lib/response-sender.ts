@@ -25,6 +25,11 @@ import {
 } from '#cds-models/pih/portal'
 import type { ResponseTransport } from './ci-transport'
 import {
+  calculateRetryTiming,
+  retryEligibility,
+  type JitterSelector
+} from './retry-policy'
+import {
   buildSupplierResponsePayload,
   categorise,
   classify,
@@ -49,10 +54,12 @@ import {
  */
 interface AttemptFacts {
   startedAt: string
+  completedAt: string
   durationMs: number
   httpStatus: number | null
   errorCategory: AttemptErrorCategory
   correlationId: string | null
+  jitter?: JitterSelector
 }
 
 /** Wall clock for the record, monotonic clock for the elapsed time. */
@@ -84,6 +91,9 @@ export interface FlushSummary {
   pending: number
   unknown: number
   skipped: number
+  beforeDue: number
+  retryExhausted: number
+  retryWindowBlocked: number
   outcomes: AttemptOutcome[]
 }
 
@@ -95,6 +105,10 @@ export interface FlushOptions {
   dryRun?: boolean
   /** Injected so tests can assert a fresh correlation ID per attempt. */
   newCorrelationId?: () => string
+  /** Invocation and persistence clock, injected for boundary tests. */
+  now?: () => Date
+  /** Positive jitter selector, injected so tests never depend on randomness. */
+  jitter?: JitterSelector
   log?: (line: string) => void
 }
 
@@ -116,11 +130,14 @@ export async function flushSupplierResponses(options: FlushOptions): Promise<Flu
     limit = DEFAULT_LIMIT,
     dryRun = false,
     newCorrelationId = randomUUID,
+    now = () => new Date(),
+    jitter,
     log = () => {}
   } = options
 
   const summary: FlushSummary = {
-    scanned: 0, delivered: 0, failed: 0, pending: 0, unknown: 0, skipped: 0, outcomes: []
+    scanned: 0, delivered: 0, failed: 0, pending: 0, unknown: 0, skipped: 0,
+    beforeDue: 0, retryExhausted: 0, retryWindowBlocked: 0, outcomes: []
   }
 
   // Oldest first, and within one order by version ascending. An acceptance must
@@ -129,13 +146,21 @@ export async function flushSupplierResponses(options: FlushOptions): Promise<Flu
   const rows = (await SELECT
     .from(SupplierResponseDeliveries)
     .where({ state: 'PENDING' })
-    .orderBy('createdAt', 'version')
-    .limit(limit)) as unknown as ResponseRow[]
+    .orderBy('createdAt', 'version')) as unknown as ResponseRow[]
 
-  summary.scanned = rows.length
   if (!rows.length) {
     log('No PENDING supplier responses.')
     return summary
+  }
+
+  // One invocation observes one instant. A row cannot move from before-due to
+  // due merely because another row took time to send during this same drain.
+  const invokedAt = now()
+  for (const row of rows) {
+    const eligibility = retryEligibility(row, invokedAt)
+    if (eligibility === 'BEFORE_DUE') summary.beforeDue++
+    else if (eligibility === 'RETRY_EXHAUSTED') summary.retryExhausted++
+    else if (eligibility === 'RETRY_WINDOW_BLOCKED') summary.retryWindowBlocked++
   }
 
   const orders = await readOrders(rows)
@@ -157,24 +182,45 @@ export async function flushSupplierResponses(options: FlushOptions): Promise<Flu
   // that SAP sees every version in order; reconciling a FAILED or UNKNOWN row
   // against what SAP actually holds is a Phase 6.5f obligation.
   const blocked = new Set<string>()
+  let attempted = 0
 
   for (const row of rows) {
+    const eligibility = retryEligibility(row, invokedAt)
+
     if (blocked.has(row.order_ID)) {
-      summary.skipped++
-      summary.outcomes.push({
-        responseId: row.responseId,
-        portalOrderId: row.order_ID,
-        version: row.version,
-        decision: row.decision,
-        state: 'SKIPPED',
-        error: 'An earlier response for this order has not reached SAP yet.'
-      })
-      log(`SKIP  ${row.responseId} v${row.version} — an earlier response for this order is still pending.`)
+      if (eligibility === 'ELIGIBLE' && attempted < limit) {
+        summary.skipped++
+        summary.scanned++
+        summary.outcomes.push({
+          responseId: row.responseId,
+          portalOrderId: row.order_ID,
+          version: row.version,
+          decision: row.decision,
+          state: 'SKIPPED',
+          error: 'An earlier response for this order has not reached SAP yet.'
+        })
+        log(`SKIP  ${row.responseId} v${row.version} — an earlier response for this order is still pending.`)
+      }
       continue
     }
 
+    if (eligibility !== 'ELIGIBLE') {
+      blocked.add(row.order_ID)
+      const reason: Record<string, string> = {
+        BEFORE_DUE: 'its retry eligibility time has not arrived',
+        RETRY_EXHAUSTED: 'its four-attempt budget is exhausted',
+        RETRY_WINDOW_BLOCKED: 'its 15-minute retry window is exhausted'
+      }
+      log(`WAIT  ${row.responseId} v${row.version} — ${reason[eligibility]}.`)
+      continue
+    }
+
+    if (attempted >= limit) continue
+    attempted++
+    summary.scanned++
+
     const outcome = await attempt(row, orders.get(row.order_ID), {
-      transport, dryRun, newCorrelationId, log,
+      transport, dryRun, newCorrelationId, now, jitter, log,
       // Rows were selected as PENDING, so that is what the guarded write expects.
       expectedState: 'PENDING'
     })
@@ -186,6 +232,14 @@ export async function flushSupplierResponses(options: FlushOptions): Promise<Flu
     else if (outcome.state === 'PENDING') { summary.pending++; blocked.add(row.order_ID) }
     else if (outcome.state === 'UNKNOWN') { summary.unknown++; blocked.add(row.order_ID) }
     else summary.skipped++
+  }
+
+  if (summary.scanned === 0) {
+    log(
+      `No eligible PENDING supplier responses` +
+      ` (before-due ${summary.beforeDue}, retry-exhausted ${summary.retryExhausted}, ` +
+      `retry-window-blocked ${summary.retryWindowBlocked}).`
+    )
   }
 
   return summary
@@ -229,7 +283,8 @@ async function attempt(
   row: ResponseRow,
   order: ResponseOrder | undefined,
   context: Required<Pick<FlushOptions, 'transport' | 'dryRun' | 'newCorrelationId' | 'log'>>
-    & { expectedState: DeliveryState }
+    & Pick<FlushOptions, 'jitter'>
+    & { expectedState: DeliveryState; now: () => Date }
 ): Promise<AttemptOutcome> {
   const base = {
     responseId: row.responseId,
@@ -241,7 +296,7 @@ async function attempt(
   // The attempt starts HERE, before the payload is built, so a payload that
   // cannot be built has a real measured duration rather than a manufactured
   // zero. An attempt is a delivery attempt, not only its socket time.
-  const startedAt = new Date().toISOString()
+  const startedAt = context.now().toISOString()
   const startedMonotonic = performance.now()
 
   // A row that cannot be turned into a payload is a deterministic failure. It
@@ -274,10 +329,12 @@ async function attempt(
     // could exist.
     await record(row, 'FAILED', reason.slice(0, 255), null, context.expectedState, {
       startedAt,
+      completedAt: context.now().toISOString(),
       durationMs: elapsedMs(startedMonotonic),
       httpStatus: null,
       errorCategory: 'PAYLOAD',
-      correlationId: null
+      correlationId: null,
+      jitter: context.jitter
     })
     context.log(`FAIL  ${row.responseId} v${row.version} — ${reason}`)
     return { ...base, state: 'FAILED', error: reason }
@@ -294,6 +351,7 @@ async function attempt(
   const correlationId = context.newCorrelationId()
 
   const result = await context.transport.send(payload, correlationId)
+  const completedAt = context.now().toISOString()
   const state = classify(result)
   const error = describe(result)
 
@@ -301,10 +359,12 @@ async function attempt(
   // value, passed once. They cannot drift because there is only one `state`.
   const written = await record(row, state, error, correlationId, context.expectedState, {
     startedAt,
+    completedAt,
     durationMs: elapsedMs(startedMonotonic),
     httpStatus: result.answered && result.status !== undefined ? result.status : null,
     errorCategory: categorise(result),
-    correlationId
+    correlationId,
+    jitter: context.jitter
   })
 
   if (!written) {
@@ -413,6 +473,8 @@ export async function reconcileSupplierResponse(options: ReconcileOptions): Prom
     transport,
     dryRun: false,
     newCorrelationId,
+    now: () => new Date(),
+    jitter: undefined,
     log,
     // The compare-and-set guard: this write lands only if the row is still the
     // UNKNOWN one that was read a moment ago.
@@ -489,12 +551,22 @@ async function record(
     // One expression, used twice: the parent's counter and the child's ordinal
     // are the same number by construction and cannot drift.
     const attemptNumber = (row.attempts ?? 0) + 1
+    const retryTiming = state === 'PENDING'
+      ? calculateRetryTiming({
+          attempts: attemptNumber,
+          completedAt: new Date(facts.completedAt),
+          retryWindowStartedAt: row.retryWindowStartedAt,
+          jitter: facts.jitter
+        })
+      : { nextAttemptAt: null, retryWindowStartedAt: null }
 
     const affected = await UPDATE(SupplierResponseDeliveries)
       .set({
         state,
         attempts: attemptNumber,
-        lastAttemptAt: new Date().toISOString(),
+        lastAttemptAt: facts.completedAt,
+        nextAttemptAt: retryTiming.nextAttemptAt,
+        retryWindowStartedAt: retryTiming.retryWindowStartedAt,
         lastError: error,
         lastCorrelationId: correlationId
       } as any)

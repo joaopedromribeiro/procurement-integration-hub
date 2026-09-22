@@ -17,7 +17,7 @@
     "pretypecheck": "npm run generate-types",
     "typecheck": "tsc --noEmit",
     "pretest": "npm run generate-types",
-    "test": "node --import tsx --import ./test/cds-typescript.ts --test test/health.test.ts test/domain-model.test.ts test/integration-ingestion.test.ts test/supplier-service.test.ts test/supplier-ui.test.ts test/supplier-response-sender.test.ts test/cds-bootstrap.test.ts test/reconcile-supplier-response.test.ts",
+    "test": "node --import tsx --import ./test/cds-typescript.ts --test test/health.test.ts test/domain-model.test.ts test/integration-ingestion.test.ts test/supplier-service.test.ts test/supplier-ui.test.ts test/retry-policy.test.ts test/supplier-response-sender.test.ts test/cds-bootstrap.test.ts test/reconcile-supplier-response.test.ts",
     "flush-responses": "node --import tsx scripts/flush-supplier-responses.ts",
     "reconcile-response": "node --import tsx scripts/reconcile-supplier-response.ts"
   },

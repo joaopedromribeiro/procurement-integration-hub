@@ -119,7 +119,10 @@ async function main() {
     `  failed ${summary.failed}` +
     `  pending ${summary.pending}` +
     `  unknown ${summary.unknown}` +
-    `  skipped ${summary.skipped}`
+    `  skipped ${summary.skipped}` +
+    `  before-due ${summary.beforeDue}` +
+    `  retry-exhausted ${summary.retryExhausted}` +
+    `  retry-window-blocked ${summary.retryWindowBlocked}`
   )
 
   // A non-zero exit for anything that did not reach SAP, so a task's outcome is

@@ -48,6 +48,8 @@ export interface ResponseRow {
   respondedAt?: string | Date | null
   state?: string | null
   attempts?: number | null
+  nextAttemptAt?: string | Date | null
+  retryWindowStartedAt?: string | Date | null
 }
 
 /** The portal order the response answers, joined with its supplier code. */

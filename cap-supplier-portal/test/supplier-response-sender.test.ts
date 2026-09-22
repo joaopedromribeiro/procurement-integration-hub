@@ -293,21 +293,36 @@ describe('delivery classification', () => {
     assert.equal(classify({ answered: false }), 'UNKNOWN')
   })
 
-  test('a retryable refusal returns the row to PENDING and it is picked up again', async () => {
+  test('a retryable refusal waits until its durable due time, then is picked up again', async () => {
     await accept(SUP001_ORDER_A)
 
-    await flushSupplierResponses({ transport: new FakeTransport({ answered: true, status: 503 }) })
+    let clock = new Date('2026-09-21T12:00:00.000Z')
+    const policy = { now: () => new Date(clock), jitter: () => 0 }
+
+    await flushSupplierResponses({
+      transport: new FakeTransport({ answered: true, status: 503 }), ...policy
+    })
 
     const [afterFirst]: any[] = await rowsFor(SUP001_ORDER_A)
     assert.equal(afterFirst.state, 'PENDING', 'congestion is not a failure')
     assert.equal(afterFirst.attempts, 1)
+    assert.equal(new Date(afterFirst.retryWindowStartedAt).toISOString(), clock.toISOString())
+    assert.equal(new Date(afterFirst.nextAttemptAt).toISOString(), '2026-09-21T12:00:05.000Z')
 
+    const early = new FakeTransport(ok204)
+    const earlySummary = await flushSupplierResponses({ transport: early, ...policy })
+    assert.equal(early.sent.length, 0)
+    assert.equal(earlySummary.beforeDue, 1)
+
+    clock = new Date('2026-09-21T12:00:05.000Z')
     const retry = new FakeTransport(ok204)
-    await flushSupplierResponses({ transport: retry })
+    await flushSupplierResponses({ transport: retry, ...policy })
 
     const [afterRetry]: any[] = await rowsFor(SUP001_ORDER_A)
     assert.equal(afterRetry.state, 'DELIVERED')
     assert.equal(afterRetry.attempts, 2, 'attempts accumulate and are never reset')
+    assert.equal(afterRetry.nextAttemptAt, null)
+    assert.equal(afterRetry.retryWindowStartedAt, null)
     assert.equal(retry.sent[0].payload.responseId, afterRetry.responseId, 'the same responseId')
   })
 })
@@ -632,10 +647,12 @@ describe('a malformed payload, and the dry-run boundary', () => {
 
     const after: any = (await rowsFor(SUP001_ORDER_A))[0]
     assert.equal(after.state, 'PENDING', 'the durable state is untouched')
-    assert.equal(after.attempts, 0, 'a dry run never spends an attempt number')
-    assert.equal(after.lastAttemptAt, null)
-    assert.equal(after.lastError, null)
-    assert.equal(after.lastCorrelationId, null)
+    for (const field of [
+      'attempts', 'lastAttemptAt', 'lastError', 'lastCorrelationId',
+      'nextAttemptAt', 'retryWindowStartedAt'
+    ]) {
+      assert.deepEqual(after[field], before[field], `${field} is unchanged`)
+    }
     assert.equal(after.ID, before.ID, 'the same row, not a replacement')
 
     // The Phase 7.3 entity exists locally even though nothing writes to it yet,
@@ -699,6 +716,241 @@ describe('the attempt-error categories', () => {
     assert.equal(classify(conflict), 'FAILED')
     assert.equal(categorise(conflict), 'REFUSED')
   })
+})
+
+describe('Phase 7.4a durable retry policy', () => {
+  const T0 = new Date('2026-09-21T12:00:00.000Z')
+  const historyFor = (delivery: string) =>
+    SELECT.from(SupplierResponseDeliveryAttempts).where({ delivery_ID: delivery }).orderBy('attemptNumber')
+
+  async function proveNonEligibleRowDoesNotConsumeLimit(
+    blockerFields: Record<string, unknown>,
+    diagnostic: 'beforeDue' | 'retryExhausted' | 'retryWindowBlocked'
+  ) {
+    await accept(SUP001_ORDER_A)
+    await accept(SUP001_ORDER_B)
+    const [older]: any[] = await rowsFor(SUP001_ORDER_A)
+    const [newer]: any[] = await rowsFor(SUP001_ORDER_B)
+
+    await UPDATE(SupplierResponseDeliveries).set({
+      createdAt: new Date(T0.getTime() - 2_000).toISOString(),
+      ...blockerFields
+    } as any).where({ ID: older.ID })
+    await UPDATE(SupplierResponseDeliveries).set({
+      createdAt: new Date(T0.getTime() - 1_000).toISOString(),
+      attempts: 0,
+      nextAttemptAt: null,
+      retryWindowStartedAt: null
+    } as any).where({ ID: newer.ID })
+
+    const [blockerBefore]: any[] = await rowsFor(SUP001_ORDER_A)
+    const transport = new FakeTransport(ok204)
+    const summary = await flushSupplierResponses({ transport, limit: 1, now: () => T0 })
+
+    assert.equal(summary[diagnostic], 1)
+    assert.equal(summary.scanned, 1, 'only the eligible row consumes the attempt limit')
+    assert.equal(transport.sent.length, 1)
+    assert.equal(transport.sent[0].payload.portalOrderId, SUP001_ORDER_B)
+    assert.equal((await historyFor(older.ID)).length, 0, 'the older non-eligible row writes no history')
+    assert.equal((await historyFor(newer.ID)).length, 1, 'the newer eligible row writes one history row')
+
+    const [blockerAfter]: any[] = await rowsFor(SUP001_ORDER_A)
+    for (const field of ['attempts', 'nextAttemptAt', 'retryWindowStartedAt']) {
+      assert.deepEqual(blockerAfter[field], blockerBefore[field], `${field} stays unchanged`)
+    }
+  }
+
+  test('an older before-due row does not consume limit 1 ahead of an eligible order', async () => {
+    await proveNonEligibleRowDoesNotConsumeLimit({
+      attempts: 1,
+      retryWindowStartedAt: T0.toISOString(),
+      nextAttemptAt: new Date(T0.getTime() + 1).toISOString()
+    }, 'beforeDue')
+  })
+
+  test('an older retry-exhausted row does not consume limit 1 ahead of an eligible order', async () => {
+    await proveNonEligibleRowDoesNotConsumeLimit({
+      attempts: 4,
+      retryWindowStartedAt: T0.toISOString(),
+      nextAttemptAt: null
+    }, 'retryExhausted')
+  })
+
+  test('an older window-blocked row does not consume limit 1 ahead of an eligible order', async () => {
+    await proveNonEligibleRowDoesNotConsumeLimit({
+      attempts: 1,
+      retryWindowStartedAt: new Date(T0.getTime() - 15 * 60 * 1000 - 1).toISOString(),
+      nextAttemptAt: null
+    }, 'retryWindowBlocked')
+  })
+
+  test('one captured invocation instant controls diagnostics and sending at the window boundary', async () => {
+    await accept(SUP001_ORDER_A)
+    const [row]: any[] = await rowsFor(SUP001_ORDER_A)
+    await UPDATE(SupplierResponseDeliveries).set({
+      attempts: 1,
+      retryWindowStartedAt: new Date(T0.getTime() - 15 * 60 * 1000).toISOString(),
+      nextAttemptAt: T0.toISOString()
+    } as any).where({ ID: row.ID })
+
+    let clockReads = 0
+    const now = () => new Date(T0.getTime() + clockReads++)
+    const transport = new FakeTransport(ok204)
+    const summary = await flushSupplierResponses({ transport, now })
+
+    assert.equal(summary.retryWindowBlocked, 0, 'diagnostics classify the exact boundary as eligible')
+    assert.equal(summary.scanned, 1, 'operative eligibility agrees with diagnostics')
+    assert.equal(transport.sent.length, 1, 'the row is sent even though later clock reads cross the boundary')
+    assert.equal(clockReads, 3, 'one invocation read plus separate attempt start and completion reads')
+  })
+
+  test('before-due, exhausted and window-blocked rows are distinct and write nothing', async () => {
+    await accept(SUP001_ORDER_A)
+    const [row]: any[] = await rowsFor(SUP001_ORDER_A)
+
+    const cases = [
+      {
+        fields: {
+          attempts: 1, retryWindowStartedAt: T0.toISOString(),
+          nextAttemptAt: new Date(T0.getTime() + 5_000).toISOString()
+        },
+        summary: 'beforeDue'
+      },
+      {
+        fields: { attempts: 4, retryWindowStartedAt: T0.toISOString(), nextAttemptAt: null },
+        summary: 'retryExhausted'
+      },
+      {
+        fields: {
+          attempts: 1,
+          retryWindowStartedAt: new Date(T0.getTime() - 15 * 60 * 1000 - 1).toISOString(),
+          nextAttemptAt: null
+        },
+        summary: 'retryWindowBlocked'
+      }
+    ] as const
+
+    for (const item of cases) {
+      await UPDATE(SupplierResponseDeliveries).set(item.fields as any).where({ ID: row.ID })
+      const transport = new FakeTransport(ok204)
+      const summary = await flushSupplierResponses({ transport, now: () => T0 })
+      assert.equal(transport.sent.length, 0, item.summary)
+      assert.equal(summary[item.summary], 1, item.summary)
+      assert.equal(summary.scanned, 0, item.summary)
+      assert.equal((await historyFor(row.ID)).length, 0, `${item.summary} writes no history`)
+      const after: any = (await rowsFor(SUP001_ORDER_A))[0]
+      assert.equal(after.attempts, item.fields.attempts, `${item.summary} spends no attempt`)
+    }
+  })
+
+  test('a legacy PENDING row below budget and with null policy fields is immediately eligible', async () => {
+    await accept(SUP001_ORDER_A)
+    const [row]: any[] = await rowsFor(SUP001_ORDER_A)
+    await UPDATE(SupplierResponseDeliveries)
+      .set({ attempts: 2, nextAttemptAt: null, retryWindowStartedAt: null } as any)
+      .where({ ID: row.ID })
+
+    const transport = new FakeTransport(ok204)
+    await flushSupplierResponses({ transport, now: () => T0 })
+
+    assert.equal(transport.sent.length, 1)
+    const after: any = (await rowsFor(SUP001_ORDER_A))[0]
+    assert.equal(after.state, 'DELIVERED')
+    assert.equal(after.attempts, 3)
+    assert.deepEqual((await historyFor(row.ID) as any[]).map(item => item.attemptNumber), [3],
+      'the new attempt is recorded at its truthful ordinal; attempts 1 and 2 are not backfilled')
+  })
+
+  test('a legacy null-timing row starts its retry window at the current transient completion', async () => {
+    await accept(SUP001_ORDER_A)
+    const [row]: any[] = await rowsFor(SUP001_ORDER_A)
+    const historicalAttempt = new Date(T0.getTime() - 24 * 60 * 60 * 1000).toISOString()
+    await UPDATE(SupplierResponseDeliveries).set({
+      attempts: 2,
+      lastAttemptAt: historicalAttempt,
+      nextAttemptAt: null,
+      retryWindowStartedAt: null
+    } as any).where({ ID: row.ID })
+
+    const transport = new FakeTransport({ answered: true, status: 503, detail: 'upstream busy' })
+    await flushSupplierResponses({ transport, now: () => T0, jitter: () => 0 })
+
+    assert.equal(transport.sent.length, 1, 'the legacy null due is immediately eligible')
+    const [after]: any[] = await rowsFor(SUP001_ORDER_A)
+    assert.equal(after.state, 'PENDING')
+    assert.equal(after.attempts, 3)
+    assert.equal(new Date(after.retryWindowStartedAt).toISOString(), T0.toISOString())
+    assert.notEqual(new Date(after.retryWindowStartedAt).toISOString(), historicalAttempt)
+    assert.equal(new Date(after.nextAttemptAt).toISOString(),
+      new Date(T0.getTime() + 120_000).toISOString())
+    assert.deepEqual((await historyFor(row.ID) as any[]).map(item => item.attemptNumber), [3],
+      'only the current attempt is recorded; attempts 1 and 2 are not backfilled')
+  })
+
+  test('four transient attempts persist one history row each and then become exhausted', async () => {
+    await accept(SUP001_ORDER_A)
+    let clock = new Date(T0)
+    const windowStart = clock.toISOString()
+    const expectedDelay = [5_000, 30_000, 120_000]
+
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const transport = new FakeTransport({ answered: true, status: 503, detail: 'upstream busy' })
+      await flushSupplierResponses({
+        transport,
+        now: () => new Date(clock),
+        jitter: () => 0
+      })
+      assert.equal(transport.sent.length, 1, `attempt ${attempt}`)
+
+      const parent: any = (await rowsFor(SUP001_ORDER_A))[0]
+      assert.equal(parent.state, 'PENDING')
+      assert.equal(parent.attempts, attempt)
+      assert.equal(new Date(parent.retryWindowStartedAt).toISOString(), windowStart)
+
+      const history: any[] = await historyFor(parent.ID)
+      assert.equal(history.length, attempt)
+      assert.deepEqual(history.map(item => item.attemptNumber),
+        Array.from({ length: attempt }, (_, index) => index + 1))
+
+      if (attempt < 4) {
+        const due = new Date(clock.getTime() + expectedDelay[attempt - 1])
+        assert.equal(new Date(parent.nextAttemptAt).toISOString(), due.toISOString())
+        clock = due
+      } else {
+        assert.equal(parent.nextAttemptAt, null)
+      }
+    }
+
+    const exhaustedTransport = new FakeTransport(ok204)
+    const summary = await flushSupplierResponses({ transport: exhaustedTransport, now: () => clock })
+    assert.equal(exhaustedTransport.sent.length, 0)
+    assert.equal(summary.retryExhausted, 1)
+    const parent: any = (await rowsFor(SUP001_ORDER_A))[0]
+    assert.equal(parent.attempts, 4)
+    assert.equal((await historyFor(parent.ID)).length, 4)
+  })
+
+  for (const expected of [
+    { label: 'success', result: ok204, state: 'DELIVERED' },
+    { label: 'refusal', result: conflict, state: 'FAILED' },
+    { label: 'ambiguity', result: timeout, state: 'UNKNOWN' }
+  ]) {
+    test(`${expected.label} clears automatic retry timing`, async () => {
+      await accept(SUP001_ORDER_A)
+      const [row]: any[] = await rowsFor(SUP001_ORDER_A)
+      await UPDATE(SupplierResponseDeliveries).set({
+        attempts: 1,
+        retryWindowStartedAt: T0.toISOString(),
+        nextAttemptAt: T0.toISOString()
+      } as any).where({ ID: row.ID })
+
+      await flushSupplierResponses({ transport: new FakeTransport(expected.result), now: () => T0 })
+      const after: any = (await rowsFor(SUP001_ORDER_A))[0]
+      assert.equal(after.state, expected.state)
+      assert.equal(after.nextAttemptAt, null)
+      assert.equal(after.retryWindowStartedAt, null)
+    })
+  }
 })
 
 describe('attempt history', () => {
@@ -812,8 +1064,12 @@ describe('attempt history', () => {
 
     const after: any = (await rowsFor(SUP001_ORDER_A))[0]
     assert.equal(after.state, 'PENDING')
-    assert.equal(after.attempts, 0)
-    assert.equal(after.lastAttemptAt, null)
+    for (const field of [
+      'attempts', 'lastAttemptAt', 'lastError', 'lastCorrelationId',
+      'nextAttemptAt', 'retryWindowStartedAt'
+    ]) {
+      assert.deepEqual(after[field], before[field], `${field} is unchanged`)
+    }
     assert.equal((await historyFor(before.ID)).length, 0, 'a dry run records no attempt')
   })
 

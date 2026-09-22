@@ -6,14 +6,14 @@ Phase 7 makes the bidirectional integration proven in Phase 6 operationally robu
 
 **Subphase 7.2 is COMPLETE and runtime-verified**, executed 2026-09-21 against the deployed droplet, the deployed `PIH_SupplierResponse_v1` and the real SAP system, with all nine acceptance criteria satisfied and no repository code changed. Its result and evidence are recorded in the Phase 7.2 section below.
 
-**Subphase 7.3 is COMPLETE and runtime-verified**, executed 2026-09-21 on a fresh SAP order `PO00000160`. It is the first Phase 7 subphase to change executable source: a `SupplierResponseDeliveryAttempts` child on the CAP inbound leg and a single `attempt_count` column on the SAP delivery intent. Its result and evidence are in the Phase 7.3 section below. **Subphases 7.4 through 7.9 have not started, and Phase 7 as a whole is not complete.**
+**Subphase 7.3 is COMPLETE and runtime-verified**, executed 2026-09-21 on a fresh SAP order `PO00000160`. It is the first Phase 7 subphase to change executable source: a `SupplierResponseDeliveryAttempts` child on the CAP inbound leg and a single `attempt_count` column on the SAP delivery intent. **Phase 7.4a, the CAP retry-eligibility core, is implemented and locally verified but not deployed; 7.4b–7.4e remain, so Phase 7.4 and Phase 7 as a whole are not complete.**
 
 | Subphase | Objective | State |
 | --- | --- | --- |
 | **7.1** | Fault model and acceptance criteria | **frozen — this document** |
 | **7.2** | Runtime-proven `UNKNOWN` and reconciliation, via a deterministic injected state-machine-facing unanswered observation over a real send | **COMPLETE — runtime-verified 2026-09-21** |
 | **7.3** | Attempt history — a durable CAP attempt child, and one outbound `attempt_count` on the SAP intent | **COMPLETE — runtime-verified 2026-09-21** |
-| 7.4 | Retry / transient failure policy | designed, not implemented |
+| 7.4 | Retry / transient failure policy | **7.4a CAP retry core implemented locally; 7.4 overall remains incomplete** |
 | 7.5 | Inbound concurrency hardening | designed, not implemented |
 | 7.6 | Outbound recovery parity / `retryDelivery` | designed, not implemented |
 | 7.7 | Monitoring and correlation | designed, not implemented |
@@ -304,6 +304,8 @@ Wording such as "retries after 5 s, 30 s and 120 s" is **forbidden** in Phase 7 
 | `PENDING`, transient (categories A and C) | **Retry-eligible** under a bounded budget, evaluated by the drain query at invocation time. |
 
 A budget that runs out adds **no fifth state**: the row stays `PENDING` with `attempts` at the maximum, is excluded by the drain query, and is surfaced separately by monitoring as retry-exhausted.
+
+**Frozen Phase 7.4 policy.** The budget is four total attempts. Transient attempts one, two and three select due times from 5 s, 30 s and 120 s plus positive-only uniform jitter from 0% through 20%; jitter never shortens the base and is selected once when the outcome is persisted. `nextAttemptAt` is that durable choice, and null means no deferred eligibility time — including on a legacy row below budget. The retry cycle begins at the first transient result, persisted as `retryWindowStartedAt`, and lasts at most 15 minutes. A candidate due time beyond the inclusive boundary is retained as diagnostic evidence but is never automatically eligible. Retry exhaustion is `PENDING AND attempts >= 4`; retry-window blocking is derived from `state`, `attempts`, `retryWindowStartedAt`, `nextAttemptAt` and the 15-minute constant. Neither adds a delivery state or a persisted diagnostic boolean. Future `Retry-After` may only postpone the normal jittered due time.
 
 ### Attempt history
 
@@ -921,6 +923,16 @@ A second manual read-only SAP verification after attempt B found `ZJP_PO_H` unch
 
 Activated manually in ADT by the project owner, then mirrored into this repository: `ZJP_PO_DLV`, `ZJP_I_DeliveryIntent`, its BDEF, `ZJP_CL_DISPATCH_COORDINATOR`, `ZJP_CL_PO_DISPATCH_TEST`, `ZJP_CL_DISPATCH_RUNNER` and `ZJP_CL_DISPATCH_RETRY_RUNNER`. `ZJP_CL_DISPATCH_RUNNER` drives one fresh order `DRAFT` → `submit` → `approve` → `sendToSupplier` → one coordinator run, because the Fiori Elements preview does not render `submit`/`approve` and `sendToSupplier` is EML-only by design. Both runners are harness sources, and both are tracked here for the same reason every other activated harness in `abap-rap/classes/` is.
 
+## Phase 7.4a — CAP retry eligibility core, implemented and locally verified
+
+The CAP inbound leg now enforces the frozen budget without a scheduler. `SupplierResponseDeliveries` adds nullable `nextAttemptAt` and `retryWindowStartedAt`; the attempt child is unchanged. `nextAttemptAt = null` means no deferred time, so a legacy `PENDING` row below budget is immediately eligible. Attempts one through three that finish `PENDING` select and persist the 5 s, 30 s or 120 s base plus one positive-only uniform 0–20% jitter value. The first such result freezes the retry-window anchor. At attempt four the row stays `PENDING`, clears the due time and is derived as retry-exhausted.
+
+Eligibility is evaluated against one clock instant per explicit flush invocation. A row is admitted only when it is `PENDING`, below four attempts, not outside the inclusive 15-minute retry window, and either carries no due time or has reached it. A persisted candidate beyond the window is retained as diagnostic evidence but excluded forever. The operator summary reports `before-due`, `retry-exhausted` and `retry-window-blocked` separately. Earlier non-eligible response versions still block later versions for the same order. No attempt-history query participates in any decision.
+
+The existing `record()` transaction remains the atomic boundary: the parent counter, retry timestamps and one child row commit together after the guarded update wins. A loser still returns before the insert; dry-run still returns before `record()`. Success, deterministic failure and ambiguity clear automatic-retry timing. `UNKNOWN` remains absent from the automatic drain and reconciliation remains explicit.
+
+**Evidence level: local automated execution only.** Typecheck passed; 179 tests in 40 suites passed with zero failures; `cds build --production` passed; the generated HANA table contains nullable `nextAttemptAt TIMESTAMP` and `retryWindowStartedAt TIMESTAMP`, with no attempt-child change. Nothing was deployed and no SAP, Cloud Integration, Cloud Foundry or remote HANA action ran. 7.4b–7.4e remain open, so Phase 7.4 is not complete.
+
 ## Phase 7 acceptance matrix
 
 | Subphase | Runtime acceptance criterion | Blocked by |
@@ -943,6 +955,6 @@ Activated manually in ADT by the project owner, then mirrored into this reposito
 
 **OQ-3 — what is the real round-trip latency? RESOLVED BY MEASUREMENT, AND IT RETIRED THE MECHANISM THAT ASKED IT.** Three real message-processing logs were captured under temporary Trace, **one of them (Probe A) matched against a CAP-side elapsed measurement**; B and C have Cloud Integration timings only. `T2 − T0` spans 468–1789 ms and `T4 − T0` spans 869–2943 ms. A conservative cross-run argument — using A's **directly measured 963 ms CAP-observed round trip** and nothing but `δout ≥ 0` for B and C — shows that a guaranteed-post-`T2` timeout for B requires `timeout > 1789 ms` while making A's run unanswered requires `timeout < 963 ms`. **No fixed value satisfies both**, and the shortened-`PIH_CI_TIMEOUT_MS` mechanism is therefore **retired**. The derivation is in §C of the Phase 7.2 section; it uses no `T4`-derived bound and makes **no assumption that A's overhead applies to B or C**. `Δ_total_A = 94 ms` is retained there as a measured diagnostic fact only. The question is closed and nothing further needs measuring for 7.2.
 
-**7.3 is complete, and it is the first Phase 7 subphase with executable source behind it.** The frozen field set was built exactly as designed on both legs, deployed, and exercised end to end on a fresh SAP order: two inbound attempt rows under two distinct correlation IDs, a parent reconciled from `UNKNOWN` to `DELIVERED`, no backfill of anything older, and SAP's `LastChangedAt` byte-for-byte unchanged across the replay. The outbound side records the truth including the part nobody planned — the first attempt met a stopped application and an answered `404`, so the fixture's outbound `AttemptCount` is **2**. **Next: 7.4, retry and transient-failure policy, not started. Phase 7 as a whole is not complete.**
+**7.3 is complete, and it is the first Phase 7 subphase with executable source behind it.** The frozen field set was built exactly as designed on both legs, deployed, and exercised end to end on a fresh SAP order: two inbound attempt rows under two distinct correlation IDs, a parent reconciled from `UNKNOWN` to `DELIVERED`, no backfill of anything older, and SAP's `LastChangedAt` byte-for-byte unchanged across the replay. The outbound side records the truth including the part nobody planned — the first attempt met a stopped application and an answered `404`, so the fixture's outbound `AttemptCount` is **2**. **Phase 7.4a is now implemented and locally verified; 7.4b–7.4e remain. Phase 7 as a whole is not complete.**
 
 **7.2 is complete, and the design held.** It required no code change, no deployment, no SAP change and no Integration Suite change. `ResponseTransport` is a required injectable option on `flushSupplierResponses`, so the one-off scratch task composed the deployed `HttpResponseTransport` behind a state-machine-facing unanswered observation — reusing the deployed payload builder, transport, classifier and guarded write without duplicating any of them. The real transport send was **not** interrupted: it ran concurrently to completion and its retained result settled `HTTP 204`. `PIH_CI_TIMEOUT_MS` was **not** set by that task, and the real send used the normal 30-second deadline. **Next: 7.3, attempt history, not started.**

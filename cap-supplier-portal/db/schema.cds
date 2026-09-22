@@ -281,6 +281,19 @@ entity SupplierResponseDeliveries : cuid {
     lastAttemptAt         : Timestamp;
 
     /**
+     * Exact durable eligibility time chosen after a transient outcome. Null
+     * means there is no deferred eligibility time; legacy null rows below the
+     * attempt budget remain immediately eligible.
+     */
+    nextAttemptAt         : Timestamp;
+
+    /**
+     * First transient failure handled by the Phase 7.4 retry policy. The retry
+     * cycle may produce due times for at most 15 minutes from this timestamp.
+     */
+    retryWindowStartedAt  : Timestamp;
+
+    /**
      * Transport diagnosis for the most recent attempt: a status code and a
      * short safe reason, never a response body, a header or a credential.
      */
@@ -293,9 +306,10 @@ entity SupplierResponseDeliveries : cuid {
     createdAt             : Timestamp;
 
     /**
-     * Phase 7.3 diagnostics. The four fields above stay the business fast path
-     * and are never replaced by a join against this collection; history exists
-     * to explain how the row reached its state, not to define it.
+     * Phase 7.3 diagnostics. The parent's counter, last-attempt facts and Phase
+     * 7.4 retry-policy timestamps stay the fast path and are never replaced by
+     * a join against this collection; history explains how the row reached its
+     * state, but never defines behavior.
      *
      * A composition, because an attempt has no meaning without the response it
      * was an attempt at, and must be deleted with it.
