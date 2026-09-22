@@ -235,3 +235,53 @@ export function describe(result: TransportResult): string | null {
   if (result.status !== undefined && result.status >= 200 && result.status < 300) return null
   return `HTTP ${result.status ?? 'unknown'}: ${result.detail ?? 'the receiver refused the request'}`.slice(0, 255)
 }
+
+/**
+ * Phase 7.3 — why an attempt ended as it did, for attempt history.
+ *
+ * A different question from `classify`, and deliberately a separate function:
+ * `classify` answers what the row's durable state becomes, this answers the
+ * reason. The two are stored side by side so a `FAILED` caused by a refusal can
+ * be told from a `FAILED` caused by a payload that could not be built.
+ *
+ * `PAYLOAD` is never produced here. A payload failure happens before there is a
+ * `TransportResult` at all, so the sender supplies that category directly.
+ *
+ * `NO_ANSWER` deliberately does not say whether the request was sent. Splitting
+ * pre-send from ambiguous post-send is Phase 7.4 work, and a category that
+ * claimed to know today would be claiming more than the transport reports.
+ */
+export type AttemptErrorCategory = 'NONE' | 'REFUSED' | 'TRANSIENT' | 'AMBIGUOUS' | 'NO_ANSWER' | 'PAYLOAD'
+
+export function categorise(result: TransportResult): AttemptErrorCategory {
+  if (!result.answered) return 'NO_ANSWER'
+
+  const status = result.status ?? 0
+
+  if (status >= 200 && status < 300) return 'NONE'
+
+  switch (status) {
+    case 400:
+    case 401:
+    case 403:
+    case 404:
+    case 409:
+    case 412:
+    case 413:
+      return 'REFUSED'
+
+    case 429:
+    case 502:
+    case 503:
+      return 'TRANSIENT'
+
+    case 500:
+    case 504:
+      return 'AMBIGUOUS'
+
+    default:
+      // The same split `classify` makes, for the same reason: an unlisted 5xx
+      // may have been delivered, anything else was an answered refusal.
+      return status >= 500 ? 'AMBIGUOUS' : 'REFUSED'
+  }
+}

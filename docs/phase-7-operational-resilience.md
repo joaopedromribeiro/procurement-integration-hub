@@ -4,13 +4,15 @@ Phase 7 makes the bidirectional integration proven in Phase 6 operationally robu
 
 **Subphase 7.1 is frozen design. No executable source was changed by it.** This document is that freeze: the fault model, the four failure categories, the CSRF investigation, the timeout reconciliation, and the terminology and direction decisions that subphases 7.2 through 7.9 must hold to.
 
-**Subphase 7.2 is COMPLETE and runtime-verified**, executed 2026-09-21 against the deployed droplet, the deployed `PIH_SupplierResponse_v1` and the real SAP system, with all nine acceptance criteria satisfied and no repository code changed. Its result and evidence are recorded in the Phase 7.2 section below. **Subphase 7.3, attempt history, is next and has not started.**
+**Subphase 7.2 is COMPLETE and runtime-verified**, executed 2026-09-21 against the deployed droplet, the deployed `PIH_SupplierResponse_v1` and the real SAP system, with all nine acceptance criteria satisfied and no repository code changed. Its result and evidence are recorded in the Phase 7.2 section below.
+
+**Subphase 7.3 is COMPLETE and runtime-verified**, executed 2026-09-21 on a fresh SAP order `PO00000160`. It is the first Phase 7 subphase to change executable source: a `SupplierResponseDeliveryAttempts` child on the CAP inbound leg and a single `attempt_count` column on the SAP delivery intent. Its result and evidence are in the Phase 7.3 section below. **Subphases 7.4 through 7.9 have not started, and Phase 7 as a whole is not complete.**
 
 | Subphase | Objective | State |
 | --- | --- | --- |
 | **7.1** | Fault model and acceptance criteria | **frozen — this document** |
 | **7.2** | Runtime-proven `UNKNOWN` and reconciliation, via a deterministic injected state-machine-facing unanswered observation over a real send | **COMPLETE — runtime-verified 2026-09-21** |
-| 7.3 | Attempt history | designed, not implemented |
+| **7.3** | Attempt history — a durable CAP attempt child, and one outbound `attempt_count` on the SAP intent | **COMPLETE — runtime-verified 2026-09-21** |
 | 7.4 | Retry / transient failure policy | designed, not implemented |
 | 7.5 | Inbound concurrency hardening | designed, not implemented |
 | 7.6 | Outbound recovery parity / `retryDelivery` | designed, not implemented |
@@ -312,6 +314,8 @@ A budget that runs out adds **no fifth state**: the row stays `PENDING` with `at
 The parent's `attempts`, `lastAttemptAt`, `lastError` and `lastCorrelationId` are **retained** as a denormalised fast path. They are already written by runtime-verified code and every existing query depends on them.
 
 **SAP — `attempt_count` on `zjp_po_dlv`, and nothing else in Phase 7.** It is the field the bounded budget requires and that the coordinator's own comment records as deferred; `last_correlation_id` already exists for the lookup that matters. A full outbound attempt-history child object is **not** built unless 7.9 produces runtime evidence that an outbound diagnosis is genuinely unreachable without it.
+
+**This design was implemented in 7.3 exactly as frozen above**, with no field added and none removed: the CAP child carries `attemptNumber`, `correlationId`, `startedAt`, `durationMs`, `outcome`, `httpStatus`, `errorCategory` and `errorSummary`, `completedAt` and `transportDirection` stayed excluded, the parent's four denormalised fields were retained, and SAP received `attempt_count` and nothing else. See the Phase 7.3 section below for the built shape and its runtime evidence.
 
 ### Observability identities
 
@@ -749,13 +753,181 @@ Each corrupted value stops at the first lowercase hexadecimal letter of the cano
 
 **The `PO00000121` `UNKNOWN` row is left untouched on purpose.** It is why the final census reads `DELIVERED 4, UNKNOWN 1`. Its existence does not affect the isolated `PO00000123` proof, which ran with `PENDING_TOTAL 0` beforehand and `PENDING_TOTAL 0` afterwards.
 
+## Phase 7.3 — attempt history, COMPLETE and runtime-verified
+
+Executed 2026-09-21. **This is the first Phase 7 subphase that changed executable source.** Both legs were built to the frozen design above, both were deployed, and both were exercised against the real deployed system rather than only under test.
+
+The two counters this subphase adds are **independent, measure opposite directions, and must never be conflated**:
+
+| Counter | Direction it counts | Written by |
+| --- | --- | --- |
+| `ZJP_PO_DLV-AttemptCount` | **outbound** SAP → Cloud Integration → CAP transport attempts | `ZJP_CL_DISPATCH_COORDINATOR` only |
+| `SupplierResponseDeliveries.attempts` + `SupplierResponseDeliveryAttempts` | **inbound** CAP → Cloud Integration → SAP supplier-response attempts | `response-sender.ts` `record()` only |
+
+A reader who reads one as a total of the other will draw the wrong conclusion from every number below. The Phase 7.3 fixture ends at SAP `AttemptCount = 2` **and** CAP `attempts = 2`, and those two 2s count entirely different events.
+
+### What was built
+
+**CAP — `SupplierResponseDeliveryAttempts`**, a composition child of the existing `SupplierResponseDeliveries`. The exact field set, and nothing else:
+
+| Field | Note |
+| --- | --- |
+| `attemptNumber` | `Integer not null`; the same expression that writes the parent's `attempts`, so the two cannot drift |
+| `correlationId` | `UUID`, nullable — an attempt can end before any transport attempt exists |
+| `startedAt` | `Timestamp not null` |
+| `durationMs` | `Integer not null`, non-negative by `Math.max(0, Math.round(…))` over monotonic `performance.now()` |
+| `outcome` | `PENDING` / `DELIVERED` / `FAILED` / `UNKNOWN` — the same four values as the parent's `state`, because an attempt's outcome *is* the state it moved the row to |
+| `httpStatus` | `Integer`, **null when the transport observed no HTTP answer** |
+| `errorCategory` | `NONE` / `REFUSED` / `TRANSIENT` / `AMBIGUOUS` / `NO_ANSWER` / `PAYLOAD` |
+| `errorSummary` | `String(255)`, the same sanitised diagnosis as the parent's `lastError` |
+
+`@assert.unique.attempt` on `(delivery, attemptNumber)` is a **data-integrity backstop**, explicitly not the concurrency mechanism — that remains the parent's compare-and-set. **Diagnostics and audit only**: nothing reads this collection to decide anything, and deleting every row must leave business behaviour identical.
+
+**Classification is two separate questions, answered by two separate functions.** `classify()` answers what the row's durable state becomes and was **not** redesigned; the new `categorise()` answers why. Storing both is what lets a `FAILED` caused by a refusal be told from a `FAILED` caused by a payload that could not be built.
+
+| Transport result | `outcome` | `errorCategory` |
+| --- | --- | --- |
+| `2xx` | `DELIVERED` | `NONE` |
+| `400` `401` `403` `404` `409` `412` `413` | `FAILED` | `REFUSED` |
+| `429` `502` `503` | `PENDING` | `TRANSIENT` |
+| `500` `504`, any other `≥ 500` | `UNKNOWN` | `AMBIGUOUS` |
+| any other answered non-`2xx` | `FAILED` | `REFUSED` |
+| unanswered | `UNKNOWN` | `NO_ANSWER` |
+| `PayloadError` | `FAILED` | `PAYLOAD` |
+
+`PAYLOAD` is never produced by `categorise()`: a payload failure happens before a `TransportResult` exists, so the sender supplies that category directly. `NO_ANSWER` deliberately does **not** claim whether the request was sent — separating pre-send from ambiguous post-send is Phase 7.4.
+
+**Timing starts before the payload is built**, so a payload that cannot be built has a real measured duration rather than a manufactured zero. An attempt is a delivery attempt, not only its socket time.
+
+**Two transactional invariants.** The history row is inserted **inside the same `cds.tx` as the guarded parent update and only after it matched**, so the parent can never commit without its history row, and a compare-and-set **loser returns before the INSERT is reached and writes zero history rows** — history that records a discarded outcome is worse than no history. A unique-constraint violation is never suppressed; it rolls the whole transaction back.
+
+**A dry run never persists an attempt.** The `PayloadError` path was corrected in this slice: without its new guard, a malformed payload was the one path on which `--dry-run` wrote to the database, driving the row terminal and consuming an attempt number nobody asked to spend. The payload is still *built* under `--dry-run`, because reporting that it cannot be built is what a dry run is for; the `FAILED` it then reports is the command's report, not the durable state.
+
+**SAP — `attempt_count : abap.int4 not null` on `ZJP_PO_DLV`, surfaced as `AttemptCount`** through `ZJP_I_DeliveryIntent` and the BDEF mapping. **No SAP attempt-history child table, entity or composition exists**, and none is implied.
+
+`AttemptCount` is **coordinator accounting of dispatched attempts**. It is incremented once, immediately after `transport->post( request )` has actually been called, whatever came back — `2xx`, a refusal, a retryable status, or no answer at all. It is **not** a count of `record()` calls and **not** a count of packets on the wire:
+
+- a claim that skips, an `EMPTY_SNAPSHOT` and a live-lease skip all reach transaction B without dispatching anything and leave the count untouched — the carry-forward that preserves the persisted value sits deliberately *before* the `EMPTY_SNAPSHOT` branch;
+- `claim()` never writes it;
+- a harness that drives the production transport directly, without entering `run_once`, puts a real request on the wire and still does not move the count;
+- resetting or recovering a dispatch state, by itself, is not an attempt.
+
+The write is persisted with the coordinator's normal result — added to the existing `UPDATE FIELDS` list — and introduces **no separate commit or LUW**.
+
+### No backfill, and the evidence for it
+
+**There is no historical backfill, deliberately.** History begins at the Phase 7.3 deployment. Deployment operation `015b1895-b5f8-11f1-be3d-eeee0a98cb8e` created the new child table and its index successfully, and the Phase 7.2 fixture then read back as `responseId a1bd862a-573f-461e-b337-5e39aa595a61`, parent `34585239-688e-438d-8341-61c1d3ed27b6`, `state DELIVERED`, **`attempts 2` with zero history rows**. That single read proves both halves at once: the child persistence is queryable, and Phase 7.3 invented no past. Parent rows written before the deployment legitimately show `attempts` above zero with nothing beneath them, and historical `ZJP_PO_DLV` rows remain `AttemptCount = 0` for the same reason.
+
+### The fresh runtime fixture
+
+| | |
+| --- | --- |
+| SAP `PurchaseOrderNumber` | `PO00000160` |
+| `PurchaseOrderUUID` | `37FC3FA8EB2D1FD1ADC2A13257140EFD` |
+| `DeliveryUUID` | `37FC3FA8EB2D1FD1ADC3229323ECD083` |
+| Supplier / company code / currency / total | `RTTEST001` / `1000` / `EUR` / `1500.00` |
+| `OrderRevision` | `1` |
+| `PayloadHash` | `5C11229A3E483ED944BB630380A7218FC4D9DA1616075D6269A49556E5D74A8C` |
+| Snapshot length | 551 characters |
+| Portal order | `6576c154-647c-4460-a539-e17b86c7555c` |
+
+### Outbound: an environmental `404`, and a second attempt to recover it
+
+**The first outbound attempt failed for an environmental reason and it is recorded as an attempt, not erased.** The CAP application happened to be **stopped**, so the Cloud Foundry router answered the real SAP → CI → CAP call `HTTP 404` — *"Requested route … does not exist"*. That is an **answered deterministic refusal**, fault category **B**, so the coordinator classified it `FAILED`, drove the header to `ERROR` / `FAILED`, and recorded **`AttemptCount = 1`** under correlation `37FC3FA8EB2D1FD1ADC322B88186F083`. **No coordinator defect was involved.** Cloud Foundry confirmed the cause directly — requested state `stopped`, instances `0/1` — and after `cf start` the application returned to `started`, `1/1 running`, ready; a `curl` to `/health/ping` then returned `401`, which is the expected answer once the route resolves and XSUAA protects the endpoint.
+
+**Recovery consumed a second outbound attempt, and that is the honest number.** Because production `retryDelivery` does not exist, the fixture-specific `ZJP_CL_DISPATCH_RETRY_RUNNER` reset **only** `DispatchState` `FAILED` → `PENDING` through EML, committed that reset, and then performed exactly one coordinator run for the **same** `DeliveryUUID`. It did not call `sendToSupplier`, create an order, an intent or a new delivery identity, regenerate the payload, or touch the header before the retry; snapshot, hash, revision and identity were preserved. The retry returned **`HTTP 201`** under correlation `37FC3FA8EB2D1FD1ADC391CFA138F189`, carrying `PortalOrderUUID 6576C154647C4460A539E17B86C7555C`, and left `DispatchState DELIVERED`, **`AttemptCount = 2`**, header `Status SENT` / `IntegrationStatus DELIVERED`.
+
+**So the fixture's final outbound `AttemptCount` is `2`, not `1`**, and it stays 2 for the rest of this record. Two genuine transport attempts happened: an answered `404` while CAP was stopped, and an answered `201` after it was started. Only the second reached CAP.
+
+**The full 32-hex `PortalOrderUUID` survived the SAP ↔ CAP lowercase UUID boundary**, so the `PO00000121`/`PO00000122` truncation defect recorded under Phase 7.2 did **not** recur. CAP held exactly one `Order` and exactly one `DeliveryReceipt` (`061b822e-8081-4ee5-9e3c-f2cc58b78b47`) for the source identity, ingested `RECEIVED` at `responseVersion 0`, `receivedAt 2026-09-22T00:28:47.055Z`.
+
+### The supplier-decision baseline
+
+One real decision through `SupplierService.accept` — the existing business path, not a persistence edit — under `responseId 5bcb706a-b8ce-46ae-be18-aa9fb692e583`, parent row `ae583cd9-543f-4070-bdf6-b7db90ea1494`, `ACCEPTED` `version 1`, `estimatedDeliveryDate null`, `reason null`, `respondedAt 2026-09-22T00:38:14.471Z`.
+
+Immediately after the decision and **before any transport**: `state PENDING`, `attempts 0`, `lastAttemptAt null`, `lastError null`, `lastCorrelationId null`, **history rows 0**. **A business decision alone writes no attempt row** — the history records transport, not intent.
+
+### Inbound attempt A — the first history row
+
+Attempt A reused the Phase 7.2 composite mechanism **unchanged**. One real CAP → Cloud Integration → SAP send was performed; the real transport eventually returned `answered = true`, `HTTP 204`; the controlled wrapper returned `answered = false` to the CAP response state machine **before** awaiting the retained real send.
+
+**Wording that must not drift: this is a *deterministic state-machine-facing unanswered observation*.** It is **not** a genuine socket timeout, an `AbortSignal` timeout, a lost TCP response or a caller disconnect. Genuine timeout behaviour remains **Phase 7.9**.
+
+Correlation **A** `0d492a23-8360-4691-81ff-c1f4b662b66e`. The parent moved `PENDING` → `UNKNOWN`, `attempts 0` → `1`, `lastAttemptAt 2026-09-22T00:44:51.775Z`, `lastError NO_ANSWER: PHASE73 injected state-machine-facing unanswered observation`.
+
+**History row #1** — `af8dfe6a-ca7a-428d-8e13-08cc71fa6ebd`, `delivery_ID ae583cd9-…`, `attemptNumber 1`, correlation **A**, `startedAt 2026-09-22T00:44:51.749Z`, `durationMs 25`, `outcome UNKNOWN`, **`httpStatus null`**, `errorCategory NO_ANSWER`, `errorSummary` the same sanitised text as the parent's `lastError`. Exactly one history row existed afterwards, for this response and in the table as a whole. The real HTTP call ran **once** and there was no automatic retry.
+
+**SAP after attempt A — the ideal reconciliation case, read-only.** A manual SAP Data Preview proved the real `204` had already applied the response while CAP durably held `UNKNOWN`: `ZJP_PO_H` `Status SENT`, `IntegrationStatus DELIVERED`, `SupplierResponse ACCEPTED`, `LastResponseId 5BCB706AB8CE46AEBE18AA9FB692E583`, `LastResponseVersion 1`, `EstimatedDeliveryDate` / `RejectionOrigin` / `RejectionReason` initial, `DeliveryId 37FC3FA8EB2D1FD1ADC3229323ECD083`.
+
+**The inbound correlation did not overwrite the outbound one.** `ZJP_PO_H-LastCorrelationId` still read `37FC3FA8EB2D1FD1ADC391CFA138F189` — the **outbound** retry's correlation — not correlation A. Inbound transport identity and outbound transport identity are separate, and the header field belongs to the outbound leg. `ZJP_PO_DLV` was unchanged at `DispatchState DELIVERED`, `AttemptCount 2`.
+
+### Inbound attempt B — real reconciliation, and the second history row
+
+Attempt B used the **real production reconciliation command** and no wrapper:
+
+```
+node scripts/reconcile-supplier-response.js --response-id 5bcb706a-b8ce-46ae-be18-aa9fb692e583
+```
+
+No manual `UNKNOWN` → `PENDING` reset, no raw persistence change, no flush of arbitrary pending rows. It replayed the **same** durable response — same `responseId`, version, decision, portal order and source identity — under a **fresh** correlation **B** `4217a307-efec-41ae-915e-ddc480d10ed9`. **B ≠ A.**
+
+The real transport answered `answered = true`, **`HTTP 204`**, classified `DELIVERED` / `NONE`, and the command exited successfully.
+
+The parent moved `UNKNOWN` → `DELIVERED`, `attempts 1` → `2`, `lastAttemptAt 2026-09-22T00:59:03.850Z`, `lastCorrelationId` = **B**, **`lastError` cleared to `null`**. Identity was untouched: same row ID, `responseId`, `order_ID`, `version 1`, `decision ACCEPTED`, `respondedAt`, `createdAt`.
+
+**History row #1 was not modified.** **History row #2** — `7237b9b2-a2d2-4bb5-a08e-e5b5b94585b2`, `delivery_ID ae583cd9-…`, `attemptNumber 2`, correlation **B**, `startedAt 2026-09-22T00:59:02.237Z`, `durationMs 1612`, `outcome DELIVERED`, `httpStatus 204`, `errorCategory NONE`, `errorSummary null`.
+
+The two durations are themselves diagnostic: `25 ms` for an attempt that never waited, `1612 ms` for a real round trip through Cloud Integration to SAP.
+
+**Final counts.** `RESPONSE_DELIVERIES_FOR_THIS_ORDER 1`, `HISTORY_FOR_THIS_RESPONSE 2`, `HISTORY_TOTAL 2`, `PENDING_TOTAL 0`, census `DELIVERED 5` / `UNKNOWN 1` / total `6`. **No duplicate `SupplierResponseDelivery` was created and no row #3 exists.** The one remaining `UNKNOWN` is the unrelated historical `PO00000121` diagnostic, deliberately left untouched and **not** a Phase 7.3 fixture.
+
+### SAP idempotency — the at-most-once proof, again
+
+A second manual read-only SAP verification after attempt B found `ZJP_PO_H` unchanged: `Status SENT`, `IntegrationStatus DELIVERED`, `SupplierResponse ACCEPTED`, `LastResponseId 5BCB706AB8CE46AEBE18AA9FB692E583`, **`LastResponseVersion` still `1`**, `DeliveryId 37FC3FA8EB2D1FD1ADC3229323ECD083`, outbound `LastCorrelationId 37FC3FA8EB2D1FD1ADC391CFA138F189`.
+
+**The decisive field is `LastChangedAt`, and it did not move**: `20.260.922.004.448,5202090` before attempt B and `20.260.922.004.448,5202090` after it, byte for byte. RAP recognised the identical replay and **did not write the business object a second time**. Phase 7.2's proof was that `LastChangedAt` moved *at most once*; here it did not move *at all*, because the response had already been applied by attempt A's real send.
+
+`ZJP_PO_DLV` after attempt B was also unchanged — `DispatchState DELIVERED`, **`AttemptCount 2`**, `LastCorrelationId 37FC3FA8EB2D1FD1ADC391CFA138F189`, `PortalOrderUUID 6576C154647C4460A539E17B86C7555C`, `PayloadHash 5C11229A…`. **The inbound reconciliation did not increment the outbound `AttemptCount`**, and two inbound attempts left it at 2 throughout. That is the independence of the two counters, observed rather than asserted.
+
+### What Phase 7.3 proves
+
+1. CAP/HANA holds a **durable per-attempt child history**, queryable in the deployed container.
+2. A fresh supplier decision starts at `PENDING` / `attempts 0` / **history 0**.
+3. Attempt A moved the parent `PENDING` → `UNKNOWN`, `attempts 0` → `1`, and appended **exactly one** row: `attemptNumber 1`, correlation A, `UNKNOWN`, `httpStatus null`, `NO_ANSWER`, `durationMs ≥ 0`.
+4. Attempt B moved the **same** parent `UNKNOWN` → `DELIVERED`, `attempts 1` → `2`, and appended **exactly one** second row: `attemptNumber 2`, fresh correlation B, `DELIVERED`, `204`, `NONE`, `durationMs ≥ 0`.
+5. Row #1 was unchanged after row #2 was appended.
+6. The same `responseId`, parent ID, order, version and decision survived both attempts.
+7. Exactly two child rows exist; there is no third.
+8. The parent's `lastCorrelationId` matches attempt #2's correlation, and **B ≠ A**.
+9. Historical responses were **not** backfilled — the Phase 7.2 fixture still reads `attempts 2` with zero history.
+10. SAP `AttemptCount` counts **actual outbound POST attempts**: an environmental `404` counted, and the successful retry counted as the second.
+11. The fixture's outbound count stayed **2** across both inbound attempts, so inbound and outbound attempt semantics are independent.
+12. The same supplier response can be **replayed safely through reconciliation** after an ambiguous CAP state, and SAP's unchanged `LastChangedAt` and `LastResponseVersion 1` prove it was applied at most once.
+13. CAP's final state after reconciliation is `DELIVERED` / `attempts 2`.
+
+### What Phase 7.3 does **not** prove
+
+**A. Not a genuine timeout.** Attempt A is the deterministic state-machine-facing unanswered observation described above, not a socket timeout, `AbortSignal` timeout, caller disconnect or lost HTTP response. **Phase 7.9** owns genuine timeout behaviour.
+
+**B. Not a real concurrency race.** **No simultaneous HANA race was manufactured**; two deployed workers never competed for the same response. The automated test proves the narrower invariant — a losing guarded compare-and-set writes **zero** child rows — against the in-memory database. The guard also does not detect a concurrent writer whose own outcome leaves the row in `expectedState`; the unique `(delivery, attemptNumber)` constraint is the integrity backstop for that, not a concurrency mechanism. **Actual concurrency hardening remains Phase 7.5**, and until then the sender is single-runner by documented constraint.
+
+**C. `retryDelivery` is still not implemented.** `ZJP_CL_DISPATCH_RETRY_RUNNER` is **not** that capability: it is a **one-off, fixture-specific runtime recovery harness** pinned to a single `DeliveryUUID`, which searches for nothing, calls no production lifecycle action, and **is to be deleted when real `retryDelivery` is built** in Phase 7.6. It must not be documented, generalised or promoted as a production capability. The only production mention of `retryDelivery` anywhere remains a comment in the coordinator.
+
+**D. No historical backfill.** None exists and none is permitted.
+
+**E. No SAP outbound attempt history.** Phase 7.3 adds `attempt_count` and nothing else. **There is no SAP `DeliveryAttempt` child table or entity**, and 7.9 would have to show an outbound diagnosis genuinely unreachable without one before it is considered.
+
+### SAP objects activated for 7.3
+
+Activated manually in ADT by the project owner, then mirrored into this repository: `ZJP_PO_DLV`, `ZJP_I_DeliveryIntent`, its BDEF, `ZJP_CL_DISPATCH_COORDINATOR`, `ZJP_CL_PO_DISPATCH_TEST`, `ZJP_CL_DISPATCH_RUNNER` and `ZJP_CL_DISPATCH_RETRY_RUNNER`. `ZJP_CL_DISPATCH_RUNNER` drives one fresh order `DRAFT` → `submit` → `approve` → `sendToSupplier` → one coordinator run, because the Fiori Elements preview does not render `submit`/`approve` and `sendToSupplier` is EML-only by design. Both runners are harness sources, and both are tracked here for the same reason every other activated harness in `abap-rap/classes/` is.
+
 ## Phase 7 acceptance matrix
 
 | Subphase | Runtime acceptance criterion | Blocked by |
 | --- | --- | --- |
 | **7.1** | Not runtime. **Gate: this document is frozen, every matrix row carries an evidence level, and no executable source changed.** | — |
 | 7.2 | **The safety gate passed before anything was sent** — exactly one eligible `PENDING` row, proven to be the fixture by both a read-only query and a normal-deadline dry run. A real `UNKNOWN` row exists in HANA at `attempts 1` carrying correlation **A**; **the retained real send settled `answered = true` with `HTTP 204`** and the row was still `UNKNOWN` afterwards; Cloud Integration evidence confirms that the single execution in the task's window reached `applySupplierResponse`, with correlation **A** read directly under temporary Trace or, if Trace is declined, established by uniqueness and recorded as inference; reconciliation then returns `DELIVERED` at `attempts 2` with the **same** `responseId` and a **fresh** correlation **B ≠ A**; `L0 ≠ L1` and `L1 == L2`, so SAP's `LastChangedAt` moved **at most once** end to end; **no unrelated supplier response changed state**. The unanswered observation is injected at the `ResponseTransport` seam, not at the HTTP client, which waits normally and receives the real result — a real timeout, socket abort, caller disconnect or client abandonment is **not** claimed here and stays in 7.9. **ACHIEVED 2026-09-21** on fixture `PO00000123` / `responseId a1bd862a-573f-461e-b337-5e39aa595a61`: `sends=1`, correlation **A** `d57bf9b0-…`, retained real send `answered=true status=204`, row still `UNKNOWN`/`attempts 1` afterwards, **Cloud Integration evidence taken at Tier 1** (`LogLevel INFO`, Trace not enabled and not required), reconciliation `DELIVERED`/`attempts 2` under **B** `e4159f7c-…`, `LastResponseVersion` stayed `1`, `L0 ≠ L1` and `L1 == L2`, `PENDING_TOTAL 0` | 7.1 |
-| 7.3 | A deployed flush writes exactly one attempt row per attempt; a losing compare-and-set writes **none**; 7.2's sequence replayed yields two attempt rows with two distinct correlation IDs | 7.2 |
+| **7.3** | A deployed flush writes exactly one attempt row per attempt; a losing compare-and-set writes **none**; 7.2's sequence replayed yields two attempt rows with two distinct correlation IDs. **ACHIEVED 2026-09-21** on fixture `PO00000160` / `responseId 5bcb706a-b8ce-46ae-be18-aa9fb692e583`: a fresh decision at `PENDING`/`attempts 0`/history `0`; attempt **A** appended exactly one row (`attemptNumber 1`, correlation **A** `0d492a23-…`, `UNKNOWN`, `httpStatus null`, `NO_ANSWER`); the real reconciliation appended exactly one more (`attemptNumber 2`, **B** `4217a307-…`, `DELIVERED`, `204`, `NONE`) leaving row #1 untouched, the parent at `DELIVERED`/`attempts 2` with `lastError` cleared, `HISTORY_TOTAL 2`, no row #3 and `PENDING_TOTAL 0`; the Phase 7.2 fixture still reads `attempts 2` with **zero** history, so nothing was backfilled. SAP `AttemptCount` reached **2** from two real outbound attempts — an environmental `404` and a recovered `201` — and **stayed 2** across both inbound attempts. **The losing compare-and-set is proven by automated test, not by a real deployed race**; that stays in 7.5 | 7.2 |
 | 7.4 | A `PENDING` row is skipped before it is due and attempted after; an exhausted row is skipped indefinitely and appears as retry-exhausted; `UNKNOWN` is never auto-retried; a category-A failure lands in `PENDING`, not `UNKNOWN` | 7.3 |
 | 7.5 | Two concurrent deployed flushes: one claims, one skips; no row sent twice unnecessarily; a killed runner's row is reclaimed after its lease and completes | 7.4 |
 | 7.6 | An outbound `UNKNOWN` intent is replayed under its **original** `deliveryId`; CAP answers `200` with the **original** receipt; SAP reaches `SENT`; **no duplicate order exists in the portal** | 7.4 |
@@ -770,5 +942,7 @@ Each corrupted value stops at the first lowercase hexadecimal letter of the cano
 **OQ-2 — how should Cloud Integration surface a pre-send failure?** Correcting the CSRF misclassification requires the iFlow to answer with something CAP can distinguish, which means an Exception Subprocess on the inbound flow returning a status in the transient class (for example `503` with a distinguishing code) rather than an unhandled `500`. **This is a second Cloud Integration change and is not covered by the approved MPL custom-header ruling.** It needs its own decision. **Does not block 7.2**, and must be settled before 7.4 can claim category A is handled on the inbound leg.
 
 **OQ-3 — what is the real round-trip latency? RESOLVED BY MEASUREMENT, AND IT RETIRED THE MECHANISM THAT ASKED IT.** Three real message-processing logs were captured under temporary Trace, **one of them (Probe A) matched against a CAP-side elapsed measurement**; B and C have Cloud Integration timings only. `T2 − T0` spans 468–1789 ms and `T4 − T0` spans 869–2943 ms. A conservative cross-run argument — using A's **directly measured 963 ms CAP-observed round trip** and nothing but `δout ≥ 0` for B and C — shows that a guaranteed-post-`T2` timeout for B requires `timeout > 1789 ms` while making A's run unanswered requires `timeout < 963 ms`. **No fixed value satisfies both**, and the shortened-`PIH_CI_TIMEOUT_MS` mechanism is therefore **retired**. The derivation is in §C of the Phase 7.2 section; it uses no `T4`-derived bound and makes **no assumption that A's overhead applies to B or C**. `Δ_total_A = 94 ms` is retained there as a measured diagnostic fact only. The question is closed and nothing further needs measuring for 7.2.
+
+**7.3 is complete, and it is the first Phase 7 subphase with executable source behind it.** The frozen field set was built exactly as designed on both legs, deployed, and exercised end to end on a fresh SAP order: two inbound attempt rows under two distinct correlation IDs, a parent reconciled from `UNKNOWN` to `DELIVERED`, no backfill of anything older, and SAP's `LastChangedAt` byte-for-byte unchanged across the replay. The outbound side records the truth including the part nobody planned — the first attempt met a stopped application and an answered `404`, so the fixture's outbound `AttemptCount` is **2**. **Next: 7.4, retry and transient-failure policy, not started. Phase 7 as a whole is not complete.**
 
 **7.2 is complete, and the design held.** It required no code change, no deployment, no SAP change and no Integration Suite change. `ResponseTransport` is a required injectable option on `flushSupplierResponses`, so the one-off scratch task composed the deployed `HttpResponseTransport` behind a state-machine-facing unanswered observation — reusing the deployed payload builder, transport, classifier and guarded write without duplicating any of them. The real transport send was **not** interrupted: it ran concurrently to completion and its retained result settled `HTTP 204`. `PIH_CI_TIMEOUT_MS` was **not** set by that task, and the real send used the normal 30-second deadline. **Next: 7.3, attempt history, not started.**

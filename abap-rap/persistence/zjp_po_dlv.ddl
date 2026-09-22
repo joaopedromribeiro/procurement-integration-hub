@@ -20,4 +20,5 @@ define table zjp_po_dlv {
   created_at              : abp_creation_tstmpl not null;
   last_changed_at         : abp_lastchange_tstmpl not null;
   local_last_changed_at   : abp_locinst_lastchange_tstmpl not null;
+  attempt_count           : abap.int4 not null;
 }

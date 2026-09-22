@@ -51,6 +51,7 @@ etag master LocalLastChangedAt
     ApprovedAt         = approved_at;
     LeaseOwner         = lease_owner;
     LeaseExpiresAt     = lease_expires_at;
+    AttemptCount       = attempt_count;
     CreatedAt          = created_at;
     LastChangedAt      = last_changed_at;
     LocalLastChangedAt = local_last_changed_at;

@@ -17,18 +17,48 @@
 
 import cds from '@sap/cds'
 import { randomUUID } from 'node:crypto'
-import { Orders as PortalOrders, SupplierResponseDeliveries, Suppliers } from '#cds-models/pih/portal'
+import {
+  Orders as PortalOrders,
+  SupplierResponseDeliveries,
+  SupplierResponseDeliveryAttempts,
+  Suppliers
+} from '#cds-models/pih/portal'
 import type { ResponseTransport } from './ci-transport'
 import {
   buildSupplierResponsePayload,
+  categorise,
   classify,
   describe,
   PayloadError,
+  type AttemptErrorCategory,
   type DeliveryState,
   type ResponseOrder,
   type ResponseRow,
   type SupplierResponsePayload
 } from './supplier-response'
+
+/**
+ * Phase 7.3 — what one committed attempt is recorded as, beyond the durable
+ * state the parent already carries. Passed as one object rather than six more
+ * positional arguments, because `record` already takes five and a seventh
+ * unnamed string is how the wrong value ends up in the wrong column.
+ *
+ * `attemptNumber` is deliberately absent: it is derived inside the transaction
+ * from the same expression that writes the parent's `attempts`, so the two
+ * cannot disagree.
+ */
+interface AttemptFacts {
+  startedAt: string
+  durationMs: number
+  httpStatus: number | null
+  errorCategory: AttemptErrorCategory
+  correlationId: string | null
+}
+
+/** Wall clock for the record, monotonic clock for the elapsed time. */
+function elapsedMs(from: number): number {
+  return Math.max(0, Math.round(performance.now() - from))
+}
 
 /** What one row's attempt did, for the command's report and for the tests. */
 export interface AttemptOutcome {
@@ -208,6 +238,12 @@ async function attempt(
     decision: row.decision
   }
 
+  // The attempt starts HERE, before the payload is built, so a payload that
+  // cannot be built has a real measured duration rather than a manufactured
+  // zero. An attempt is a delivery attempt, not only its socket time.
+  const startedAt = new Date().toISOString()
+  const startedMonotonic = performance.now()
+
   // A row that cannot be turned into a payload is a deterministic failure. It
   // is recorded as FAILED with the reason and never as PENDING, because no
   // amount of retrying makes a missing supplier code appear, and never as
@@ -217,8 +253,32 @@ async function attempt(
     payload = buildSupplierResponsePayload(row, order as ResponseOrder)
   } catch (error: any) {
     const reason = error instanceof PayloadError ? `${error.code}: ${error.message}` : String(error?.message ?? error)
+
+    // A dry run inspects; it does not decide. Without this guard a malformed
+    // payload would be the one path on which `--dry-run` writes to the database
+    // — driving the row terminal and consuming an attempt number that no
+    // operator asked to spend. The payload is still BUILT above, because
+    // reporting that it cannot be built is exactly what a dry run is for.
+    //
+    // `FAILED` here is the REPORT, not the durable state: it keeps the command's
+    // summary counter and its non-zero exit for malformed data, while the
+    // persisted row stays untouched. Nothing below this line runs.
+    if (context.dryRun) {
+      context.log(`DRY   ${row.responseId} v${row.version} — payload invalid, not sent and not recorded: ${reason}`)
+      return { ...base, state: 'FAILED', error: reason }
+    }
+
     // Nothing was sent, so a lost race here costs nothing but the bookkeeping.
-    await record(row, 'FAILED', reason.slice(0, 255), null, context.expectedState)
+    // PAYLOAD is supplied directly rather than through `categorise`, because
+    // there is no TransportResult to categorise: the attempt ended before one
+    // could exist.
+    await record(row, 'FAILED', reason.slice(0, 255), null, context.expectedState, {
+      startedAt,
+      durationMs: elapsedMs(startedMonotonic),
+      httpStatus: null,
+      errorCategory: 'PAYLOAD',
+      correlationId: null
+    })
     context.log(`FAIL  ${row.responseId} v${row.version} — ${reason}`)
     return { ...base, state: 'FAILED', error: reason }
   }
@@ -237,7 +297,15 @@ async function attempt(
   const state = classify(result)
   const error = describe(result)
 
-  const written = await record(row, state, error, correlationId, context.expectedState)
+  // The parent's state and the history row's outcome are the SAME classified
+  // value, passed once. They cannot drift because there is only one `state`.
+  const written = await record(row, state, error, correlationId, context.expectedState, {
+    startedAt,
+    durationMs: elapsedMs(startedMonotonic),
+    httpStatus: result.answered && result.status !== undefined ? result.status : null,
+    errorCategory: categorise(result),
+    correlationId
+  })
 
   if (!written) {
     // The request went out and somebody else owns the row now. Do NOT force the
@@ -385,11 +453,27 @@ export async function reconcileSupplierResponse(options: ReconcileOptions): Prom
  * supplier's committed answer and transport has no business editing them.
  *
  * THE UPDATE IS GUARDED ON THE STATE WE READ. `expectedState` is part of the
- * WHERE clause, so this is a compare-and-set: if anything moved the row since
- * it was read — a concurrent flush, or an operator reconciling by hand — the
- * statement matches nothing, returns 0 and writes nothing. That is the whole
- * concurrency safeguard, and it needs no lock table and no lease, because the
- * database already resolves the race for us.
+ * WHERE clause, so this is a compare-and-set: a writer that moved the row AWAY
+ * from `expectedState` — a concurrent flush that delivered it, or an operator
+ * reconciling by hand — makes this statement match nothing, return 0 and write
+ * nothing.
+ *
+ * WHAT THIS PREDICATE DOES NOT DETECT, stated plainly so nobody reads more into
+ * it: a concurrent writer whose own outcome leaves the row in `expectedState`.
+ * A transient `PENDING` → `PENDING`, or an ambiguous `UNKNOWN` → `UNKNOWN`, does
+ * not change the column the guard compares, so two runners could both match.
+ * The unique `(delivery, attemptNumber)` constraint on the history table is an
+ * integrity backstop for that case — it makes duplicate audit rows impossible
+ * and fails the second transaction rather than persisting a lie — but it is NOT
+ * a concurrency mechanism. Full claim/lease hardening is Phase 7.5, and until
+ * then the sender remains single-runner by documented constraint.
+ *
+ * PHASE 7.3: the attempt-history row is inserted INSIDE this transaction and
+ * only after the guarded update matched. A loser returns before the INSERT is
+ * reached, so it writes nothing; and because both statements share one
+ * `cds.tx`, the parent can never commit without its history row. If the INSERT
+ * fails the whole transaction rolls back, taking the parent update with it —
+ * that is deliberate, and a unique-constraint violation is never suppressed.
  *
  * Returns true when the row was ours to write.
  */
@@ -398,19 +482,40 @@ async function record(
   state: DeliveryState,
   error: string | null,
   correlationId: string | null,
-  expectedState: DeliveryState
+  expectedState: DeliveryState,
+  facts: AttemptFacts
 ): Promise<boolean> {
   return await cds.tx(async () => {
+    // One expression, used twice: the parent's counter and the child's ordinal
+    // are the same number by construction and cannot drift.
+    const attemptNumber = (row.attempts ?? 0) + 1
+
     const affected = await UPDATE(SupplierResponseDeliveries)
       .set({
         state,
-        attempts: (row.attempts ?? 0) + 1,
+        attempts: attemptNumber,
         lastAttemptAt: new Date().toISOString(),
         lastError: error,
         lastCorrelationId: correlationId
       } as any)
       .where({ ID: row.ID, state: expectedState })
 
-    return Number(affected) === 1
+    // The loser stops here. Nothing below runs, so no history is written for an
+    // outcome the durable state machine discarded.
+    if (Number(affected) !== 1) return false
+
+    await INSERT.into(SupplierResponseDeliveryAttempts).entries({
+      delivery_ID: row.ID,
+      attemptNumber,
+      correlationId: facts.correlationId,
+      startedAt: facts.startedAt,
+      durationMs: facts.durationMs,
+      outcome: state,
+      httpStatus: facts.httpStatus,
+      errorCategory: facts.errorCategory,
+      errorSummary: error
+    } as any)
+
+    return true
   })
 }

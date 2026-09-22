@@ -98,6 +98,10 @@ CLASS zjp_cl_dispatch_coordinator DEFINITION
         answered            TYPE abap_bool,
         http_status         TYPE i,
 
+        " Phase 7.3. Durable count of real outbound transport attempts.
+        " Incremented only when this run actually dispatched the request.
+        attempt_count       TYPE i,
+
         " The classification, and what was written because of it.
         final_state         TYPE string,
         business_status     TYPE string,
@@ -173,6 +177,7 @@ CLASS zjp_cl_dispatch_coordinator DEFINITION
         lease_owner         TYPE zjp_po_dlv-lease_owner,
         lease_expires_at    TYPE zjp_po_dlv-lease_expires_at,
         payload_snapshot    TYPE zjp_po_dlv-payload_snapshot,
+        attempt_count       TYPE zjp_po_dlv-attempt_count,
       END OF ty_intent_row.
 
     " The CAP ingestion receipt, bound the same way the snapshot is.
@@ -307,7 +312,8 @@ CLASS zjp_cl_dispatch_coordinator IMPLEMENTATION.
     CLEAR row.
 
     SELECT SINGLE delivery_uuid, purchase_order_uuid, order_revision,
-                  dispatch_state, lease_owner, lease_expires_at, payload_snapshot
+                  dispatch_state, lease_owner, lease_expires_at, payload_snapshot,
+                  attempt_count
       FROM zjp_po_dlv
       WHERE delivery_uuid = @delivery_uuid
       INTO CORRESPONDING FIELDS OF @row.
@@ -526,11 +532,12 @@ CLASS zjp_cl_dispatch_coordinator IMPLEMENTATION.
     MODIFY ENTITIES OF ZJP_I_DeliveryIntent
       ENTITY DeliveryIntent
         UPDATE FIELDS ( DispatchState LastCorrelationId PortalOrderUUID
-                        LeaseOwner LeaseExpiresAt )
+                        AttemptCount LeaseOwner LeaseExpiresAt )
         WITH VALUE #( ( DeliveryUUID      = row-delivery_uuid
                         DispatchState     = outcome-final_state
                         LastCorrelationId = outcome-correlation_uuid
                         PortalOrderUUID   = outcome-portal_order_uuid
+                        AttemptCount      = outcome-attempt_count
                         LeaseOwner        = VALUE sysuuid_x16( )
                         LeaseExpiresAt    = VALUE zjp_po_dlv-lease_expires_at( ) ) )
       FAILED DATA(intent_failed)
@@ -635,6 +642,13 @@ CLASS zjp_cl_dispatch_coordinator IMPLEMENTATION.
       RETURN.
     ENDIF.
 
+    " Phase 7.3. Carry the persisted count forward the moment the row is known,
+    " so every path that reaches transaction B from here writes back what is
+    " already there. Only a run that actually posts adds to it, below. This is
+    " deliberately BEFORE the EMPTY_SNAPSHOT branch: that branch sends nothing
+    " and must not disturb the count.
+    outcome-attempt_count = row-attempt_count.
+
     " ---------- NETWORK ----------
     " No database work from here until transaction B.
     "
@@ -702,6 +716,12 @@ CLASS zjp_cl_dispatch_coordinator IMPLEMENTATION.
     outcome-dispatched = abap_true.
 
     DATA(response) = transport->post( request ).
+
+    " Phase 7.3. One increment per request that actually went on the wire,
+    " whatever came back - 2xx, a refusal, a retryable status, or no answer at
+    " all. It is NOT a count of record() calls: the two paths above reach
+    " transaction B without dispatching anything and leave the count alone.
+    outcome-attempt_count = row-attempt_count + 1.
 
     outcome-answered    = response-answered.
     outcome-http_status = response-status.

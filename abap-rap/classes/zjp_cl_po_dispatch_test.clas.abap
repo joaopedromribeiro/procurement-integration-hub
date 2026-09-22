@@ -63,6 +63,8 @@ CLASS zjp_cl_po_dispatch_test DEFINITION
         portal_order_uuid TYPE zjp_po_dlv-portal_order_uuid,
         lease_owner       TYPE zjp_po_dlv-lease_owner,
         lease_expires_at  TYPE zjp_po_dlv-lease_expires_at,
+        " Phase 7.3. Durable count of real outbound transport attempts.
+        attempt_count      TYPE zjp_po_dlv-attempt_count,
       END OF ty_intent.
 
     TYPES:
@@ -257,7 +259,8 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
   METHOD intent_row.
     SELECT SINGLE delivery_uuid, order_revision, dispatch_state, payload_snapshot,
                   payload_hash, approved_by, approved_at, last_correlation_id,
-                  portal_order_uuid, lease_owner, lease_expires_at
+                  portal_order_uuid, lease_owner, lease_expires_at,
+                  attempt_count
       FROM zjp_po_dlv
       WHERE delivery_uuid = @delivery_uuid
       INTO CORRESPONDING FIELDS OF @row.
@@ -370,12 +373,20 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
       RETURN.
     ENDIF.
 
-    SELECT SINGLE delivery_uuid, dispatch_state FROM zjp_po_dlv
+    SELECT SINGLE delivery_uuid, dispatch_state, attempt_count FROM zjp_po_dlv
       WHERE purchase_order_uuid = @order_uuid
       INTO @DATA(created_intent).
 
     IF sy-subrc <> 0 OR created_intent-dispatch_state <> 'PENDING'.
       stop( 'the fixture did not produce a PENDING intent.' ).
+      RETURN.
+    ENDIF.
+
+    " Phase 7.3. A new intent has never been dispatched. sendToSupplier creates
+    " the outbox row and performs NO transport of its own, so the count must
+    " start at zero for every fixture the accounting assertions measure against.
+    IF created_intent-attempt_count <> 0.
+      stop( |a new intent started at AttemptCount { created_intent-attempt_count }, not 0.| ).
       RETURN.
     ENDIF.
 
@@ -450,6 +461,14 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
 
     DATA(before) = intent_row( fixture-delivery_uuid ).
 
+    " Phase 7.3. Nothing in A/B/C posts anything: they exercise the lease only.
+    " The count must be untouched at every step, including the stale reclaim,
+    " which takes ownership BEFORE any transport would happen.
+    IF before-attempt_count <> 0.
+      stop( 'the A/B/C fixture did not start at AttemptCount 0.' ).
+      RETURN.
+    ENDIF.
+
     " ---------- A: a PENDING intent is claimable ----------
     " The transport reference is declared and assigned SEPARATELY rather than
     " constructed inline. The SAP parser rejected the nested NEW form in this
@@ -478,6 +497,10 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
 
     IF after_a-dispatch_state <> 'IN_FLIGHT'.
       stop( 'the claimed intent is not IN_FLIGHT.' ).
+      RETURN.
+    ENDIF.
+    IF after_a-attempt_count <> before-attempt_count.
+      stop( 'claiming an intent changed the attempt count; no request was sent.' ).
       RETURN.
     ENDIF.
     IF after_a-lease_owner <> worker_one->get_run_uuid( ).
@@ -526,7 +549,8 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
     DATA(after_b) = intent_row( fixture-delivery_uuid ).
     IF after_b-lease_owner <> after_a-lease_owner
        OR after_b-lease_expires_at <> after_a-lease_expires_at
-       OR after_b-dispatch_state <> after_a-dispatch_state.
+       OR after_b-dispatch_state <> after_a-dispatch_state
+       OR after_b-attempt_count <> after_a-attempt_count.
       stop( 'the refused claim still changed the lease.' ).
       RETURN.
     ENDIF.
@@ -567,6 +591,10 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
     ENDIF.
     IF after_c-delivery_uuid <> before-delivery_uuid.
       stop( 'recovery minted a new delivery identity.' ).
+      RETURN.
+    ENDIF.
+    IF after_c-attempt_count <> before-attempt_count.
+      stop( 'reclaiming a stale lease counted an attempt before any POST.' ).
       RETURN.
     ENDIF.
 
@@ -666,6 +694,12 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
       stop( 'the attempt correlation id was not persisted.' ).
       RETURN.
     ENDIF.
+    " Phase 7.3. One real coordinator run through Integration Suite, so one
+    " counted attempt.
+    IF intent-attempt_count <> 1.
+      stop( |a real delivery recorded AttemptCount { intent-attempt_count }, not 1.| ).
+      RETURN.
+    ENDIF.
 
     " A finished delivery must not advertise a live lease.
     IF intent-lease_owner IS NOT INITIAL OR intent-lease_expires_at IS NOT INITIAL.
@@ -733,7 +767,18 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
       RETURN.
     ENDIF.
 
-    console->write( 'PASS: F - 200 replay delivered, one intent, same identity.' ).
+    " Phase 7.3. One run, one real fake POST, so exactly one increment - and
+    " the value the coordinator reported is the value that was committed.
+    IF after-attempt_count <> before-attempt_count + 1.
+      stop( |F expected exactly one dispatched attempt; AttemptCount went { before-attempt_count } -> { after-attempt_count }| ).
+      RETURN.
+    ENDIF.
+    IF outcome-attempt_count <> after-attempt_count.
+      stop( |F reported AttemptCount { outcome-attempt_count } but persisted { after-attempt_count }| ).
+      RETURN.
+    ENDIF.
+
+    console->write( 'PASS: F - 200 replay delivered, one intent, same identity, one attempt.' ).
 
     " ---------- J: immutable evidence across a whole coordinator run ----------
     IF after-payload_snapshot <> before-payload_snapshot.
@@ -796,6 +841,12 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
 
     IF intent-dispatch_state <> 'FAILED'.
       stop( 'the intent is not FAILED after a collision.' ).
+      RETURN.
+    ENDIF.
+    " Phase 7.3. A refusal is an answered outcome of a request that really went
+    " out. The attempt counts even though the delivery failed.
+    IF intent-attempt_count <> 1.
+      stop( |a refused 409 recorded AttemptCount { intent-attempt_count }, not 1.| ).
       RETURN.
     ENDIF.
     IF header-status <> 'ERROR'.
@@ -871,6 +922,13 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
       stop( 'the first attempt correlation id was not persisted.' ).
       RETURN.
     ENDIF.
+    " Phase 7.3. An unanswered call is still a dispatched attempt: the request
+    " went on the wire and may well have arrived. That is precisely why it is
+    " UNKNOWN rather than a non-event.
+    IF intent_one-attempt_count <> 1.
+      stop( |an unanswered first attempt recorded AttemptCount { intent_one-attempt_count }, not 1.| ).
+      RETURN.
+    ENDIF.
 
     console->write( 'PASS: H - unanswered classified UNKNOWN, evidence persisted.' ).
 
@@ -903,6 +961,13 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
     DATA(intent_two) = intent_row( fixture-delivery_uuid ).
     IF intent_two-last_correlation_id <> second-correlation_uuid.
       stop( 'the retry correlation id was not persisted.' ).
+      RETURN.
+    ENDIF.
+    " Phase 7.3. The count accumulates across attempts on ONE delivery identity:
+    " two dispatched attempts, two counted, on the same row rather than a second
+    " row. A fresh correlation id per attempt is still required, asserted above.
+    IF intent_two-attempt_count <> 2.
+      stop( |a second dispatched attempt recorded AttemptCount { intent_two-attempt_count }, not 2.| ).
       RETURN.
     ENDIF.
 
@@ -1027,10 +1092,15 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
 
     " The replay must not have disturbed the durable evidence.
     DATA(after) = intent_row( e_delivery_uuid ).
+    " Phase 7.3. AttemptCount is COORDINATOR accounting. K drives the production
+    " transport directly and never enters run_once or record, so a real request
+    " left this machine and the durable count must still be unchanged - the
+    " counter measures dispatched coordinator attempts, not packets on the wire.
     IF after-payload_snapshot <> before-payload_snapshot
        OR after-payload_hash <> before-payload_hash
        OR after-portal_order_uuid <> before-portal_order_uuid
-       OR after-dispatch_state <> before-dispatch_state.
+       OR after-dispatch_state <> before-dispatch_state
+       OR after-attempt_count <> before-attempt_count.
       stop( 'the replay changed the persisted intent.' ).
       RETURN.
     ENDIF.
@@ -1186,6 +1256,12 @@ CLASS zjp_cl_po_dispatch_test IMPLEMENTATION.
 
     IF intent-dispatch_state <> 'PENDING'.
       stop( |a retryable 502 left DispatchState { intent-dispatch_state }| ).
+      RETURN.
+    ENDIF.
+    " Phase 7.3. Returning to PENDING does not un-send the request. The attempt
+    " is spent, and the durable count has to show it.
+    IF intent-attempt_count <> 1.
+      stop( |a retryable 502 recorded AttemptCount { intent-attempt_count }, not 1.| ).
       RETURN.
     ENDIF.
 

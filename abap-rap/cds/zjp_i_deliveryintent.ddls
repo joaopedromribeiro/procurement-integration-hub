@@ -56,6 +56,10 @@ define root view entity ZJP_I_DeliveryIntent
       lease_owner           as LeaseOwner,
       lease_expires_at      as LeaseExpiresAt,
 
+      // Phase 7.3. Number of outbound transport attempts performed for this
+      // delivery. Historical intents created before this field existed remain 0.
+      attempt_count         as AttemptCount,
+
       @Semantics.systemDateTime.createdAt: true
       created_at            as CreatedAt,
       @Semantics.systemDateTime.lastChangedAt: true

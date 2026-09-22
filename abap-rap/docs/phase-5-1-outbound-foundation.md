@@ -307,9 +307,9 @@ Phase 4.3's lesson was that this class of rule belongs in a database constraint 
 
 | Left out | Why, and when it arrives |
 | --- | --- |
-| `attempt_count` | API_CONTRACTS proposes a bounded budget of three retries, so a counter is needed — by `retryDelivery`, which is not 5.1. Phase 4.4 made the same call in the other direction: `SupplierResponseDeliveries` was pulled forward *without* attempt count, precisely because nothing in that phase attempted a delivery |
+| ~~`attempt_count`~~ — **added in Phase 7.3 and SAP runtime-verified** | API_CONTRACTS proposes a bounded budget of three retries, so a counter is needed — by `retryDelivery`, which is not 5.1. Phase 4.4 made the same call in the other direction: `SupplierResponseDeliveries` was pulled forward *without* attempt count, precisely because nothing in that phase attempted a delivery. **Phase 7.3 added it for diagnostics rather than for a budget**: the coordinator increments it once per request that actually reached `transport->post`, and the bounded retry budget it was originally wanted for still belongs to Phase 7.4 with `retryDelivery` still unimplemented |
 | `last_http_status`, `last_error_code`, `last_error_message` | The header already has `LastErrorCode` / `LastErrorMessage` / `LastErrorAt` and nothing writes them yet. Duplicating them on the intent before either is populated would be two unpopulated copies of one idea |
-| DeliveryAttempt history | The domain model assigns it to **Phase 7**: *"Phase 7 extends this with DeliveryAttempt history."* Not pulled forward, and the intent is not a substitute for it |
+| DeliveryAttempt history | The domain model assigned it to **Phase 7**, and Phase 7.3 then **declined to build it on the SAP side**: the intent received `attempt_count` and nothing else, so there is no SAP attempt-history table or child entity. The durable per-attempt history exists on the CAP inbound leg instead. Revisited only if Phase 7.9 shows an outbound diagnosis unreachable without it |
 | Any association to CAP | *"There are no cross-database foreign keys."* `portal_order_uuid` is a stored identifier, not a reference |
 
 This follows the pattern Phase 4.3 and 4.4 established twice: move a boundary when a subphase genuinely cannot answer its question without it, take only the fields that subphase needs, and record the deviation.
@@ -806,12 +806,12 @@ The design already places the seam correctly for either answer. Object 5, `ZJP_I
 | ~~The coordinator, the first real `POST` from a persisted intent, receipt handling, the `SENT` transition and lease management~~ — **done in Phase 5.2g and SAP runtime-verified.** Formerly not started; gated by **P14**, **P16** and **P17**, all three now source-prepared and awaiting SAP verification. **Two architectural decisions are locked.** `lease_seconds` is an **explicit coordinator input**: tests and runners inject a value, and no production default or configuration object is introduced yet, which settles the lease duration without inventing an operational timeout. And **`recordDeliveryResult` moves into 5.2g** (row below), because the coordinator cannot externally write the header outcome fields and 5.2g owns the `APPROVED` → `SENT` transition | 5.2g ✔ |
 | The real HTTP transport, after P1–P4 | 5.2e |
 | The coordinator, the first real `POST`, and receipt handling | 5.3 |
-| `retryDelivery`, the bounded retry budget and `attempt_count` | 5.x |
+| `retryDelivery` and the bounded retry budget — **`attempt_count` itself arrived in Phase 7.3**, the budget is Phase 7.4 and `retryDelivery` is Phase 7.6, still unimplemented | 5.x → 7.x |
 | `applySupplierResponse`, the restricted integration projection and Web API binding (OI-03 remainder) | 5.x |
 | The CAP → SAP response sender, and CAP's transport state beyond `PENDING` | 5.x |
 | ~~`recordDeliveryResult` as a separate restricted operation~~ — **moved from 5.x into 5.2g and SAP runtime-verified.** Every header field the outcome step must write — `Status`, `IntegrationStatus`, `DeliveryId`, `LastErrorCode`, `LastErrorMessage`, `LastErrorAt`, `LastCorrelationId` — is `field ( readonly )` in the base BDEF, so an external console coordinator cannot write them by plain EML; only in-handler `IN LOCAL MODE` can, which is why `sendToSupplier` writes that way. The `DeliveryIntent` side has no such problem, and its external EML updates are already runtime-verified. It **stays internal** — not exposed through `ZJP_C_PurchaseOrder` and not through OData, per API_CONTRACTS’ *“prefer EML-only access for coordinator bookkeeping”*. **Its parameter structure is deliberately not designed yet**; that comes with the 5.2g RAP outcome boundary, after the probes | **5.2g** |
 | Integration Suite, CPI/iFlows | 6 |
-| DeliveryAttempt history | 7 |
+| ~~DeliveryAttempt history~~ — **Phase 7.3 added `attempt_count` only; no SAP attempt-history object was built** | 7.3 ✔ |
 | OAuth, XSUAA, IAS, destinations, production credentials | 8 |
 | Event Mesh | 9 |
 | API Management | 10 |

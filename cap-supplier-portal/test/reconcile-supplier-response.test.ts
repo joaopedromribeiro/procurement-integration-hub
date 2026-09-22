@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import type { Server } from 'node:http'
 import path from 'node:path'
 import { after, before, beforeEach, describe, test } from 'node:test'
-import { Orders, SupplierResponseDeliveries } from '#cds-models/pih/portal'
+import { Orders, SupplierResponseDeliveries, SupplierResponseDeliveryAttempts } from '#cds-models/pih/portal'
 
 import type { ResponseTransport } from '../srv/lib/ci-transport'
 import { flushSupplierResponses, reconcileSupplierResponse } from '../srv/lib/response-sender'
@@ -271,5 +271,96 @@ describe('the guarded write stops a lost update', () => {
     assert.equal(after.state, 'DELIVERED', 'the concurrent write stands')
     assert.equal(after.attempts, 1, 'the losing attempt did not inflate the count')
     assert.equal(after.responseId, row.responseId, 'identity intact, so a later replay is still safe')
+  })
+})
+
+describe('attempt history across reconciliation', () => {
+
+  const historyFor = (delivery: string) =>
+    SELECT.from(SupplierResponseDeliveryAttempts).where({ delivery_ID: delivery }).orderBy('attemptNumber')
+
+  test('two attempts on one response produce exactly two rows, numbered 1 and 2', async () => {
+    // Attempt 1: the real sender, answered ambiguously.
+    const row = await stuckUnknown()
+    const first: any[] = await historyFor(row.ID)
+    assert.equal(first.length, 1, 'the ambiguous attempt recorded itself')
+    const correlationA = first[0].correlationId
+    assert.equal(first[0].outcome, 'UNKNOWN')
+    assert.equal(first[0].errorCategory, 'NO_ANSWER')
+
+    // Attempt 2: the SAME responseId through the operator command.
+    const transport = new FakeTransport(ok204)
+    const result = await reconcileSupplierResponse({ responseId: row.responseId, transport })
+
+    assert.equal(result.outcome!.state, 'DELIVERED')
+    assert.equal(transport.sent.length, 1, 'exactly one replay')
+    assert.equal(transport.sent[0].payload.responseId, row.responseId, 'the same business identity')
+
+    const correlationB = transport.sent[0].correlationId
+    assert.notEqual(correlationB, correlationA, 'a fresh correlation id for the new attempt')
+
+    const parent: any = await rowFor(ORDER_A)
+    assert.equal(parent.state, 'DELIVERED')
+    assert.equal(parent.attempts, 2)
+    assert.equal(parent.lastCorrelationId, correlationB)
+
+    const history: any[] = await historyFor(row.ID)
+    assert.equal(history.length, 2, 'exactly two rows, no duplicates')
+    assert.deepEqual(history.map(h => h.attemptNumber), [1, 2], 'contiguous and ordered')
+    assert.deepEqual(history.map(h => h.correlationId), [correlationA, correlationB])
+    assert.deepEqual(history.map(h => h.outcome), ['UNKNOWN', 'DELIVERED'])
+    assert.deepEqual(history.map(h => h.httpStatus), [null, 204])
+    assert.deepEqual(history.map(h => h.errorCategory), ['NO_ANSWER', 'NONE'])
+    assert.equal(history[1].errorSummary, null, 'the successful replay stores no diagnosis')
+  })
+
+  test('a refused reconciliation records no attempt at all', async () => {
+    const row = await stuckAt('DELIVERED', ok204)
+    const before: any[] = await historyFor(row.ID)
+    assert.equal(before.length, 1, 'only the attempt that actually happened')
+
+    const transport = new FakeTransport(ok204)
+    const result = await reconcileSupplierResponse({ responseId: row.responseId, transport })
+
+    assert.equal(result.refused, 'NOT_UNKNOWN')
+    assert.equal(transport.sent.length, 0)
+
+    const after: any[] = await historyFor(row.ID)
+    assert.equal(after.length, 1, 'a refusal is not an attempt and writes no history')
+    assert.equal((await rowFor(ORDER_A) as any).attempts, 1)
+  })
+
+  test('a true compare-and-set loser writes no history row', async () => {
+    const row = await stuckUnknown()
+    const beforeCount = (await historyFor(row.ID)).length
+    assert.equal(beforeCount, 1, 'the ambiguous attempt is the only history so far')
+
+    // The row leaves UNKNOWN while this attempt is in flight, so the guarded
+    // write matches nothing: affected rows = 0. A TRUE loser, not a same-state
+    // self-transition — the state genuinely changes to DELIVERED underneath.
+    const racing: ResponseTransport = {
+      async send() {
+        await UPDATE(SupplierResponseDeliveries)
+          .set({ state: 'DELIVERED', lastError: null } as any)
+          .where({ ID: row.ID })
+        return ok204
+      }
+    }
+
+    const result = await reconcileSupplierResponse({ responseId: row.responseId, transport: racing })
+
+    assert.equal(result.refused, 'STATE_CHANGED')
+    assert.equal(result.outcome!.conflicted, true)
+
+    const after: any = await rowFor(ORDER_A)
+    assert.equal(after.state, 'DELIVERED', 'the concurrent write stands')
+    assert.equal(after.attempts, 1, 'the losing attempt did not inflate the counter')
+
+    // The concurrent mutation above bypassed the sender, so it legitimately has
+    // no history of its own. What matters is that the LOSER added none: the
+    // count is unchanged from before the losing attempt ran.
+    const history: any[] = await historyFor(row.ID)
+    assert.equal(history.length, beforeCount, 'the loser wrote zero history rows')
+    assert.deepEqual(history.map(h => h.attemptNumber), [1], 'no attemptNumber 2 was invented')
   })
 })

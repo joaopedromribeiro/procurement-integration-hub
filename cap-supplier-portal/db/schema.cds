@@ -39,6 +39,34 @@ type PortalOrderStatus : String(10) enum {
 }
 
 /**
+ * The durable delivery state one committed attempt produced. Deliberately the
+ * same four values as `SupplierResponseDeliveries.state`, because an attempt's
+ * outcome is exactly the state it moved the row to. A dry run produces no
+ * attempt row at all, so there is no SKIPPED here and no fifth state.
+ */
+type SupplierResponseAttemptOutcome : String(10) enum {
+    PENDING;
+    DELIVERED;
+    FAILED;
+    UNKNOWN;
+}
+
+/**
+ * Why an attempt ended as it did, as a closed vocabulary. It answers a
+ * different question from `outcome`: the outcome is the durable state, this is
+ * the reason. `NO_ANSWER` deliberately does not claim whether the request was
+ * sent — separating pre-send from ambiguous is Phase 7.4 work.
+ */
+type SupplierResponseAttemptErrorCategory : String(12) enum {
+    NONE;
+    REFUSED;
+    TRANSIENT;
+    AMBIGUOUS;
+    NO_ANSWER;
+    PAYLOAD;
+}
+
+/**
  * Supplier master data held by the portal. Deliberately thin: a controlled
  * synthetic reference used to resolve `supplierCode` on ingestion and to scope
  * supplier access in Phase 4.4, not a master-data replication.
@@ -263,4 +291,66 @@ entity SupplierResponseDeliveries : cuid {
 
     @cds.on.insert: $now
     createdAt             : Timestamp;
+
+    /**
+     * Phase 7.3 diagnostics. The four fields above stay the business fast path
+     * and are never replaced by a join against this collection; history exists
+     * to explain how the row reached its state, not to define it.
+     *
+     * A composition, because an attempt has no meaning without the response it
+     * was an attempt at, and must be deleted with it.
+     */
+    attemptHistory        : Composition of many SupplierResponseDeliveryAttempts
+                                on attemptHistory.delivery = $self;
+}
+
+/**
+ * One transport attempt against one committed supplier response.
+ *
+ * Diagnostics and audit only. Deleting every row here must leave business
+ * behaviour identical: nothing reads this collection to decide anything, and
+ * the parent's `attempts`, `lastAttemptAt`, `lastError` and `lastCorrelationId`
+ * remain the durable fast path.
+ *
+ * A row is inserted only inside the transaction whose guarded compare-and-set
+ * won, and only when it won. A losing runner writes nothing, because history
+ * that records a discarded outcome is worse than no history.
+ *
+ * History begins at the Phase 7.3 deployment. Parent rows written earlier may
+ * legitimately show `attempts` above zero with no rows here; that is historical
+ * truth and no backfill is implied or permitted.
+ */
+@assert.unique.attempt: [
+    delivery,
+    attemptNumber
+]
+entity SupplierResponseDeliveryAttempts : cuid {
+    delivery      : Association to one SupplierResponseDeliveries not null;
+
+    /**
+     * The parent's `attempts` value this attempt committed, so the two can
+     * never disagree. The unique constraint above is a data-integrity backstop
+     * that keeps duplicate audit history out of the table; it is not the
+     * concurrency mechanism, which remains the parent's compare-and-set.
+     */
+    attemptNumber : Integer not null;
+
+    /**
+     * Transport-attempt identity, fresh for every attempt and never business
+     * identity. Nullable because an attempt can end before any transport
+     * attempt exists — a payload that cannot be built is never sent.
+     */
+    correlationId : UUID;
+
+    startedAt     : Timestamp not null;
+    durationMs    : Integer not null;
+    outcome       : SupplierResponseAttemptOutcome not null;
+
+    /** Null when the transport observed no HTTP answer. */
+    httpStatus    : Integer;
+
+    errorCategory : SupplierResponseAttemptErrorCategory not null;
+
+    /** The same short, sanitised diagnosis as the parent's `lastError`. */
+    errorSummary  : String(255);
 }

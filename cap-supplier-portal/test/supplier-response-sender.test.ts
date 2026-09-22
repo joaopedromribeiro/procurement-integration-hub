@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import type { Server } from 'node:http'
 import path from 'node:path'
 import { after, before, beforeEach, describe, test } from 'node:test'
-import { Orders, SupplierResponseDeliveries } from '#cds-models/pih/portal'
+import { Orders, SupplierResponseDeliveries, SupplierResponseDeliveryAttempts } from '#cds-models/pih/portal'
 
 import {
   CI_CLIENT_ID_VAR, CI_CLIENT_SECRET_VAR, CI_TIMEOUT_VAR, CI_URL_VAR,
@@ -13,7 +13,7 @@ import {
 } from '../srv/lib/ci-transport'
 import { flushSupplierResponses } from '../srv/lib/response-sender'
 import {
-  buildSupplierResponsePayload, classify, PayloadError, toRfc3339,
+  buildSupplierResponsePayload, categorise, classify, PayloadError, toRfc3339,
   type SupplierResponsePayload, type TransportResult
 } from '../srv/lib/supplier-response'
 
@@ -597,5 +597,238 @@ describe('configuration and secrets', () => {
     const detail = safeDetail('x'.repeat(500))
     assert.ok(detail.length <= 180, 'unbounded foreign text is never stored')
     assert.equal(safeDetail('   \n  '), 'the receiver returned no body')
+  })
+})
+
+describe('a malformed payload, and the dry-run boundary', () => {
+
+  /**
+   * Commits a real decision the way a supplier does, then removes the one field
+   * the payload builder cannot default. `respondedAt` is chosen because
+   * `toRfc3339` refuses a null outright with MISSING_RESPONDED_AT, so the row is
+   * malformed for a reason the contract states rather than by corrupting a key.
+   * The UPDATE touches only the local in-memory test database.
+   */
+  async function malformedPending(order: string) {
+    await accept(order, { estimatedDeliveryDate: '2026-11-15' })
+    await UPDATE(SupplierResponseDeliveries).set({ respondedAt: null } as any).where({ order_ID: order })
+    const [row]: any[] = await rowsFor(order)
+    assert.equal(row.state, 'PENDING', 'the fixture starts committed and unsent')
+    return row
+  }
+
+  const attemptsFor = (delivery: string) =>
+    SELECT.from('pih.portal.SupplierResponseDeliveryAttempts').where({ delivery_ID: delivery })
+
+  test('a dry run reports a malformed payload and writes nothing at all', async () => {
+    const before: any = await malformedPending(SUP001_ORDER_A)
+
+    const transport = new FakeTransport(ok204)
+    const summary = await flushSupplierResponses({ transport, dryRun: true })
+
+    assert.equal(transport.sent.length, 0, 'a dry run never reaches the transport')
+    assert.equal(summary.outcomes[0].state, 'FAILED', 'the operator is told the payload is unusable')
+    assert.equal(summary.failed, 1, 'the command still signals malformed data')
+
+    const after: any = (await rowsFor(SUP001_ORDER_A))[0]
+    assert.equal(after.state, 'PENDING', 'the durable state is untouched')
+    assert.equal(after.attempts, 0, 'a dry run never spends an attempt number')
+    assert.equal(after.lastAttemptAt, null)
+    assert.equal(after.lastError, null)
+    assert.equal(after.lastCorrelationId, null)
+    assert.equal(after.ID, before.ID, 'the same row, not a replacement')
+
+    // The Phase 7.3 entity exists locally even though nothing writes to it yet,
+    // so this asserts the invariant now rather than after persistence lands.
+    assert.equal((await attemptsFor(after.ID)).length, 0, 'a dry run creates no attempt history')
+  })
+
+  test('a real run on the same malformed row still commits FAILED exactly once', async () => {
+    await malformedPending(SUP001_ORDER_A)
+
+    const transport = new FakeTransport(ok204)
+    const summary = await flushSupplierResponses({ transport })
+
+    assert.equal(transport.sent.length, 0, 'a payload that cannot be built is never sent')
+    assert.equal(summary.outcomes[0].state, 'FAILED')
+    assert.equal(summary.failed, 1)
+
+    const after: any = (await rowsFor(SUP001_ORDER_A))[0]
+    assert.equal(after.state, 'FAILED', 'the durable state moves, unlike the dry run')
+    assert.equal(after.attempts, 1, 'exactly one committed attempt')
+    assert.ok(after.lastAttemptAt, 'the attempt is timestamped')
+    assert.match(after.lastError, /MISSING_RESPONDED_AT/, 'the diagnostic names the contract violation')
+    assert.equal(after.lastCorrelationId, null, 'no transport attempt means no correlation id')
+  })
+})
+
+describe('the attempt-error categories', () => {
+
+  test('every branch of the closed vocabulary', () => {
+    assert.equal(categorise(ok204), 'NONE')
+    assert.equal(categorise(ok200), 'NONE')
+    assert.equal(categorise({ answered: true, status: 201 }), 'NONE')
+
+    for (const status of [400, 401, 403, 404, 409, 412, 413]) {
+      assert.equal(categorise({ answered: true, status }), 'REFUSED', `HTTP ${status}`)
+    }
+    for (const status of [429, 502, 503]) {
+      assert.equal(categorise({ answered: true, status }), 'TRANSIENT', `HTTP ${status}`)
+    }
+    for (const status of [500, 504]) {
+      assert.equal(categorise({ answered: true, status }), 'AMBIGUOUS', `HTTP ${status}`)
+    }
+
+    // Outside the table, split by class exactly as classify does.
+    assert.equal(categorise({ answered: true, status: 599 }), 'AMBIGUOUS', 'an unlisted 5xx may have landed')
+    assert.equal(categorise({ answered: true, status: 418 }), 'REFUSED', 'an unlisted 4xx was an answered refusal')
+
+    assert.equal(categorise(timeout), 'NO_ANSWER')
+  })
+
+  test('PAYLOAD is never produced from a transport result', () => {
+    const all: TransportResult[] = [
+      ok204, ok200, conflict, timeout,
+      { answered: true, status: 500 }, { answered: true, status: 503 }, { answered: true, status: 418 }
+    ]
+    for (const result of all) assert.notEqual(categorise(result), 'PAYLOAD')
+  })
+
+  test('the category answers a different question from the durable state', () => {
+    // Both are FAILED, and history must still tell them apart.
+    assert.equal(classify(conflict), 'FAILED')
+    assert.equal(categorise(conflict), 'REFUSED')
+  })
+})
+
+describe('attempt history', () => {
+
+  const historyFor = (delivery: string) =>
+    SELECT.from(SupplierResponseDeliveryAttempts).where({ delivery_ID: delivery }).orderBy('attemptNumber')
+
+  /** Drains one committed response through a scripted transport. */
+  async function attemptOnce(result: TransportResult) {
+    await accept(SUP001_ORDER_A, { estimatedDeliveryDate: '2026-11-15' })
+    const transport = new FakeTransport(result)
+    await flushSupplierResponses({ transport })
+    const parent: any = (await rowsFor(SUP001_ORDER_A))[0]
+    const history: any[] = await historyFor(parent.ID)
+    return { transport, parent, history }
+  }
+
+  test('a 204 writes exactly one history row that matches the parent', async () => {
+    const { transport, parent, history } = await attemptOnce(ok204)
+
+    assert.equal(parent.state, 'DELIVERED')
+    assert.equal(parent.attempts, 1)
+    assert.equal(parent.lastCorrelationId, transport.sent[0].correlationId)
+
+    assert.equal(history.length, 1, 'exactly one row per committed attempt')
+    const [only] = history
+    assert.equal(only.attemptNumber, 1)
+    assert.equal(only.correlationId, transport.sent[0].correlationId, 'the id that went on the wire')
+    assert.equal(only.outcome, 'DELIVERED', 'the same classified value the parent got')
+    assert.equal(only.httpStatus, 204)
+    assert.equal(only.errorCategory, 'NONE')
+    assert.equal(only.errorSummary, null, 'a success stores no diagnosis')
+    assert.ok(only.startedAt, 'the attempt is timestamped')
+    assert.ok(Number.isInteger(only.durationMs) && only.durationMs >= 0, 'a real measured duration')
+  })
+
+  test('a deterministic refusal records REFUSED with its status', async () => {
+    const { parent, history } = await attemptOnce(conflict)
+
+    assert.equal(parent.state, 'FAILED')
+    assert.equal(parent.attempts, 1)
+
+    assert.equal(history.length, 1)
+    assert.equal(history[0].outcome, 'FAILED')
+    assert.equal(history[0].httpStatus, 409)
+    assert.equal(history[0].errorCategory, 'REFUSED')
+    assert.equal(history[0].errorSummary, parent.lastError, 'history and parent carry the same diagnosis')
+    assert.match(history[0].errorSummary, /^HTTP 409/)
+  })
+
+  test('a transient response records TRANSIENT and leaves the row PENDING', async () => {
+    const { parent, history } = await attemptOnce({ answered: true, status: 503, detail: 'upstream busy' })
+
+    assert.equal(parent.state, 'PENDING', 'still eligible, not failed')
+    assert.equal(parent.attempts, 1, 'the attempt still counts')
+
+    assert.equal(history.length, 1)
+    assert.equal(history[0].outcome, 'PENDING')
+    assert.equal(history[0].httpStatus, 503)
+    assert.equal(history[0].errorCategory, 'TRANSIENT')
+  })
+
+  test('an unanswered transport records NO_ANSWER with a null status', async () => {
+    const { parent, history } = await attemptOnce(timeout)
+
+    assert.equal(parent.state, 'UNKNOWN')
+    assert.equal(parent.attempts, 1)
+
+    assert.equal(history.length, 1)
+    assert.equal(history[0].outcome, 'UNKNOWN')
+    assert.equal(history[0].httpStatus, null, 'no answer means no status, not a zero')
+    assert.equal(history[0].errorCategory, 'NO_ANSWER')
+    assert.match(history[0].errorSummary, /^NO_ANSWER/)
+  })
+
+  test('a payload failure records PAYLOAD with no correlation id', async () => {
+    await accept(SUP001_ORDER_A, { estimatedDeliveryDate: '2026-11-15' })
+    await UPDATE(SupplierResponseDeliveries).set({ respondedAt: null } as any).where({ order_ID: SUP001_ORDER_A })
+
+    const transport = new FakeTransport(ok204)
+    await flushSupplierResponses({ transport })
+
+    assert.equal(transport.sent.length, 0, 'nothing was sent')
+    const parent: any = (await rowsFor(SUP001_ORDER_A))[0]
+    assert.equal(parent.state, 'FAILED')
+    assert.equal(parent.attempts, 1)
+    assert.equal(parent.lastCorrelationId, null)
+
+    const history: any[] = await historyFor(parent.ID)
+    assert.equal(history.length, 1, 'a committed attempt, so a history row')
+    assert.equal(history[0].attemptNumber, 1)
+    assert.equal(history[0].correlationId, null, 'no transport attempt, no correlation id')
+    assert.equal(history[0].outcome, 'FAILED')
+    assert.equal(history[0].httpStatus, null)
+    assert.equal(history[0].errorCategory, 'PAYLOAD')
+    assert.match(history[0].errorSummary, /MISSING_RESPONDED_AT/)
+    assert.ok(Number.isInteger(history[0].durationMs) && history[0].durationMs >= 0,
+      'measured, not a manufactured zero')
+  })
+
+  test('a valid dry run sends nothing, changes nothing and records nothing', async () => {
+    await accept(SUP001_ORDER_A, { estimatedDeliveryDate: '2026-11-15' })
+    const before: any = (await rowsFor(SUP001_ORDER_A))[0]
+
+    const transport = new FakeTransport(ok204)
+    const summary = await flushSupplierResponses({ transport, dryRun: true })
+
+    assert.equal(transport.sent.length, 0)
+    assert.equal(summary.outcomes[0].state, 'SKIPPED')
+    assert.ok(summary.outcomes[0].payload, 'the operator still gets the exact bytes')
+
+    const after: any = (await rowsFor(SUP001_ORDER_A))[0]
+    assert.equal(after.state, 'PENDING')
+    assert.equal(after.attempts, 0)
+    assert.equal(after.lastAttemptAt, null)
+    assert.equal((await historyFor(before.ID)).length, 0, 'a dry run records no attempt')
+  })
+
+  test('a row whose attempts predate history is accepted as-is', async () => {
+    // Exactly the shape of a row written before Phase 7.3 existed: a counter
+    // with nothing behind it. No backfill, and no constraint forbids it.
+    await accept(SUP001_ORDER_A, { estimatedDeliveryDate: '2026-11-15' })
+    const parent: any = (await rowsFor(SUP001_ORDER_A))[0]
+    await UPDATE(SupplierResponseDeliveries)
+      .set({ state: 'UNKNOWN', attempts: 3, lastCorrelationId: randomUUID() } as any)
+      .where({ ID: parent.ID })
+
+    const historical: any = (await rowsFor(SUP001_ORDER_A))[0]
+    assert.equal(historical.attempts, 3)
+    assert.equal((await historyFor(parent.ID)).length, 0,
+      'attempts > 0 with no history is historical truth, not a defect')
   })
 })
