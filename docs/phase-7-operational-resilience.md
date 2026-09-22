@@ -6,14 +6,14 @@ Phase 7 makes the bidirectional integration proven in Phase 6 operationally robu
 
 **Subphase 7.2 is COMPLETE and runtime-verified**, executed 2026-09-21 against the deployed droplet, the deployed `PIH_SupplierResponse_v1` and the real SAP system, with all nine acceptance criteria satisfied and no repository code changed. Its result and evidence are recorded in the Phase 7.2 section below.
 
-**Subphase 7.3 is COMPLETE and runtime-verified**, executed 2026-09-21 on a fresh SAP order `PO00000160`. It is the first Phase 7 subphase to change executable source: a `SupplierResponseDeliveryAttempts` child on the CAP inbound leg and a single `attempt_count` column on the SAP delivery intent. **Phase 7.4a, the CAP retry-eligibility core, is implemented and locally verified but not deployed; 7.4b–7.4e remain, so Phase 7.4 and Phase 7 as a whole are not complete.**
+**Subphase 7.3 is COMPLETE and runtime-verified**, executed 2026-09-21 on a fresh SAP order `PO00000160`. It is the first Phase 7 subphase to change executable source: a `SupplierResponseDeliveryAttempts` child on the CAP inbound leg and a single `attempt_count` column on the SAP delivery intent. **Phase 7.4a and 7.4b are implemented and locally verified on CAP but not deployed; 7.4c–7.4e remain, so Phase 7.4 and Phase 7 as a whole are not complete.**
 
 | Subphase | Objective | State |
 | --- | --- | --- |
 | **7.1** | Fault model and acceptance criteria | **frozen — this document** |
 | **7.2** | Runtime-proven `UNKNOWN` and reconciliation, via a deterministic injected state-machine-facing unanswered observation over a real send | **COMPLETE — runtime-verified 2026-09-21** |
 | **7.3** | Attempt history — a durable CAP attempt child, and one outbound `attempt_count` on the SAP intent | **COMPLETE — runtime-verified 2026-09-21** |
-| 7.4 | Retry / transient failure policy | **7.4a CAP retry core implemented locally; 7.4 overall remains incomplete** |
+| 7.4 | Retry / transient failure policy | **7.4a–7.4b CAP retry/certainty core implemented locally; 7.4 overall remains incomplete** |
 | 7.5 | Inbound concurrency hardening | designed, not implemented |
 | 7.6 | Outbound recovery parity / `retryDelivery` | designed, not implemented |
 | 7.7 | Monitoring and correlation | designed, not implemented |
@@ -67,21 +67,21 @@ The request was dispatched and the outcome cannot be established. Examples: a cl
 - **Never automatically replayed**, whatever the budget says.
 - **Durable state: `UNKNOWN`.** Resolved only by explicit operator reconciliation, replaying the same business identity through the same mediated transport.
 
-### Where the current implementation cannot tell A from D
+### Phase 6 baseline and the Phase 7.4b CAP correction
 
 The distinction above is a semantic one. Whether the code can *observe* it is a separate question, and the honest answer differs by leg and by error kind. This is recorded as a limitation, not designed around.
 
-**Inbound (CAP → CI → SAP), [`ci-transport.ts`](../cap-supplier-portal/srv/lib/ci-transport.ts).** The catch block returns `{ answered: false, detail }` for everything and inspects only `error.name`, distinguishing `TimeoutError`/`AbortError` in the **message text alone**. It does not inspect `error.cause.code`, which is where Node places the discriminator for a failed `fetch`. The information therefore **exists and is discarded**:
+**Inbound (CAP → CI → SAP), [`ci-transport.ts`](../cap-supplier-portal/srv/lib/ci-transport.ts).** The Phase 6 catch block returned `{ answered: false, detail }` for everything and discarded `error.cause.code`. Phase 7.4b now converts only an explicit allowlist into `certainty: NOT_SENT`; every missing or unknown code is `MAY_APPLY`:
 
-| Node cause | Category | Currently |
+| Node cause | Category | Phase 7.4b CAP behavior |
 | --- | --- | --- |
-| `ENOTFOUND` (DNS) | **A** — not sent | `UNKNOWN` |
-| `ECONNREFUSED` | **A** — not sent | `UNKNOWN` |
-| TLS handshake failures (`ERR_TLS_*`, `CERT_*`) | **A** — not sent | `UNKNOWN` |
-| `ECONNRESET` | **D** — may have applied; the reset can follow transmission | `UNKNOWN` (correct) |
-| `TimeoutError` / `AbortError` | **D** — cannot be told apart; the abort may follow transmission | `UNKNOWN` (correct) |
+| `ENOTFOUND` (DNS) | **A** — not sent | `PENDING` / `TRANSIENT` |
+| `ECONNREFUSED` | **A** — not sent | `PENDING` / `TRANSIENT` |
+| Five explicit TLS certificate-verification codes | **A** — not sent | `PENDING` / `TRANSIENT` |
+| `ECONNRESET` | **D** — may have applied; the reset can follow transmission | `UNKNOWN` / `NO_ANSWER` |
+| `TimeoutError` / `AbortError` | **D** — cannot be told apart; the abort may follow transmission | `UNKNOWN` / `NO_ANSWER` |
 
-So three of five inbound sub-cases are recoverable in 7.4 by reading `error.cause.code`, and two genuinely cannot be improved. A client timeout is irreducibly ambiguous: the socket aborted, and nothing observable on the client says whether the bytes had already reached the receiver.
+Only the first three inbound sub-cases are automatically retryable. A client timeout remains irreducibly ambiguous: the socket aborted, and nothing observable on the client says whether the bytes had already reached the receiver.
 
 **Outbound (SAP → CI → CAP), [`zjp_cl_outbound_transport`](../abap-rap/classes/zjp_cl_outbound_transport.clas.abap).** The exception handling already **states** the distinction in a comment and then discards it at the seam:
 
@@ -183,9 +183,9 @@ Classification is [`classify`](../cap-supplier-portal/srv/lib/supplier-response.
 | Condition | Current implementation | Intended Phase 7 | Evidence level | Runtime proof missing |
 | --- | --- | --- | --- | --- |
 | Any `2xx` | `DELIVERED` | unchanged | **runtime-verified** (6.5e, 6.5f) | — |
-| DNS failure | `UNKNOWN` | **`PENDING`** via `error.cause.code` | **source-only** | the condition and the reclassification |
-| Connection refused | `UNKNOWN` | **`PENDING`** via `ECONNREFUSED` | **source-only** | the condition and the reclassification |
-| TLS handshake failure | `UNKNOWN` | **`PENDING`** via TLS cause codes | **source-only** | the condition and the reclassification |
+| DNS failure | `PENDING` via explicit `ENOTFOUND` / `NOT_SENT` | unchanged | **local automated-test** | a real deployed occurrence |
+| Connection refused | `PENDING` via explicit `ECONNREFUSED` / `NOT_SENT` | unchanged | **local automated-test** | a real deployed occurrence |
+| Recognised TLS certificate-verification failure | `PENDING` via five explicit `NOT_SENT` codes | unchanged | **local automated-test** | a real deployed occurrence |
 | **CSRF fetch failure** | **`UNKNOWN`** — semantically wrong | **`PENDING`**, requires a CI change — see OQ-2 | **inference** — see the investigation below | **the external status CI returns** |
 | Client timeout | `UNKNOWN` | unchanged — irreducibly ambiguous | **automated-test** | **the condition — this is 7.9, not 7.2.** Phase 7.2 injects the unanswered observation at the `ResponseTransport` seam and never produces a real timeout, so it leaves this row untouched |
 | Connection reset after transmission | `UNKNOWN` | unchanged — correct | **automated-test** | the condition |
@@ -931,7 +931,15 @@ Eligibility is evaluated against one clock instant per explicit flush invocation
 
 The existing `record()` transaction remains the atomic boundary: the parent counter, retry timestamps and one child row commit together after the guarded update wins. A loser still returns before the insert; dry-run still returns before `record()`. Success, deterministic failure and ambiguity clear automatic-retry timing. `UNKNOWN` remains absent from the automatic drain and reconciliation remains explicit.
 
-**Evidence level: local automated execution only.** Typecheck passed; 179 tests in 40 suites passed with zero failures; `cds build --production` passed; the generated HANA table contains nullable `nextAttemptAt TIMESTAMP` and `retryWindowStartedAt TIMESTAMP`, with no attempt-child change. Nothing was deployed and no SAP, Cloud Integration, Cloud Foundry or remote HANA action ran. 7.4b–7.4e remain open, so Phase 7.4 is not complete.
+**7.4a checkpoint evidence: local automated execution only.** After its focused acceptance hardening, 185 tests in 40 suites passed with zero failures; typecheck and `cds build --production` passed; the generated HANA table contained nullable `nextAttemptAt TIMESTAMP` and `retryWindowStartedAt TIMESTAMP`, with no attempt-child change. Nothing was deployed. Phase 7.4b was implemented afterward in the next section; 7.4c–7.4e remain open, so Phase 7.4 is not complete.
+
+## Phase 7.4b — CAP transport certainty and Retry-After, implemented and locally verified
+
+`TransportResult` keeps `answered` and adds optional unanswered certainty: `NOT_SENT` or `MAY_APPLY`. The HTTP adapter alone understands Node errors. Its exact `NOT_SENT` allowlist is `ENOTFOUND`, `ECONNREFUSED`, `ERR_TLS_CERT_ALTNAME_INVALID`, `CERT_HAS_EXPIRED`, `DEPTH_ZERO_SELF_SIGNED_CERT`, `SELF_SIGNED_CERT_IN_CHAIN` and `UNABLE_TO_VERIFY_LEAF_SIGNATURE`. Timeout, abort, `ECONNRESET`, missing codes and all unknown values are `MAY_APPLY`; omitted or unrecognised certainty also classifies conservatively. Answered HTTP classification is untouched. A proven pre-send result becomes `PENDING` / `TRANSIENT`; ambiguous no-answer remains `UNKNOWN` / `NO_ANSWER` and is reconciled explicitly.
+
+The adapter extracts only `response.headers.get('Retry-After')`, preserves the complete raw value through 128 characters, discards anything longer without truncating it, and exposes no other header. The pure retry policy parses nonnegative integer delta-seconds from the captured response-completion timestamp or canonical IMF-fixdate after a strict shape check and exact `toUTCString()` round-trip. Empty, malformed, locale-dependent, negative, fractional and overflowing values are ignored without throwing. Only an answered final transient `PENDING` result consumes the value, so today only `429`, `502` and `503` do; an unanswered `NOT_SENT` result uses normal base plus jitter even if a test double supplies `retryAfter`. The selected durable due is the later of normal jittered policy and `Retry-After`; exact window end is allowed, and anything later remains diagnostic evidence that derives as retry-window-blocked.
+
+Atomicity is unchanged: a winning attempt writes the parent counter, selected timing and exactly one existing-shape history row in one `cds.tx`; a CAS loser writes neither timing nor history. Certainty and raw headers are not persisted. Local evidence is **224 tests in 42 suites, zero failures**, clean typecheck and clean production build. No deployment or remote action occurred. SAP parity, Integration Suite/timeout correction and deployed acceptance remain 7.4c–7.4e.
 
 ## Phase 7 acceptance matrix
 
@@ -955,6 +963,6 @@ The existing `record()` transaction remains the atomic boundary: the parent coun
 
 **OQ-3 — what is the real round-trip latency? RESOLVED BY MEASUREMENT, AND IT RETIRED THE MECHANISM THAT ASKED IT.** Three real message-processing logs were captured under temporary Trace, **one of them (Probe A) matched against a CAP-side elapsed measurement**; B and C have Cloud Integration timings only. `T2 − T0` spans 468–1789 ms and `T4 − T0` spans 869–2943 ms. A conservative cross-run argument — using A's **directly measured 963 ms CAP-observed round trip** and nothing but `δout ≥ 0` for B and C — shows that a guaranteed-post-`T2` timeout for B requires `timeout > 1789 ms` while making A's run unanswered requires `timeout < 963 ms`. **No fixed value satisfies both**, and the shortened-`PIH_CI_TIMEOUT_MS` mechanism is therefore **retired**. The derivation is in §C of the Phase 7.2 section; it uses no `T4`-derived bound and makes **no assumption that A's overhead applies to B or C**. `Δ_total_A = 94 ms` is retained there as a measured diagnostic fact only. The question is closed and nothing further needs measuring for 7.2.
 
-**7.3 is complete, and it is the first Phase 7 subphase with executable source behind it.** The frozen field set was built exactly as designed on both legs, deployed, and exercised end to end on a fresh SAP order: two inbound attempt rows under two distinct correlation IDs, a parent reconciled from `UNKNOWN` to `DELIVERED`, no backfill of anything older, and SAP's `LastChangedAt` byte-for-byte unchanged across the replay. The outbound side records the truth including the part nobody planned — the first attempt met a stopped application and an answered `404`, so the fixture's outbound `AttemptCount` is **2**. **Phase 7.4a is now implemented and locally verified; 7.4b–7.4e remain. Phase 7 as a whole is not complete.**
+**7.3 is complete, and it is the first Phase 7 subphase with executable source behind it.** The frozen field set was built exactly as designed on both legs, deployed, and exercised end to end on a fresh SAP order: two inbound attempt rows under two distinct correlation IDs, a parent reconciled from `UNKNOWN` to `DELIVERED`, no backfill of anything older, and SAP's `LastChangedAt` byte-for-byte unchanged across the replay. The outbound side records the truth including the part nobody planned — the first attempt met a stopped application and an answered `404`, so the fixture's outbound `AttemptCount` is **2**. **Phase 7.4a and 7.4b are now implemented and locally verified on CAP; 7.4c–7.4e remain. Phase 7 as a whole is not complete.**
 
 **7.2 is complete, and the design held.** It required no code change, no deployment, no SAP change and no Integration Suite change. `ResponseTransport` is a required injectable option on `flushSupplierResponses`, so the one-off scratch task composed the deployed `HttpResponseTransport` behind a state-machine-facing unanswered observation — reusing the deployed payload builder, transport, classifier and guarded write without duplicating any of them. The real transport send was **not** interrupted: it ran concurrently to completion and its retained result settled `HTTP 204`. `PIH_CI_TIMEOUT_MS` was **not** set by that task, and the real send used the normal 30-second deadline. **Next: 7.3, attempt history, not started.**

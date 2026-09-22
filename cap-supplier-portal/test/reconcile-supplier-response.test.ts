@@ -258,7 +258,7 @@ describe('the guarded write stops a lost update', () => {
         await UPDATE(SupplierResponseDeliveries)
           .set({ state: 'DELIVERED', lastError: null } as any)
           .where({ ID: row.ID })
-        return ok204
+        return { answered: false, certainty: 'NOT_SENT', detail: 'request not sent' }
       }
     }
 
@@ -335,15 +335,35 @@ describe('attempt history across reconciliation', () => {
     const beforeCount = (await historyFor(row.ID)).length
     assert.equal(beforeCount, 1, 'the ambiguous attempt is the only history so far')
 
+    await UPDATE(SupplierResponseDeliveries).set({
+      attempts: 3,
+      lastAttemptAt: '2026-09-21T10:00:00.000Z',
+      lastError: 'recognizable pre-race error',
+      lastCorrelationId: '11111111-2222-4333-8444-555555555555',
+      nextAttemptAt: '2026-09-21T10:05:00.000Z',
+      retryWindowStartedAt: '2026-09-21T09:55:00.000Z'
+    } as any).where({ ID: row.ID })
+    const before: any = await rowFor(ORDER_A)
+    const protectedFields = [
+      'attempts', 'lastAttemptAt', 'lastError', 'lastCorrelationId',
+      'nextAttemptAt', 'retryWindowStartedAt'
+    ]
+    for (const field of protectedFields) assert.notEqual(before[field], null, `${field} is seeded`)
+
     // The row leaves UNKNOWN while this attempt is in flight, so the guarded
     // write matches nothing: affected rows = 0. A TRUE loser, not a same-state
     // self-transition — the state genuinely changes to DELIVERED underneath.
     const racing: ResponseTransport = {
       async send() {
         await UPDATE(SupplierResponseDeliveries)
-          .set({ state: 'DELIVERED', lastError: null } as any)
+          .set({ state: 'DELIVERED' } as any)
           .where({ ID: row.ID })
-        return ok204
+        return {
+          answered: false,
+          certainty: 'NOT_SENT',
+          detail: 'request not sent',
+          retryAfter: '120'
+        }
       }
     }
 
@@ -354,7 +374,9 @@ describe('attempt history across reconciliation', () => {
 
     const after: any = await rowFor(ORDER_A)
     assert.equal(after.state, 'DELIVERED', 'the concurrent write stands')
-    assert.equal(after.attempts, 1, 'the losing attempt did not inflate the counter')
+    for (const field of protectedFields) {
+      assert.deepEqual(after[field], before[field], `${field} survives the losing attempt unchanged`)
+    }
 
     // The concurrent mutation above bypassed the sender, so it legitimately has
     // no history of its own. What matters is that the LOSER added none: the

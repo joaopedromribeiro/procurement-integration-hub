@@ -8,7 +8,8 @@ import { Orders, SupplierResponseDeliveries, SupplierResponseDeliveryAttempts } 
 
 import {
   CI_CLIENT_ID_VAR, CI_CLIENT_SECRET_VAR, CI_TIMEOUT_VAR, CI_URL_VAR,
-  ConfigError, DEFAULT_TIMEOUT_MS, HttpResponseTransport, readCiConfig, safeDetail,
+  certaintyForFetchError, ConfigError, DEFAULT_TIMEOUT_MS, HttpResponseTransport,
+  NOT_SENT_CAUSE_CODES, readCiConfig, safeDetail,
   type ResponseTransport
 } from '../srv/lib/ci-transport'
 import { flushSupplierResponses } from '../srv/lib/response-sender'
@@ -454,7 +455,12 @@ describe('the wire request itself', () => {
    * so nothing leaves the process and no credential is real — but the header
    * set, the method and the body are asserted exactly as they would go out.
    */
-  async function capture(payload: SupplierResponsePayload, correlationId: string, status = 204) {
+  async function capture(
+    payload: SupplierResponsePayload,
+    correlationId: string,
+    status = 204,
+    retryAfter: string | null = null
+  ) {
     const original = globalThis.fetch
     let seen: { url: string; init: any } | undefined
 
@@ -462,6 +468,7 @@ describe('the wire request itself', () => {
       seen = { url: String(url), init }
       return {
         status,
+        headers: { get: (name: string) => name.toLowerCase() === 'retry-after' ? retryAfter : null },
         text: async () => ''
       } as any
     }) as any
@@ -475,6 +482,22 @@ describe('the wire request itself', () => {
       })
       const result = await transport.send(payload, correlationId)
       return { seen: seen!, result }
+    } finally {
+      globalThis.fetch = original
+    }
+  }
+
+  async function captureError(error: unknown) {
+    const original = globalThis.fetch
+    globalThis.fetch = (async () => { throw error }) as any
+    try {
+      const transport = new HttpResponseTransport({
+        url: 'https://example.invalid/http/pih/v1/supplier-responses',
+        clientId: 'not-a-real-id',
+        clientSecret: 'not-a-real-secret',
+        timeoutMs: 30_000
+      })
+      return await transport.send(samplePayload, randomUUID())
     } finally {
       globalThis.fetch = original
     }
@@ -560,6 +583,92 @@ describe('the wire request itself', () => {
     assert.equal(result.status, 204)
     assert.equal(result.detail, undefined, 'nothing is read from a success')
   })
+
+  test('Retry-After is extracted as the one raw bounded response header', async () => {
+    const { result } = await capture(samplePayload, randomUUID(), 429, ' 30 ')
+    assert.equal(result.retryAfter, ' 30 ')
+  })
+
+  test('an overlong Retry-After with a valid truncated prefix is ignored, never reinterpreted', async () => {
+    const raw = `30${' '.repeat(126)}x`
+    assert.equal(raw.length, 129)
+    assert.equal(raw.slice(0, 128).trim(), '30', 'the former truncation would have made this valid')
+    const { result } = await capture(samplePayload, randomUUID(), 429, raw)
+    assert.equal(result.retryAfter, undefined)
+  })
+
+  test('an exactly 128-character Retry-After is preserved in full', async () => {
+    const raw = 'x'.repeat(128)
+    const { result } = await capture(samplePayload, randomUUID(), 429, raw)
+    assert.equal(result.retryAfter, raw)
+  })
+
+  test('an overlong malformed Retry-After is ignored', async () => {
+    const raw = 'not-a-date'.repeat(13)
+    assert.ok(raw.length > 128)
+    const { result } = await capture(samplePayload, randomUUID(), 429, raw)
+    assert.equal(result.retryAfter, undefined)
+  })
+
+  for (const code of ['ENOTFOUND', 'ECONNREFUSED']) {
+    test(`${code} is an explicitly proven NOT_SENT transient`, async () => {
+      const error = { name: 'TypeError', cause: { code } }
+      assert.equal(certaintyForFetchError(error), 'NOT_SENT')
+      const result = await captureError(error)
+      assert.equal(result.answered, false)
+      assert.equal(result.certainty, 'NOT_SENT')
+      assert.equal(classify(result), 'PENDING')
+      assert.equal(categorise(result), 'TRANSIENT')
+      assert.match(result.detail!, /request not sent/)
+    })
+  }
+
+  for (const code of [
+    'ERR_TLS_CERT_ALTNAME_INVALID',
+    'CERT_HAS_EXPIRED',
+    'DEPTH_ZERO_SELF_SIGNED_CERT',
+    'SELF_SIGNED_CERT_IN_CHAIN',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
+  ]) {
+    test(`${code} is a narrow pre-transmission TLS NOT_SENT result`, async () => {
+      assert.ok(NOT_SENT_CAUSE_CODES.has(code))
+      const result = await captureError({ name: 'TypeError', cause: { code } })
+      assert.equal(result.certainty, 'NOT_SENT')
+      assert.equal(classify(result), 'PENDING')
+      assert.equal(categorise(result), 'TRANSIENT')
+      assert.match(result.detail!, /TLS certificate verification failed/)
+    })
+  }
+
+  for (const item of [
+    { label: 'TimeoutError', error: { name: 'TimeoutError' } },
+    { label: 'AbortError', error: { name: 'AbortError' } },
+    { label: 'ECONNRESET', error: { name: 'TypeError', cause: { code: 'ECONNRESET' } } },
+    { label: 'missing cause.code', error: { name: 'TypeError', cause: {} } },
+    { label: 'unknown cause.code', error: { name: 'TypeError', cause: { code: 'E_FUTURE_UNKNOWN' } } }
+  ]) {
+    test(`${item.label} conservatively remains MAY_APPLY / UNKNOWN`, async () => {
+      assert.equal(certaintyForFetchError(item.error), 'MAY_APPLY')
+      const result = await captureError(item.error)
+      assert.equal(result.answered, false)
+      assert.equal(result.certainty, 'MAY_APPLY')
+      assert.equal(classify(result), 'UNKNOWN')
+      assert.equal(categorise(result), 'NO_ANSWER')
+    })
+  }
+
+  for (const item of [
+    { label: 'top-level code', error: { name: 'TypeError', code: 'ECONNREFUSED' } },
+    { label: 'deeper nested code', error: { name: 'TypeError', cause: { cause: { code: 'ECONNREFUSED' } } } }
+  ]) {
+    test(`${item.label} is not mistaken for the approved direct cause.code shape`, async () => {
+      assert.equal(certaintyForFetchError(item.error), 'MAY_APPLY')
+      const result = await captureError(item.error)
+      assert.equal(result.certainty, 'MAY_APPLY')
+      assert.equal(classify(result), 'UNKNOWN')
+      assert.equal(categorise(result), 'NO_ANSWER')
+    })
+  }
 })
 
 describe('configuration and secrets', () => {
@@ -715,6 +824,26 @@ describe('the attempt-error categories', () => {
     // Both are FAILED, and history must still tell them apart.
     assert.equal(classify(conflict), 'FAILED')
     assert.equal(categorise(conflict), 'REFUSED')
+  })
+
+  test('missing or unknown certainty is conservative', () => {
+    assert.equal(classify({ answered: false }), 'UNKNOWN')
+    assert.equal(categorise({ answered: false }), 'NO_ANSWER')
+    assert.equal(classify({ answered: false, certainty: 'FUTURE_VALUE' as any }), 'UNKNOWN')
+  })
+
+  test('answered HTTP status always takes precedence over contradictory certainty', () => {
+    const cases: Array<{ result: TransportResult, state: string, category: string }> = [
+      { result: { answered: true, status: 503, certainty: 'NOT_SENT' }, state: 'PENDING', category: 'TRANSIENT' },
+      { result: { answered: true, status: 400, certainty: 'MAY_APPLY' }, state: 'FAILED', category: 'REFUSED' },
+      { result: { answered: true, status: 400, certainty: 'NOT_SENT' }, state: 'FAILED', category: 'REFUSED' },
+      { result: { answered: true, status: 500, certainty: 'NOT_SENT' }, state: 'UNKNOWN', category: 'AMBIGUOUS' },
+      { result: { answered: true, status: 204, certainty: 'MAY_APPLY' }, state: 'DELIVERED', category: 'NONE' }
+    ]
+    for (const expected of cases) {
+      assert.equal(classify(expected.result), expected.state)
+      assert.equal(categorise(expected.result), expected.category)
+    }
   })
 })
 
@@ -949,6 +1078,118 @@ describe('Phase 7.4a durable retry policy', () => {
       assert.equal(after.state, expected.state)
       assert.equal(after.nextAttemptAt, null)
       assert.equal(after.retryWindowStartedAt, null)
+    })
+  }
+})
+
+describe('Phase 7.4b certainty and Retry-After integration', () => {
+  const T0 = new Date('2026-09-21T12:00:00.000Z')
+  const historyFor = (delivery: string) =>
+    SELECT.from(SupplierResponseDeliveryAttempts).where({ delivery_ID: delivery }).orderBy('attemptNumber')
+
+  test('a NOT_SENT attempt is atomically PENDING / TRANSIENT with retry timing', async () => {
+    await accept(SUP001_ORDER_A)
+    const transport = new FakeTransport({
+      answered: false,
+      certainty: 'NOT_SENT',
+      detail: 'request not sent: DNS resolution failed'
+    })
+    await flushSupplierResponses({ transport, now: () => T0, jitter: () => 0 })
+
+    const [parent]: any[] = await rowsFor(SUP001_ORDER_A)
+    assert.equal(parent.state, 'PENDING')
+    assert.equal(parent.attempts, 1)
+    assert.equal(new Date(parent.retryWindowStartedAt).toISOString(), T0.toISOString())
+    assert.equal(new Date(parent.nextAttemptAt).toISOString(), new Date(T0.getTime() + 5_000).toISOString())
+    assert.equal(parent.lastCorrelationId, transport.sent[0].correlationId)
+    assert.match(parent.lastError, /^NOT_SENT:/)
+
+    const history: any[] = await historyFor(parent.ID)
+    assert.equal(history.length, 1)
+    assert.equal(history[0].attemptNumber, 1)
+    assert.equal(history[0].outcome, 'PENDING')
+    assert.equal(history[0].errorCategory, 'TRANSIENT')
+    assert.equal(history[0].httpStatus, null)
+    assert.equal(history[0].correlationId, parent.lastCorrelationId)
+  })
+
+  test('an unanswered NOT_SENT result cannot make Retry-After authoritative', async () => {
+    await accept(SUP001_ORDER_A)
+    await flushSupplierResponses({
+      transport: new FakeTransport({
+        answered: false,
+        certainty: 'NOT_SENT',
+        detail: 'request not sent: connection refused',
+        retryAfter: '120'
+      }),
+      now: () => T0,
+      jitter: () => 0
+    })
+
+    const [parent]: any[] = await rowsFor(SUP001_ORDER_A)
+    assert.equal(parent.state, 'PENDING')
+    assert.equal(new Date(parent.nextAttemptAt).toISOString(), new Date(T0.getTime() + 5_000).toISOString())
+    const history: any[] = await historyFor(parent.ID)
+    assert.equal(history.length, 1)
+    assert.equal(history[0].errorCategory, 'TRANSIENT')
+  })
+
+  for (const status of [429, 502, 503]) {
+    test(`HTTP ${status} consumes Retry-After and writes one transient history row`, async () => {
+      await accept(SUP001_ORDER_A)
+      const transport = new FakeTransport({ answered: true, status, retryAfter: '60' })
+      await flushSupplierResponses({ transport, now: () => T0, jitter: () => 0 })
+
+      const [parent]: any[] = await rowsFor(SUP001_ORDER_A)
+      assert.equal(parent.state, 'PENDING')
+      assert.equal(parent.attempts, 1)
+      assert.equal(new Date(parent.nextAttemptAt).toISOString(), new Date(T0.getTime() + 60_000).toISOString())
+      const history: any[] = await historyFor(parent.ID)
+      assert.equal(history.length, 1)
+      assert.equal(history[0].httpStatus, status)
+      assert.equal(history[0].errorCategory, 'TRANSIENT')
+      assert.equal(history[0].correlationId, parent.lastCorrelationId)
+    })
+  }
+
+  test('an overflowing Retry-After is ignored without breaking the sender', async () => {
+    await accept(SUP001_ORDER_A)
+    await flushSupplierResponses({
+      transport: new FakeTransport({
+        answered: true,
+        status: 503,
+        retryAfter: '999999999999999999999999999999'
+      }),
+      now: () => T0,
+      jitter: () => 0
+    })
+
+    const [parent]: any[] = await rowsFor(SUP001_ORDER_A)
+    assert.equal(parent.state, 'PENDING')
+    assert.equal(new Date(parent.nextAttemptAt).toISOString(), new Date(T0.getTime() + 5_000).toISOString())
+  })
+
+  for (const expected of [
+    { status: 500, state: 'UNKNOWN', category: 'AMBIGUOUS' },
+    { status: 504, state: 'UNKNOWN', category: 'AMBIGUOUS' },
+    { status: 400, state: 'FAILED', category: 'REFUSED' },
+    { status: 204, state: 'DELIVERED', category: 'NONE' }
+  ]) {
+    test(`HTTP ${expected.status} ignores Retry-After and remains ${expected.state}`, async () => {
+      await accept(SUP001_ORDER_A)
+      await flushSupplierResponses({
+        transport: new FakeTransport({ answered: true, status: expected.status, retryAfter: '60' }),
+        now: () => T0,
+        jitter: () => 0
+      })
+
+      const [parent]: any[] = await rowsFor(SUP001_ORDER_A)
+      assert.equal(parent.state, expected.state)
+      assert.equal(parent.nextAttemptAt, null)
+      assert.equal(parent.retryWindowStartedAt, null)
+      const history: any[] = await historyFor(parent.ID)
+      assert.equal(history.length, 1)
+      assert.equal(history[0].errorCategory, expected.category)
     })
   }
 })

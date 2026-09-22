@@ -14,7 +14,11 @@
  * into `lastError` or printed by the flush command.
  */
 
-import type { SupplierResponsePayload, TransportResult } from './supplier-response'
+import type {
+  SupplierResponsePayload,
+  TransportCertainty,
+  TransportResult
+} from './supplier-response'
 
 /**
  * One delivery attempt.
@@ -118,6 +122,46 @@ export function safeDetail(body: string): string {
 }
 
 /**
+ * Codes that prove fetch failed before HTTP request transmission.
+ *
+ * The TLS entries are deliberately certificate-verification failures only:
+ * they occur while establishing trust during the handshake. Broad ERR_TLS_* or
+ * CERT_* prefix matching is forbidden because a future code may be post-send.
+ */
+export const NOT_SENT_CAUSE_CODES: ReadonlySet<string> = new Set([
+  'ENOTFOUND',
+  'ECONNREFUSED',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'CERT_HAS_EXPIRED',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
+])
+
+/** Pure, conservative conversion of a Node fetch error into transport certainty. */
+export function certaintyForFetchError(error: unknown): TransportCertainty {
+  const code = (error as any)?.cause?.code
+  return typeof code === 'string' && NOT_SENT_CAUSE_CODES.has(code) ? 'NOT_SENT' : 'MAY_APPLY'
+}
+
+/** Safe fixed wording; raw exception messages can contain URLs or credentials. */
+function safeFetchErrorDetail(error: unknown, certainty: TransportCertainty, timeoutMs: number): string {
+  const name = (error as any)?.name
+  const code = (error as any)?.cause?.code
+
+  if (name === 'TimeoutError' || name === 'AbortError') return `no answer within ${timeoutMs} ms`
+  if (certainty === 'NOT_SENT') {
+    if (code === 'ENOTFOUND') return 'request not sent: DNS resolution failed'
+    if (code === 'ECONNREFUSED') return 'request not sent: connection refused'
+    return 'request not sent: TLS certificate verification failed'
+  }
+  if (code === 'ECONNRESET') return 'connection closed without an HTTP response; delivery may have applied'
+  return 'the request produced no HTTP response; delivery may have applied'
+}
+
+const MAX_RETRY_AFTER_LENGTH = 128
+
+/**
  * The real transport: one bounded POST per attempt.
  *
  * HTTP Basic with a Process Integration Runtime `clientid`/`clientsecret` is
@@ -178,16 +222,19 @@ export class HttpResponseTransport implements ResponseTransport {
         detail = safeDetail(await response.text().catch(() => ''))
       }
 
-      return { answered: true, status: response.status, detail }
-    } catch (error: any) {
-      // No HTTP answer: a timeout, an aborted socket, a DNS or TLS failure. The
-      // receiver may already have committed, so this is reported as unanswered
-      // and the caller leaves the row replayable under the same responseId.
-      const cause = error?.name === 'TimeoutError' || error?.name === 'AbortError'
-        ? `no answer within ${this.config.timeoutMs} ms`
-        : `${error?.name ?? 'Error'}: ${error?.message ?? 'the request could not be completed'}`
+      const rawRetryAfter = response.headers.get('Retry-After')
+      const retryAfter = rawRetryAfter != null && rawRetryAfter.length <= MAX_RETRY_AFTER_LENGTH
+        ? rawRetryAfter
+        : undefined
 
-      return { answered: false, detail: safeDetail(cause) }
+      return { answered: true, status: response.status, detail, retryAfter }
+    } catch (error: any) {
+      const certainty = certaintyForFetchError(error)
+      return {
+        answered: false,
+        certainty,
+        detail: safeFetchErrorDetail(error, certainty, this.config.timeoutMs)
+      }
     }
   }
 }

@@ -26,6 +26,35 @@ export interface RetryTimingOptions {
   retryAfterDue?: string | Date | null
 }
 
+const IMF_FIXDATE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), (0[1-9]|[12]\d|3[01]) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} ([01]\d|2[0-3]):[0-5]\d:[0-5]\d GMT$/
+
+/**
+ * Parses the two Retry-After forms against the response completion timestamp.
+ * Invalid, negative, overflowing and empty values are ignored without throwing.
+ */
+export function parseRetryAfter(value: string | null | undefined, completedAt: Date): Date | null {
+  const completedMs = completedAt.getTime()
+  if (Number.isNaN(completedMs) || value == null) return null
+
+  const trimmed = value.trim()
+  if (!trimmed) return null
+
+  if (/^\d+$/.test(trimmed)) {
+    const seconds = Number(trimmed)
+    if (!Number.isSafeInteger(seconds)) return null
+    const dueMs = completedMs + seconds * 1_000
+    if (!Number.isSafeInteger(dueMs) || dueMs > 8_640_000_000_000_000) return null
+    return new Date(dueMs)
+  }
+
+  if (!IMF_FIXDATE.test(trimmed)) return null
+  const parsedMs = Date.parse(trimmed)
+  if (!Number.isFinite(parsedMs)) return null
+
+  const parsed = new Date(parsedMs)
+  return parsed.toUTCString() === trimmed ? parsed : null
+}
+
 function asDate(value: string | Date): Date {
   const date = value instanceof Date ? value : new Date(value)
   if (Number.isNaN(date.getTime())) throw new Error(`Invalid retry-policy timestamp: ${String(value)}`)

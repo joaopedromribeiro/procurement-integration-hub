@@ -26,6 +26,7 @@ import {
 import type { ResponseTransport } from './ci-transport'
 import {
   calculateRetryTiming,
+  parseRetryAfter,
   retryEligibility,
   type JitterSelector
 } from './retry-policy'
@@ -60,6 +61,7 @@ interface AttemptFacts {
   errorCategory: AttemptErrorCategory
   correlationId: string | null
   jitter?: JitterSelector
+  retryAfterDue?: Date | null
 }
 
 /** Wall clock for the record, monotonic clock for the elapsed time. */
@@ -334,7 +336,8 @@ async function attempt(
       httpStatus: null,
       errorCategory: 'PAYLOAD',
       correlationId: null,
-      jitter: context.jitter
+      jitter: context.jitter,
+      retryAfterDue: null
     })
     context.log(`FAIL  ${row.responseId} v${row.version} — ${reason}`)
     return { ...base, state: 'FAILED', error: reason }
@@ -354,6 +357,9 @@ async function attempt(
   const completedAt = context.now().toISOString()
   const state = classify(result)
   const error = describe(result)
+  const retryAfterDue = result.answered === true && state === 'PENDING'
+    ? parseRetryAfter(result.retryAfter, new Date(completedAt))
+    : null
 
   // The parent's state and the history row's outcome are the SAME classified
   // value, passed once. They cannot drift because there is only one `state`.
@@ -364,7 +370,8 @@ async function attempt(
     httpStatus: result.answered && result.status !== undefined ? result.status : null,
     errorCategory: categorise(result),
     correlationId,
-    jitter: context.jitter
+    jitter: context.jitter,
+    retryAfterDue
   })
 
   if (!written) {
@@ -556,7 +563,8 @@ async function record(
           attempts: attemptNumber,
           completedAt: new Date(facts.completedAt),
           retryWindowStartedAt: row.retryWindowStartedAt,
-          jitter: facts.jitter
+          jitter: facts.jitter,
+          retryAfterDue: facts.retryAfterDue
         })
       : { nextAttemptAt: null, retryWindowStartedAt: null }
 

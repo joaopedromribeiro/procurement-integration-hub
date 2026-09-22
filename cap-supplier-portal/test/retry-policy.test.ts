@@ -3,6 +3,7 @@ import { describe, test } from 'node:test'
 import {
   calculateRetryTiming,
   MAX_RETRY_WINDOW_MS,
+  parseRetryAfter,
   retryEligibility
 } from '../srv/lib/retry-policy'
 
@@ -144,5 +145,96 @@ describe('durable retry timing', () => {
   test('the injected selector makes the calculation deterministic', () => {
     const options = { attempts: 3, completedAt: T0, jitter: () => 12_345 }
     assert.deepEqual(calculateRetryTiming(options), calculateRetryTiming(options))
+  })
+})
+
+describe('Retry-After parsing and selection', () => {
+  test('zero seconds is valid but cannot shorten the normal due time', () => {
+    const retryAfterDue = parseRetryAfter('0', T0)
+    assert.equal(retryAfterDue?.toISOString(), T0.toISOString())
+    assert.equal(calculateRetryTiming({
+      attempts: 1, completedAt: T0, jitter: () => 0, retryAfterDue
+    }).nextAttemptAt, isoAfter(5_000))
+  })
+
+  test('later delta-seconds wins over the normal due time', () => {
+    const retryAfterDue = parseRetryAfter('30', T0)
+    assert.equal(retryAfterDue?.toISOString(), isoAfter(30_000))
+    assert.equal(calculateRetryTiming({
+      attempts: 1, completedAt: T0, jitter: () => 0, retryAfterDue
+    }).nextAttemptAt, isoAfter(30_000))
+  })
+
+  test('earlier delta-seconds cannot shorten the normal due time', () => {
+    const retryAfterDue = parseRetryAfter('1', T0)
+    assert.equal(calculateRetryTiming({
+      attempts: 1, completedAt: T0, jitter: () => 0, retryAfterDue
+    }).nextAttemptAt, isoAfter(5_000))
+  })
+
+  test('later HTTP-date wins over normal due while earlier and past dates cannot shorten it', () => {
+    for (const offset of [30_000, 1_000, -60_000]) {
+      const retryAfterDue = parseRetryAfter(new Date(T0.getTime() + offset).toUTCString(), T0)
+      const timing = calculateRetryTiming({
+        attempts: 1, completedAt: T0, jitter: () => 0, retryAfterDue
+      })
+      assert.equal(timing.nextAttemptAt, isoAfter(Math.max(5_000, offset)))
+    }
+  })
+
+  test('non-decimal, signed, fractional, unsafe and malformed values are ignored without throwing', () => {
+    for (const value of [
+      '', 'not a date', '1e3', '0x10', '+30', '-1', '1.5',
+      '9007199254740992', '999999999999999999999999999999'
+    ]) {
+      assert.doesNotThrow(() => parseRetryAfter(value, T0))
+      assert.equal(parseRetryAfter(value, T0), null, value)
+    }
+  })
+
+  test('only canonical IMF-fixdate is accepted as an HTTP-date', () => {
+    const valid = 'Mon, 21 Sep 2026 12:00:30 GMT'
+    assert.equal(parseRetryAfter(valid, T0)?.toUTCString(), valid)
+
+    for (const value of [
+      '2026-09-21',
+      '09/21/2026',
+      'Sep 21 2026',
+      '21 Sep 2026 12:00:30 GMT'
+    ]) {
+      assert.equal(parseRetryAfter(value, T0), null, value)
+    }
+  })
+
+  test('the representable delta-seconds boundary is accepted and the next second is rejected', () => {
+    const maximumDateMs = 8_640_000_000_000_000
+    const largestAcceptedSeconds = Math.floor((maximumDateMs - T0.getTime()) / 1_000)
+    const accepted = parseRetryAfter(String(largestAcceptedSeconds), T0)
+
+    assert.equal(accepted?.getTime(), T0.getTime() + largestAcceptedSeconds * 1_000)
+    assert.equal(parseRetryAfter(String(largestAcceptedSeconds + 1), T0), null)
+  })
+
+  test('Retry-After exactly at the window end is accepted', () => {
+    const retryAfterDue = parseRetryAfter(String(MAX_RETRY_WINDOW_MS / 1_000), T0)
+    const timing = calculateRetryTiming({
+      attempts: 1, completedAt: T0, retryWindowStartedAt: T0, jitter: () => 0, retryAfterDue
+    })
+    assert.equal(timing.nextAttemptAt, isoAfter(MAX_RETRY_WINDOW_MS))
+    assert.equal(timing.retryWindowBlocked, false)
+  })
+
+  test('Retry-After one millisecond beyond the window is retained and derives as blocked', () => {
+    const retryAfterDue = new Date(T0.getTime() + MAX_RETRY_WINDOW_MS + 1)
+    const timing = calculateRetryTiming({
+      attempts: 1, completedAt: T0, retryWindowStartedAt: T0, jitter: () => 0, retryAfterDue
+    })
+    assert.equal(timing.nextAttemptAt, retryAfterDue.toISOString())
+    assert.equal(timing.retryWindowBlocked, true)
+    assert.equal(retryEligibility({
+      state: 'PENDING', attempts: 1,
+      retryWindowStartedAt: timing.retryWindowStartedAt,
+      nextAttemptAt: timing.nextAttemptAt
+    }, T0), 'RETRY_WINDOW_BLOCKED')
   })
 })

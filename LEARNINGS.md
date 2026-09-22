@@ -809,6 +809,12 @@ The lesson generalises past this tool: when a transformation produces subtly wro
 
 **Persist the decision that contains randomness.** Deriving a retry time from `lastAttemptAt` works only while the delay is a constant. Once jitter exists, recalculating on every invocation means the same row can move into and out of eligibility without any durable fact changing. `nextAttemptAt` stores the one selected answer, while an injected selector makes the boundaries deterministic in tests. Future `Retry-After` can feed the same calculation without redesigning the state machine.
 
+## Phase 7.4b — certainty belongs at the transport boundary
+
+**An allowlist is safer than a clever pattern.** `ERR_TLS_*` sounds precise but is an open-ended namespace: a future code may not prove that transmission never happened. The adapter therefore recognises only two connect/DNS codes and five certificate-verification codes whose failure occurs during the handshake. Every missing or unfamiliar value becomes `MAY_APPLY`, preserving the invariant that automatic retry requires positive proof of non-delivery.
+
+**Extract headers at the adapter; interpret policy outside it.** The HTTP adapter exposes one bounded raw `Retry-After` value and nothing else. The pure policy owns delta-seconds, HTTP-date, overflow rejection and `max(normalDue, retryAfterDue)`, while the sender supplies the exact response-completion timestamp. This keeps HTTP mechanics, business classification and durable scheduling independently testable.
+
 **Null must have one meaning, especially across a schema migration.** `nextAttemptAt = null` means no deferred eligibility time and therefore preserves old `PENDING` rows below budget as immediately eligible. It cannot also mean operator-blocked. Retry exhaustion is derived from the counter, and window blocking from the persisted window anchor, due time and fixed limit; no overloaded sentinel or fifth state is needed.
 
 **A time window limits execution time, not only the timestamp selected earlier.** A due time inside the 15-minute boundary is not permission to execute hours later. Eligibility therefore rejects both a candidate due beyond the boundary and an invocation after it. The exact boundary remains inclusive, which is asserted rather than left to a `<` versus `<=` accident.

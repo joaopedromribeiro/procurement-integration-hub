@@ -164,11 +164,18 @@ export function buildSupplierResponsePayload(row: ResponseRow, order: ResponseOr
 /** What one attempt did to the outbox row. */
 export type DeliveryState = 'PENDING' | 'DELIVERED' | 'FAILED' | 'UNKNOWN'
 
+/** Certainty exists only when no HTTP answer exists. Missing means MAY_APPLY. */
+export type TransportCertainty = 'NOT_SENT' | 'MAY_APPLY'
+
 /** What the transport observed. `answered` and `status` are not the same fact. */
 export interface TransportResult {
   /** False for a timeout, a DNS failure or a socket error: no HTTP answer at all. */
   answered: boolean
   status?: number
+  /** Optional unanswered-result certainty. Any absent or unknown value is conservative. */
+  certainty?: TransportCertainty
+  /** Bounded raw Retry-After value from the one permitted response header. */
+  retryAfter?: string
   /** A short safe reason. Never a body, a header or a credential. */
   detail?: string
 }
@@ -188,10 +195,10 @@ export interface TransportResult {
  * iFlow change into a false failure on a response SAP had already applied.
  */
 export function classify(result: TransportResult): DeliveryState {
-  // A timeout never proves non-delivery. SAP may already have applied it, so
-  // the row must stay replayable under the SAME responseId. RAP's idempotency
-  // is what makes that safe, and it is runtime-proven.
-  if (!result.answered) return 'UNKNOWN'
+  // Only an explicit NOT_SENT observation is retryable. Missing certainty,
+  // MAY_APPLY and future unrecognised values all fail conservatively to
+  // UNKNOWN because the receiver may already have committed.
+  if (!result.answered) return result.certainty === 'NOT_SENT' ? 'PENDING' : 'UNKNOWN'
 
   const status = result.status ?? 0
 
@@ -233,6 +240,9 @@ export function classify(result: TransportResult): DeliveryState {
 
 /** The one-line safe diagnosis persisted in `lastError`. */
 export function describe(result: TransportResult): string | null {
+  if (!result.answered && result.certainty === 'NOT_SENT') {
+    return `NOT_SENT: ${result.detail ?? 'the request failed before transmission'}`.slice(0, 255)
+  }
   if (!result.answered) return `NO_ANSWER: ${result.detail ?? 'the request produced no HTTP response'}`.slice(0, 255)
   if (result.status !== undefined && result.status >= 200 && result.status < 300) return null
   return `HTTP ${result.status ?? 'unknown'}: ${result.detail ?? 'the receiver refused the request'}`.slice(0, 255)
@@ -249,14 +259,13 @@ export function describe(result: TransportResult): string | null {
  * `PAYLOAD` is never produced here. A payload failure happens before there is a
  * `TransportResult` at all, so the sender supplies that category directly.
  *
- * `NO_ANSWER` deliberately does not say whether the request was sent. Splitting
- * pre-send from ambiguous post-send is Phase 7.4 work, and a category that
- * claimed to know today would be claiming more than the transport reports.
+ * An explicitly proven NOT_SENT result shares TRANSIENT with answered 429/502/
+ * 503. Every other unanswered result remains NO_ANSWER and therefore UNKNOWN.
  */
 export type AttemptErrorCategory = 'NONE' | 'REFUSED' | 'TRANSIENT' | 'AMBIGUOUS' | 'NO_ANSWER' | 'PAYLOAD'
 
 export function categorise(result: TransportResult): AttemptErrorCategory {
-  if (!result.answered) return 'NO_ANSWER'
+  if (!result.answered) return result.certainty === 'NOT_SENT' ? 'TRANSIENT' : 'NO_ANSWER'
 
   const status = result.status ?? 0
 
