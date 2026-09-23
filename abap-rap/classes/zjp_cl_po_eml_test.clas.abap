@@ -116,6 +116,10 @@ CLASS zjp_cl_po_eml_test DEFINITION
     METHODS test_record_delivery_result
       RETURNING VALUE(success) TYPE abap_bool.
 
+    " Phase 7.6. EML-only UNKNOWN recovery preparation; no coordinator or HTTP.
+    METHODS test_retry_delivery
+      RETURNING VALUE(success) TYPE abap_bool.
+
     " COMMIT ENTITIES selecting the DeliveryIntent response. `save_changes`
     " reports the PurchaseOrder response and cannot see this BO's failures.
     METHODS save_intent_changes
@@ -776,6 +780,12 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
       RETURN.
     ENDIF.
     out->write( 'PASS: Phase 5.2g recordDeliveryResult outcome boundary verified.' ).
+
+    IF test_retry_delivery( ) = abap_false.
+      print_lifecycle_summary( ).
+      RETURN.
+    ENDIF.
+    out->write( 'PASS: Phase 7.6 retryDelivery EML-only recovery verified.' ).
 
     IF test_apply_supplier_response( ) = abap_false.
       RETURN.
@@ -4499,6 +4509,179 @@ CLASS zjp_cl_po_eml_test IMPLEMENTATION.
   ENDMETHOD.
 
 
+
+  METHOD test_retry_delivery.
+    success = abap_false.
+    console->write( '=== PHASE 7.6 RETRY DELIVERY ===' ).
+
+    DATA(order_uuid) = create_decision_fixture( 'SUP050' ).
+    IF order_uuid IS INITIAL.
+      console->write( 'STOP: retryDelivery fixture could not be created.' ).
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        ALL FIELDS WITH VALUE #( ( PurchaseOrderUUID = order_uuid ) )
+        RESULT DATA(fixture_orders)
+      FAILED DATA(failed_fixture_read).
+    IF failed_fixture_read IS NOT INITIAL OR lines( fixture_orders ) <> 1.
+      console->write( 'STOP: retryDelivery fixture could not be read.' ).
+      RETURN.
+    ENDIF.
+    DATA(order_key) = fixture_orders[ 1 ]-%tky.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE approve FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_approve).
+    IF failed_approve IS NOT INITIAL OR save_changes( ) = abap_false.
+      console->write( 'STOP: retryDelivery fixture could not be approved.' ).
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE sendToSupplier FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_send).
+    IF failed_send IS NOT INITIAL OR save_changes( ) = abap_false.
+      console->write( 'STOP: retryDelivery fixture could not create its intent.' ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE delivery_id, order_revision FROM zjp_po_h
+      WHERE purchase_order_uuid = @order_uuid INTO @DATA(header_key).
+
+    " Wrong state: the fresh PENDING intent is not an UNKNOWN recovery.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE retryDelivery FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_pending).
+    IF failed_pending IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: retryDelivery accepted a PENDING intent.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+    console->write( 'PASS: retryDelivery refuses the wrong state.' ).
+
+    " Put both durable halves into the state a real ambiguous coordinator result
+    " leaves behind. set_dispatch_state uses EML and performs no direct UPDATE.
+    IF set_dispatch_state( delivery_uuid = header_key-delivery_id state = 'UNKNOWN' ) = abap_false.
+      console->write( 'STOP: UNKNOWN intent preparation failed.' ).
+      RETURN.
+    ENDIF.
+    IF save_intent_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE recordDeliveryResult
+        FROM VALUE #( ( %tky                     = order_key
+                        %param-DeliveryUUID      = header_key-delivery_id
+                        %param-OrderRevision     = header_key-order_revision
+                        %param-IntegrationStatus = 'UNKNOWN'
+                        %param-CorrelationId     = cl_system_uuid=>create_uuid_x16_static( )
+                        %param-ErrorCode         = 'NO_ANSWER'
+                        %param-ErrorMessage      = 'Network-free Phase 7.6 fixture.' ) )
+      FAILED DATA(failed_unknown).
+    IF failed_unknown IS NOT INITIAL OR save_changes( ) = abap_false.
+      console->write( 'STOP: UNKNOWN header preparation failed.' ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE * FROM zjp_po_dlv
+      WHERE delivery_uuid = @header_key-delivery_id INTO @DATA(before).
+    SELECT SINGLE status, integration_status, delivery_id FROM zjp_po_h
+      WHERE purchase_order_uuid = @order_uuid INTO @DATA(header_before).
+    IF before-dispatch_state <> 'UNKNOWN' OR header_before-status <> 'ERROR'
+       OR header_before-integration_status <> 'UNKNOWN'.
+      console->write( 'STOP: retryDelivery precondition was not established.' ).
+      RETURN.
+    ENDIF.
+
+    " The production action itself. There is no transport object in this method:
+    " reaching this point and committing proves preparation performs no HTTP.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE retryDelivery FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_retry)
+      REPORTED DATA(reported_retry).
+    console->write( name = 'retryDelivery FAILED - expect empty' data = failed_retry ).
+    console->write( name = 'retryDelivery REPORTED' data = reported_retry ).
+    IF failed_retry IS NOT INITIAL OR save_changes( ) = abap_false.
+      console->write( 'STOP: a valid UNKNOWN delivery was not prepared.' ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE * FROM zjp_po_dlv
+      WHERE delivery_uuid = @header_key-delivery_id INTO @DATA(after).
+    SELECT SINGLE status, integration_status, delivery_id FROM zjp_po_h
+      WHERE purchase_order_uuid = @order_uuid INTO @DATA(header_after).
+
+    IF after-dispatch_state <> 'PENDING' OR header_after-status <> 'ERROR'
+       OR header_after-integration_status <> 'PENDING'.
+      console->write( 'STOP: retryDelivery did not produce ERROR/PENDING plus a PENDING intent.' ).
+      RETURN.
+    ENDIF.
+
+    IF after-delivery_uuid       <> before-delivery_uuid
+       OR after-purchase_order_uuid <> before-purchase_order_uuid
+       OR after-order_revision      <> before-order_revision
+       OR after-payload_snapshot    <> before-payload_snapshot
+       OR after-payload_hash        <> before-payload_hash
+       OR after-approved_by         <> before-approved_by
+       OR after-approved_at         <> before-approved_at
+       OR after-attempt_count       <> before-attempt_count
+       OR after-last_correlation_id <> before-last_correlation_id
+       OR header_after-delivery_id  <> header_before-delivery_id.
+      console->write( 'STOP: retryDelivery changed immutable identity or evidence.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: same delivery, snapshot, hash, approval and attempt evidence.' ).
+
+    " A terminal result arriving before a later operator action must win forever.
+    IF set_dispatch_state( delivery_uuid = header_key-delivery_id state = 'DELIVERED' ) = abap_false
+       OR save_intent_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE recordDeliveryResult
+        FROM VALUE #( ( %tky                     = order_key
+                        %param-DeliveryUUID      = header_key-delivery_id
+                        %param-OrderRevision     = header_key-order_revision
+                        %param-IntegrationStatus = 'DELIVERED'
+                        %param-CorrelationId     = cl_system_uuid=>create_uuid_x16_static( ) ) )
+      FAILED DATA(failed_delivered).
+    IF failed_delivered IS NOT INITIAL OR save_changes( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF ZJP_I_PurchaseOrder
+      ENTITY PurchaseOrder
+        EXECUTE retryDelivery FROM VALUE #( ( %tky = order_key ) )
+      FAILED DATA(failed_terminal).
+    IF failed_terminal IS INITIAL.
+      ROLLBACK ENTITIES.
+      console->write( 'STOP: retryDelivery accepted a terminal delivery.' ).
+      RETURN.
+    ENDIF.
+    ROLLBACK ENTITIES.
+
+    SELECT SINGLE dispatch_state FROM zjp_po_dlv
+      WHERE delivery_uuid = @header_key-delivery_id INTO @DATA(final_state).
+    SELECT SINGLE status, integration_status FROM zjp_po_h
+      WHERE purchase_order_uuid = @order_uuid INTO @DATA(final_header).
+    IF final_state <> 'DELIVERED' OR final_header-status <> 'SENT'
+       OR final_header-integration_status <> 'DELIVERED'.
+      console->write( 'STOP: the refused terminal retry disturbed durable state.' ).
+      RETURN.
+    ENDIF.
+    console->write( 'PASS: terminal/stale retry is refused and remains DELIVERED/SENT.' ).
+    success = abap_true.
+  ENDMETHOD.
 
   METHOD test_apply_supplier_response.
     " Phase 6.5b-1. The inbound supplier response, tested HERE as a RAP action -

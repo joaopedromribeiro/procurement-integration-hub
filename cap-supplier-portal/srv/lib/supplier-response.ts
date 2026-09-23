@@ -50,6 +50,8 @@ export interface ResponseRow {
   attempts?: number | null
   nextAttemptAt?: string | Date | null
   retryWindowStartedAt?: string | Date | null
+  leaseOwner?: string | null
+  leaseExpiresAt?: string | Date | null
 }
 
 /** The portal order the response answers, joined with its supplier code. */
@@ -162,7 +164,7 @@ export function buildSupplierResponsePayload(row: ResponseRow, order: ResponseOr
 }
 
 /** What one attempt did to the outbox row. */
-export type DeliveryState = 'PENDING' | 'DELIVERED' | 'FAILED' | 'UNKNOWN'
+export type DeliveryState = 'PENDING' | 'IN_FLIGHT' | 'DELIVERED' | 'FAILED' | 'UNKNOWN'
 
 /** Certainty exists only when no HTTP answer exists. Missing means MAY_APPLY. */
 export type TransportCertainty = 'NOT_SENT' | 'MAY_APPLY'

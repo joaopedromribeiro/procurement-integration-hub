@@ -111,10 +111,15 @@ export interface FlushOptions {
   now?: () => Date
   /** Positive jitter selector, injected so tests never depend on randomness. */
   jitter?: JitterSelector
+  /** Stable owner for every claim made by this invocation. */
+  leaseOwner?: string
+  /** Bounded claim lifetime. Injected by tests; no scheduler is implied. */
+  leaseMs?: number
   log?: (line: string) => void
 }
 
 export const DEFAULT_LIMIT = 50
+export const DEFAULT_LEASE_MS = 60_000
 
 /**
  * Drains PENDING supplier responses.
@@ -134,8 +139,14 @@ export async function flushSupplierResponses(options: FlushOptions): Promise<Flu
     newCorrelationId = randomUUID,
     now = () => new Date(),
     jitter,
+    leaseOwner = randomUUID(),
+    leaseMs = DEFAULT_LEASE_MS,
     log = () => {}
   } = options
+
+  if (!Number.isInteger(leaseMs) || leaseMs <= 0) {
+    throw new Error('leaseMs must be a positive whole number of milliseconds.')
+  }
 
   const summary: FlushSummary = {
     scanned: 0, delivered: 0, failed: 0, pending: 0, unknown: 0, skipped: 0,
@@ -145,10 +156,15 @@ export async function flushSupplierResponses(options: FlushOptions): Promise<Flu
   // Oldest first, and within one order by version ascending. An acceptance must
   // reach SAP before the date update that supersedes it, and `createdAt` alone
   // would rely on two rows never sharing a timestamp.
-  const rows = (await SELECT
+  const selected = (await SELECT
     .from(SupplierResponseDeliveries)
-    .where({ state: 'PENDING' })
+    .where({ state: { in: ['PENDING', 'IN_FLIGHT'] } })
     .orderBy('createdAt', 'version')) as unknown as ResponseRow[]
+
+  const invokedAt = now()
+  // Keep live leases in the ordered set even though they cannot be claimed: an
+  // earlier live version must still block a later response for the same order.
+  const rows = selected
 
   if (!rows.length) {
     log('No PENDING supplier responses.')
@@ -157,9 +173,9 @@ export async function flushSupplierResponses(options: FlushOptions): Promise<Flu
 
   // One invocation observes one instant. A row cannot move from before-due to
   // due merely because another row took time to send during this same drain.
-  const invokedAt = now()
   for (const row of rows) {
-    const eligibility = retryEligibility(row, invokedAt)
+    if (row.state === 'IN_FLIGHT' && !leaseExpired(row, invokedAt)) continue
+    const eligibility = candidateEligibility(row, invokedAt)
     if (eligibility === 'BEFORE_DUE') summary.beforeDue++
     else if (eligibility === 'RETRY_EXHAUSTED') summary.retryExhausted++
     else if (eligibility === 'RETRY_WINDOW_BLOCKED') summary.retryWindowBlocked++
@@ -187,7 +203,13 @@ export async function flushSupplierResponses(options: FlushOptions): Promise<Flu
   let attempted = 0
 
   for (const row of rows) {
-    const eligibility = retryEligibility(row, invokedAt)
+    if (row.state === 'IN_FLIGHT' && !leaseExpired(row, invokedAt)) {
+      blocked.add(row.order_ID)
+      log(`WAIT  ${row.responseId} v${row.version} — another runner holds a live lease.`)
+      continue
+    }
+
+    const eligibility = candidateEligibility(row, invokedAt)
 
     if (blocked.has(row.order_ID)) {
       if (eligibility === 'ELIGIBLE' && attempted < limit) {
@@ -221,10 +243,28 @@ export async function flushSupplierResponses(options: FlushOptions): Promise<Flu
     attempted++
     summary.scanned++
 
+    if (!dryRun) {
+      const claimed = await claim(row, leaseOwner, invokedAt, leaseMs)
+      if (!claimed) {
+        summary.skipped++
+        summary.outcomes.push({
+          responseId: row.responseId,
+          portalOrderId: row.order_ID,
+          version: row.version,
+          decision: row.decision,
+          state: 'SKIPPED',
+          error: 'another runner owns the delivery claim'
+        })
+        log(`SKIP  ${row.responseId} v${row.version} — another runner owns the claim.`)
+        blocked.add(row.order_ID)
+        continue
+      }
+    }
+
     const outcome = await attempt(row, orders.get(row.order_ID), {
       transport, dryRun, newCorrelationId, now, jitter, log,
-      // Rows were selected as PENDING, so that is what the guarded write expects.
-      expectedState: 'PENDING'
+      expectedState: dryRun ? String(row.state) as DeliveryState : 'IN_FLIGHT',
+      leaseOwner: dryRun ? undefined : leaseOwner
     })
 
     summary.outcomes.push(outcome)
@@ -245,6 +285,30 @@ export async function flushSupplierResponses(options: FlushOptions): Promise<Flu
   }
 
   return summary
+}
+
+function leaseExpired(row: ResponseRow, now: Date): boolean {
+  if (!row.leaseExpiresAt) return false
+  const expires = row.leaseExpiresAt instanceof Date ? row.leaseExpiresAt : new Date(row.leaseExpiresAt)
+  return !Number.isNaN(expires.getTime()) && expires.getTime() <= now.getTime()
+}
+
+function candidateEligibility(row: ResponseRow, now: Date) {
+  return retryEligibility({ ...row, state: 'PENDING' }, now)
+}
+
+/** Atomic PENDING claim or expired-IN_FLIGHT reclaim. */
+async function claim(row: ResponseRow, owner: string, now: Date, leaseMs: number): Promise<boolean> {
+  const leaseExpiresAt = new Date(now.getTime() + leaseMs).toISOString()
+  let update = UPDATE(SupplierResponseDeliveries).set({
+    state: 'IN_FLIGHT', leaseOwner: owner, leaseExpiresAt
+  } as any).where({ ID: row.ID, state: row.state })
+
+  if (row.state === 'IN_FLIGHT') {
+    update = update.and({ leaseExpiresAt: { '<=': now.toISOString() } })
+  }
+
+  return Number(await update) === 1
 }
 
 /** Resolves each row's order and the order's supplier code, in two queries. */
@@ -286,7 +350,7 @@ async function attempt(
   order: ResponseOrder | undefined,
   context: Required<Pick<FlushOptions, 'transport' | 'dryRun' | 'newCorrelationId' | 'log'>>
     & Pick<FlushOptions, 'jitter'>
-    & { expectedState: DeliveryState; now: () => Date }
+    & { expectedState: DeliveryState; leaseOwner?: string; now: () => Date }
 ): Promise<AttemptOutcome> {
   const base = {
     responseId: row.responseId,
@@ -329,7 +393,7 @@ async function attempt(
     // PAYLOAD is supplied directly rather than through `categorise`, because
     // there is no TransportResult to categorise: the attempt ended before one
     // could exist.
-    await record(row, 'FAILED', reason.slice(0, 255), null, context.expectedState, {
+    await record(row, 'FAILED', reason.slice(0, 255), null, context.expectedState, context.leaseOwner, {
       startedAt,
       completedAt: context.now().toISOString(),
       durationMs: elapsedMs(startedMonotonic),
@@ -363,7 +427,7 @@ async function attempt(
 
   // The parent's state and the history row's outcome are the SAME classified
   // value, passed once. They cannot drift because there is only one `state`.
-  const written = await record(row, state, error, correlationId, context.expectedState, {
+  const written = await record(row, state, error, correlationId, context.expectedState, context.leaseOwner, {
     startedAt,
     completedAt,
     durationMs: elapsedMs(startedMonotonic),
@@ -527,15 +591,10 @@ export async function reconcileSupplierResponse(options: ReconcileOptions): Prom
  * reconciling by hand — makes this statement match nothing, return 0 and write
  * nothing.
  *
- * WHAT THIS PREDICATE DOES NOT DETECT, stated plainly so nobody reads more into
- * it: a concurrent writer whose own outcome leaves the row in `expectedState`.
- * A transient `PENDING` → `PENDING`, or an ambiguous `UNKNOWN` → `UNKNOWN`, does
- * not change the column the guard compares, so two runners could both match.
- * The unique `(delivery, attemptNumber)` constraint on the history table is an
- * integrity backstop for that case — it makes duplicate audit rows impossible
- * and fails the second transaction rather than persisting a lie — but it is NOT
- * a concurrency mechanism. Full claim/lease hardening is Phase 7.5, and until
- * then the sender remains single-runner by documented constraint.
+ * Phase 7.5 closes the same-state race for automatic work: a flush first owns
+ * an `IN_FLIGHT` lease and this predicate also requires its `leaseOwner`.
+ * Explicit UNKNOWN reconciliation remains guarded by UNKNOWN state and is
+ * operator-controlled rather than part of the automatic drain.
  *
  * PHASE 7.3: the attempt-history row is inserted INSIDE this transaction and
  * only after the guarded update matched. A loser returns before the INSERT is
@@ -552,6 +611,7 @@ async function record(
   error: string | null,
   correlationId: string | null,
   expectedState: DeliveryState,
+  leaseOwner: string | undefined,
   facts: AttemptFacts
 ): Promise<boolean> {
   return await cds.tx(async () => {
@@ -576,9 +636,15 @@ async function record(
         nextAttemptAt: retryTiming.nextAttemptAt,
         retryWindowStartedAt: retryTiming.retryWindowStartedAt,
         lastError: error,
-        lastCorrelationId: correlationId
+        lastCorrelationId: correlationId,
+        leaseOwner: null,
+        leaseExpiresAt: null
       } as any)
-      .where({ ID: row.ID, state: expectedState })
+      .where({
+        ID: row.ID,
+        state: expectedState,
+        ...(leaseOwner ? { leaseOwner } : {})
+      })
 
     // The loser stops here. Nothing below runs, so no history is written for an
     // outcome the durable state machine discarded.

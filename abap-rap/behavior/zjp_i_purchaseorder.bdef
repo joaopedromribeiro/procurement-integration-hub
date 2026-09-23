@@ -19,26 +19,29 @@ etag master LocalLastChangedAt
   action ( authorization : update ) submit;
   action ( authorization : update ) approve;
   action ( authorization : update ) sendToSupplier;
+  // Phase 7.6. EML-only operator recovery of the CURRENT UNKNOWN intent.
+  // It is intentionally absent from every projection and performs no HTTP.
+  action ( authorization : update ) retryDelivery;
 
   // Phase 5.2g. The coordinator's outcome boundary. It is a NORMAL action and
-  // deliberately not an `internal action`: the coordinator is an EXTERNAL EML
-  // consumer running outside every handler, and `internal` would put it out of
+  // deliberately not an ````internal action````: the coordinator is an EXTERNAL EML
+  // consumer running outside every handler, and ````internal```` would put it out of
   // reach. "Restricted" here means NOT PROJECTED - it is absent from
   // ZJP_C_PurchaseOrder, so no OData client can reach it, which is what
   // API_CONTRACTS means by "prefer EML-only access for coordinator bookkeeping;
   // do not expose an administrative HTTP operation just because a class uses it
   // internally". It exists because Status, IntegrationStatus, LastErrorCode,
-  // LastErrorMessage, LastErrorAt and LastCorrelationId are all `field
-  // ( readonly )` below, so only a handler in local mode may write them.
+  // LastErrorMessage, LastErrorAt and LastCorrelationId are all ````field
+  // ( readonly )```` below, so only a handler in local mode may write them.
   action ( authorization : update ) recordDeliveryResult parameter ZJP_A_RecordDeliveryResult;
   // Phase 6.5b-1. The inbound boundary, and the mirror image of
   // recordDeliveryResult: SupplierResponse, EstimatedDeliveryDate,
   // SupplierRespondedAt, RejectionOrigin, RejectionReason, LastResponseId and
-  // LastResponseVersion are all `field ( readonly )`, so only a handler in
+  // LastResponseVersion are all ````field ( readonly )````, so only a handler in
   // LOCAL MODE can write them and an external caller needs a door with a lock
   // rather than an opening in the wall.
   //
-  // A NORMAL action, not `internal`, for the same reason recordDeliveryResult
+  // A NORMAL action, not ````internal````, for the same reason recordDeliveryResult
   // is: the caller is Cloud Integration through an OData binding, which is an
   // external consumer. It is deliberately NOT projected onto
   // ZJP_C_PurchaseOrder - the buyer UI must not answer on a supplier behalf,

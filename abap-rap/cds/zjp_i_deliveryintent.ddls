@@ -60,6 +60,14 @@ define root view entity ZJP_I_DeliveryIntent
       // delivery. Historical intents created before this field existed remain 0.
       attempt_count         as AttemptCount,
 
+      // Phase 7.4. Earliest time at which a PENDING delivery may be attempted
+      // again. Initial means there is no deferred retry time.
+      next_attempt_at         as NextAttemptAt,
+
+      // Phase 7.4. Anchor of the current retry cycle. Initial means that the
+      // Phase 7.4 retry window has not started yet.
+      retry_window_started_at as RetryWindowStartedAt,
+
       @Semantics.systemDateTime.createdAt: true
       created_at            as CreatedAt,
       @Semantics.systemDateTime.lastChangedAt: true

@@ -57,7 +57,7 @@ export const CI_TIMEOUT_VAR = 'PIH_CI_TIMEOUT_MS'
  * above that budget so that a slow-but-working iFlow is not cut off and turned
  * into an avoidable UNKNOWN, and still bounded so the command cannot hang.
  */
-export const DEFAULT_TIMEOUT_MS = 30_000
+export const DEFAULT_TIMEOUT_MS = 35_000
 
 export class ConfigError extends Error {
   constructor(message: string) {

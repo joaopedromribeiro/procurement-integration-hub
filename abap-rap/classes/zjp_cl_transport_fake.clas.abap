@@ -34,6 +34,14 @@ CLASS zjp_cl_transport_fake DEFINITION
         " this shape from its Exception Subprocess, so the scenario scripts a
         " real observed response rather than an invented one.
         retryable  TYPE string VALUE 'RETRYABLE',
+                " Phase 7.4c - the transport can prove that the request was not sent.
+        " The coordinator must treat this as PENDING / transient.
+        not_sent    TYPE string VALUE 'NOT_SENT',
+
+        " Phase 7.4c - answered transient response carrying Retry-After.
+        " The transport exposes the raw header; policy interpretation belongs
+        " to the coordinator.
+        retry_after TYPE string VALUE 'RETRY_AFTER',
       END OF scenario.
 
     " Configuration is constructor injection and nothing else: one instance is
@@ -110,13 +118,29 @@ CLASS zjp_cl_transport_fake IMPLEMENTATION.
         response-body     = technical_error_body( ).
 
       WHEN scenario-unanswered.
-        " answered = abap_false is the one distinction this interface exists to
-        " preserve. status stays 0 and body stays empty because there was no
-        " reply to carry a status or a body. failure_text is safe diagnostic
-        " text: no stack, no URL, no destination name.
-        response-answered    = abap_false.
-        response-status      = 0.
-        response-failure_text = 'Fake transport: the receiver did not answer.'.
+
+        response-answered     = abap_false.
+        response-status       = 0.
+        response-certainty    =
+          zjp_if_outbound_transport=>co_certainty_may_apply.
+        response-failure_text =
+          'Fake transport: the receiver did not answer.'.
+
+      WHEN scenario-not_sent.
+
+        response-answered     = abap_false.
+        response-status       = 0.
+        response-certainty    =
+          zjp_if_outbound_transport=>co_certainty_not_sent.
+        response-failure_text =
+          'Fake transport: request was not sent.'.
+
+      WHEN scenario-retry_after.
+
+        response-answered    = abap_true.
+        response-status      = 503.
+        response-body        = technical_error_body( ).
+        response-retry_after = '120'.
 
       WHEN OTHERS.
         " A misconfigured test must fail loudly and deterministically rather

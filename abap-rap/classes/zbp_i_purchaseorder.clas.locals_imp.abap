@@ -18,6 +18,9 @@ CLASS lhc_PurchaseOrder DEFINITION
     METHODS sendToSupplier FOR MODIFY
       IMPORTING keys FOR ACTION PurchaseOrder~sendToSupplier.
 
+    METHODS retryDelivery FOR MODIFY
+      IMPORTING keys FOR ACTION PurchaseOrder~retryDelivery.
+
     METHODS recordDeliveryResult FOR MODIFY
       IMPORTING keys FOR ACTION PurchaseOrder~recordDeliveryResult.
 
@@ -782,6 +785,132 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
           TO failed-purchaseorder.
         APPEND VALUE #( %tky = action_key-%tky
           %op-%action-sendToSupplier = if_abap_behv=>mk-on
+          %msg = new_message_with_text(
+            severity = if_abap_behv_message=>severity-error
+            text = error_text ) )
+          TO reported-purchaseorder.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD retryDelivery.
+    " Phase 7.6. Preparation only: reuse the current UNKNOWN intent and make it
+    " eligible for one explicit coordinator run after the caller commits. No
+    " snapshot, hash, approval evidence, identity or attempt evidence is written.
+    " There is deliberately NO HTTP, COMMIT, ROLLBACK or sendToSupplier call.
+    DATA reported_orders LIKE reported-purchaseorder.
+
+    LOOP AT keys INTO DATA(action_key).
+      DATA(error_text) = CONV string( '' ).
+
+      DO 1 TIMES.
+        IF action_key-%is_draft = if_abap_behv=>mk-on.
+          error_text = 'Not allowed on a draft instance.'.
+          EXIT.
+        ENDIF.
+
+        READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+          ENTITY PurchaseOrder
+            FIELDS ( PurchaseOrderUUID Status OrderRevision IntegrationStatus DeliveryId )
+            WITH VALUE #( ( %tky = action_key-%tky ) )
+            RESULT DATA(orders)
+          FAILED DATA(read_failed)
+          REPORTED DATA(read_reported).
+        reported_orders = CORRESPONDING #( DEEP read_reported-purchaseorder ).
+        APPEND LINES OF reported_orders TO reported-purchaseorder.
+
+        IF read_failed IS NOT INITIAL OR lines( orders ) <> 1.
+          error_text = 'Order could not be read; no recovery prepared.'.
+          EXIT.
+        ENDIF.
+
+        DATA(order) = orders[ 1 ].
+
+        " UNKNOWN is recorded as ERROR/UNKNOWN by recordDeliveryResult. These
+        " checks also refuse a late replay after a terminal receipt reached SAP.
+        IF order-Status <> 'ERROR' OR order-IntegrationStatus <> 'UNKNOWN'.
+          error_text = 'Only the current UNKNOWN delivery can be retried.'.
+          EXIT.
+        ENDIF.
+
+        IF order-DeliveryId IS INITIAL.
+          error_text = 'The order has no current delivery identity.'.
+          EXIT.
+        ENDIF.
+
+        SELECT SINGLE delivery_uuid, purchase_order_uuid, order_revision,
+                      dispatch_state, payload_snapshot, payload_hash,
+                      approved_by, approved_at, attempt_count,
+                      last_correlation_id, portal_order_uuid,
+                      lease_owner, lease_expires_at
+          FROM zjp_po_dlv
+          WHERE delivery_uuid       = @order-DeliveryId
+            AND purchase_order_uuid = @order-PurchaseOrderUUID
+            AND order_revision      = @order-OrderRevision
+          INTO @DATA(intent).
+
+        IF sy-subrc <> 0.
+          error_text = 'The current delivery intent could not be found.'.
+          EXIT.
+        ENDIF.
+
+        IF intent-dispatch_state <> 'UNKNOWN'.
+          error_text = 'The current delivery intent is no longer UNKNOWN.'.
+          EXIT.
+        ENDIF.
+
+        IF intent-payload_snapshot IS INITIAL OR intent-payload_hash IS INITIAL
+           OR intent-approved_by IS INITIAL OR intent-approved_at IS INITIAL.
+          error_text = 'The UNKNOWN intent lacks immutable approval evidence.'.
+          EXIT.
+        ENDIF.
+
+        " A completed/owned intent is never disturbed. UNKNOWN should already
+        " have no lease, but refusing inconsistent evidence is safer than
+        " silently clearing a lease that another actor might still rely on.
+        IF intent-lease_owner IS NOT INITIAL OR intent-lease_expires_at IS NOT INITIAL
+           OR intent-portal_order_uuid IS NOT INITIAL.
+          error_text = 'The UNKNOWN intent carries terminal or lease evidence.'.
+          EXIT.
+        ENDIF.
+
+        MODIFY ENTITIES OF ZJP_I_DeliveryIntent
+          ENTITY DeliveryIntent
+            UPDATE FIELDS ( DispatchState )
+            WITH VALUE #( ( DeliveryUUID  = intent-delivery_uuid
+                            DispatchState = 'PENDING' ) )
+          FAILED DATA(intent_failed)
+          REPORTED DATA(intent_reported).
+
+        IF intent_failed IS NOT INITIAL.
+          error_text = 'The UNKNOWN delivery intent could not be prepared.'.
+          EXIT.
+        ENDIF.
+
+        " Status remains ERROR until the coordinator records a positive receipt.
+        " DeliveryId and every other business/evidence field remain untouched.
+        MODIFY ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+          ENTITY PurchaseOrder
+            UPDATE FIELDS ( IntegrationStatus )
+            WITH VALUE #( ( %tky              = action_key-%tky
+                            IntegrationStatus = 'PENDING' ) )
+          FAILED DATA(update_failed)
+          REPORTED DATA(update_reported).
+        reported_orders = CORRESPONDING #( DEEP update_reported-purchaseorder ).
+        APPEND LINES OF reported_orders TO reported-purchaseorder.
+
+        IF update_failed IS NOT INITIAL.
+          error_text = 'The header recovery state could not be prepared.'.
+          EXIT.
+        ENDIF.
+      ENDDO.
+
+      IF error_text IS NOT INITIAL.
+        APPEND VALUE #( %tky = action_key-%tky
+                        %op-%action-retryDelivery = if_abap_behv=>mk-on )
+          TO failed-purchaseorder.
+        APPEND VALUE #( %tky = action_key-%tky
+          %op-%action-retryDelivery = if_abap_behv=>mk-on
           %msg = new_message_with_text(
             severity = if_abap_behv_message=>severity-error
             text = error_text ) )

@@ -691,6 +691,7 @@ describe('configuration and secrets', () => {
 
     assert.equal(config.url, 'https://example.invalid/http/pih/v1/supplier-responses')
     assert.equal(config.timeoutMs, DEFAULT_TIMEOUT_MS, 'a bounded default, never unlimited')
+    assert.equal(DEFAULT_TIMEOUT_MS, 35_000, 'the frozen CAP-to-iFlow budget')
 
     // The variable names are the only thing this repository holds.
     assert.equal(CI_URL_VAR, 'PIH_CI_SUPPLIER_RESPONSE_URL')
@@ -721,6 +722,140 @@ describe('configuration and secrets', () => {
     const detail = safeDetail('x'.repeat(500))
     assert.ok(detail.length <= 180, 'unbounded foreign text is never stored')
     assert.equal(safeDetail('   \n  '), 'the receiver returned no body')
+  })
+})
+
+describe('Phase 7.5 bounded claim and lease', () => {
+  const NOW = new Date('2026-09-22T12:00:00.000Z')
+  const OWNER_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const OWNER_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+
+  test('two overlapping flushes produce one sender and one non-sender', async () => {
+    await accept(SUP001_ORDER_A)
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const winner: ResponseTransport = {
+      async send() { await gate; return ok204 }
+    }
+
+    const first = flushSupplierResponses({
+      transport: winner, leaseOwner: OWNER_A, leaseMs: 60_000, now: () => NOW
+    })
+
+    // Let the first invocation finish its claim and enter transport.
+    for (let i = 0; i < 20; i++) {
+      const row: any = (await rowsFor(SUP001_ORDER_A))[0]
+      if (row?.state === 'IN_FLIGHT') break
+      await new Promise(resolve => setTimeout(resolve, 0))
+    }
+
+    const loserTransport = new FakeTransport(ok204)
+    const loser = await flushSupplierResponses({
+      transport: loserTransport, leaseOwner: OWNER_B, leaseMs: 60_000, now: () => NOW
+    })
+    assert.equal(loserTransport.sent.length, 0, 'the live claim prevents a duplicate send')
+    assert.equal(loser.scanned, 0)
+
+    release()
+    const won = await first
+    assert.equal(won.delivered, 1)
+    const after: any = (await rowsFor(SUP001_ORDER_A))[0]
+    assert.equal(after.state, 'DELIVERED')
+    assert.equal(after.leaseOwner, null)
+    assert.equal(after.leaseExpiresAt, null)
+  })
+
+  test('an expired IN_FLIGHT row is reclaimed under a new owner and completed', async () => {
+    await accept(SUP001_ORDER_A)
+    await UPDATE(SupplierResponseDeliveries).set({
+      state: 'IN_FLIGHT', leaseOwner: OWNER_A,
+      leaseExpiresAt: '2026-09-22T11:59:59.000Z'
+    } as any).where({ order_ID: SUP001_ORDER_A })
+
+    const transport = new FakeTransport(ok204)
+    const summary = await flushSupplierResponses({
+      transport, leaseOwner: OWNER_B, leaseMs: 60_000, now: () => NOW
+    })
+
+    assert.equal(transport.sent.length, 1)
+    assert.equal(summary.delivered, 1)
+    const after: any = (await rowsFor(SUP001_ORDER_A))[0]
+    assert.equal(after.state, 'DELIVERED')
+    assert.equal(after.attempts, 1)
+    assert.equal(after.leaseOwner, null)
+    assert.equal(after.leaseExpiresAt, null)
+  })
+
+  test('a live IN_FLIGHT row is not reclaimed', async () => {
+    await accept(SUP001_ORDER_A)
+    await UPDATE(SupplierResponseDeliveries).set({
+      state: 'IN_FLIGHT', leaseOwner: OWNER_A,
+      leaseExpiresAt: '2026-09-22T12:00:01.000Z'
+    } as any).where({ order_ID: SUP001_ORDER_A })
+
+    const transport = new FakeTransport(ok204)
+    const summary = await flushSupplierResponses({
+      transport, leaseOwner: OWNER_B, leaseMs: 60_000, now: () => NOW
+    })
+    assert.equal(transport.sent.length, 0)
+    assert.equal(summary.scanned, 0)
+    const after: any = (await rowsFor(SUP001_ORDER_A))[0]
+    assert.equal(after.state, 'IN_FLIGHT')
+    assert.equal(after.leaseOwner, OWNER_A)
+  })
+
+  test('an earlier live lease still blocks a later response for the same order', async () => {
+    await accept(SUP001_ORDER_A, { estimatedDeliveryDate: '2026-11-15' })
+    await decide(SUP001_ORDER_A, 'updateEstimatedDeliveryDate', {
+      responseId: randomUUID(), expectedResponseVersion: 1,
+      estimatedDeliveryDate: '2026-12-01'
+    })
+    const rows: any[] = await rowsFor(SUP001_ORDER_A)
+    await UPDATE(SupplierResponseDeliveries).set({
+      state: 'IN_FLIGHT', leaseOwner: OWNER_A,
+      leaseExpiresAt: '2026-09-22T12:00:01.000Z'
+    } as any).where({ ID: rows[0].ID })
+
+    const transport = new FakeTransport(ok204)
+    await flushSupplierResponses({
+      transport, leaseOwner: OWNER_B, leaseMs: 60_000, now: () => NOW
+    })
+    assert.equal(transport.sent.length, 0, 'version 2 cannot pass a live version-1 claim')
+    const after: any[] = await rowsFor(SUP001_ORDER_A)
+    assert.deepEqual(after.map(row => row.state), ['IN_FLIGHT', 'PENDING'])
+  })
+
+  test('result persistence requires the same IN_FLIGHT owner', async () => {
+    await accept(SUP001_ORDER_A)
+    const row: any = (await rowsFor(SUP001_ORDER_A))[0]
+    const stealing: ResponseTransport = {
+      async send() {
+        await UPDATE(SupplierResponseDeliveries).set({ leaseOwner: OWNER_B } as any).where({ ID: row.ID })
+        return ok204
+      }
+    }
+
+    const summary = await flushSupplierResponses({
+      transport: stealing, leaseOwner: OWNER_A, leaseMs: 60_000, now: () => NOW
+    })
+    assert.equal(summary.outcomes[0].conflicted, true)
+    const after: any = (await rowsFor(SUP001_ORDER_A))[0]
+    assert.equal(after.state, 'IN_FLIGHT')
+    assert.equal(after.leaseOwner, OWNER_B)
+    assert.equal(after.attempts, 0)
+    assert.equal((await SELECT.from(SupplierResponseDeliveryAttempts).where({ delivery_ID: row.ID })).length, 0)
+  })
+
+  test('dry-run remains write-free and never claims', async () => {
+    await accept(SUP001_ORDER_A)
+    const before: any = (await rowsFor(SUP001_ORDER_A))[0]
+    const transport = new FakeTransport(ok204)
+    await flushSupplierResponses({
+      transport, dryRun: true, leaseOwner: OWNER_A, leaseMs: 60_000, now: () => NOW
+    })
+    const after: any = (await rowsFor(SUP001_ORDER_A))[0]
+    assert.equal(transport.sent.length, 0)
+    assert.deepEqual(after, before)
   })
 })
 

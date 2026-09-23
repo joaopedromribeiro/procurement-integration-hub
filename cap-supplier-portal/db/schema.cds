@@ -266,13 +266,20 @@ entity SupplierResponseDeliveries : cuid {
     /**
      * Transport state, deliberately separate from the order's business status
      * (ADR-010). Phase 4.4 only ever wrote PENDING; Phase 6.5e's sender is what
-     * makes DELIVERED, FAILED and UNKNOWN reachable.
+     * makes IN_FLIGHT, DELIVERED, FAILED and UNKNOWN reachable. IN_FLIGHT is a
+     * bounded transport claim, never a business outcome.
      *
      * PENDING is both "never attempted" and "attempted, retryable", exactly as
      * the ABAP coordinator returns a retryable intent to PENDING rather than
      * inventing a fifth value. `attempts` is what tells the two apart.
      */
     state                 : String(10) default 'PENDING';
+
+    /** Owner of the current bounded transport claim; set only in IN_FLIGHT. */
+    leaseOwner            : UUID;
+
+    /** Expiry after which another explicit flush may reclaim the same row. */
+    leaseExpiresAt        : Timestamp;
 
     /** Attempts made, including the one that succeeded. Never reset. */
     attempts              : Integer default 0;

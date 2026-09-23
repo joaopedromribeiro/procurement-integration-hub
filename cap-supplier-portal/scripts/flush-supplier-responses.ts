@@ -71,7 +71,7 @@ Configuration, from the environment only:
   PIH_CI_SUPPLIER_RESPONSE_URL   the PIH_SupplierResponse_v1 endpoint
   PIH_CI_CLIENT_ID               Process Integration Runtime clientid
   PIH_CI_CLIENT_SECRET           Process Integration Runtime clientsecret
-  PIH_CI_TIMEOUT_MS              optional request ceiling, default 30000
+  PIH_CI_TIMEOUT_MS              optional request ceiling, default 35000
 `.trim()
 
 async function main() {

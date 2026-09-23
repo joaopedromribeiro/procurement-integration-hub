@@ -1,5 +1,15 @@
 # Learning journal
 
+## Phase 7 closure lessons
+
+A state-only compare-and-set is insufficient when a legitimate result can return to the same state. The CAP leg now claims first (`PENDING` or expired `IN_FLIGHT`), identifies the owner durably, and accepts the result only from that owner. The lease reduces unnecessary duplicate sends without claiming to eliminate a send that outlives its lease; receiver idempotency remains the residual safety net.
+
+Recovery must replay an identity, not request a second delivery. `retryDelivery` changes only the current `UNKNOWN` intent to `PENDING` plus the header integration marker, preserving `DeliveryUUID`, snapshot, hash, approval and attempt evidence. Transport stays outside RAP and the runner calls the coordinator once after commit.
+
+Timeout configuration is part of correctness: inner receiver deadlines are shorter than the 25-second iFlow transaction and the CAP caller waits 35 seconds. The SAP adapter is the intentional exception because the target exposed `I_TIMEOUT` without establishing its unit; a documented platform default is safer than a guessed constant.
+
+The deployed concurrency and stale-lease proofs exercised claim ownership and reclaim with one recorded attempt each. The outbound recovery mechanism reused its original delivery identity and snapshot but received an answered HTTP 400 `UNKNOWN_SUPPLIER`, correctly ending FAILED; no remaining UNKNOWN snapshot referenced an active CAP supplier, so UNKNOWN → DELIVERED was not manufactured. Both deployed iFlow exports and ACTIVE SAP source mirrors were synchronized, and the full unchanged CAP suite passed 231/231 tests in 44 suites outside the Codex host after that host's `uv_os_get_passwd` startup failure.
+
 This journal distinguishes design, source preparation and successful SAP execution. Phase 1, managed CRUD/composition, Status initialization, item/header totals and Supplier validation are evidenced by the learner's SAP reports. Header deletion aggregation remains limited to previously committed items.
 
 ## Phase 0 — architecture foundation
