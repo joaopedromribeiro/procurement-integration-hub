@@ -1,12 +1,33 @@
 # CAP Supplier Portal
 
+**Phase 8.2 interactive login is runtime accepted within a read-only trial scope.**
+The standalone XSUAA-bound approuter served a production-only read-only supplier
+UI and forwarded the signed-in human token only to `SupplierService`. Local CAP
+mock sign-in remains unchanged. The production bundle contains no mock credential
+flow, stores no credentials or tokens, and does not enable supplier decisions.
+The tenant has only one active supplier, `RTTEST001`, so cross-supplier runtime
+acceptance awaits a second distinct supplier. The approuter was stopped after
+acceptance because an upstream availability advisory remains unresolved.
+
 **Phase 7 CLOSED within recorded acceptance scope:** explicit flush atomically claims `PENDING` or expired `IN_FLIGHT` under a 60-second lease; `UNKNOWN` is never automatic and dry-run never claims. A deployed concurrent-drainer test had one owner, one skip and one attempt/history; an expired abandoned lease was reclaimed with one real attempt and then cleared. The read-only production reporter is `npm run operational-status:prod` and is runtime-proven. The CAP-to-iFlow timeout is 35,000 ms. The complete unchanged suite passed outside the Codex host: 231 tests in 44 suites, zero failures; typecheck and production CDS build passed. The earlier Windows `tsx` startup failure was host-only.
 
 **Phase 4 is complete.** Subphases 4.1 (foundation), 4.2 (persistence), 4.3 (integration ingestion), 4.4 (supplier service) and 4.5 (supplier UI) are locally runtime-verified, and [Phase 4.6](docs/phase-4-6-closure.md) closed the phase with a clean-install re-verification and a contract reconciliation that found no implementation defect. See the [Phase 4.1](docs/phase-4-1-cap-foundation.md), [4.2](docs/phase-4-2-domain-model.md), [4.3](docs/phase-4-3-integration-ingestion.md), [4.4](docs/phase-4-4-supplier-service.md), [4.5](docs/phase-4-5-supplier-ui.md) and [4.6](docs/phase-4-6-closure.md) guides.
 
 **The portal never talks to SAP directly, and after Phase 6 it still does not.** A supplier decision commits as a durable pending response, and an explicit sender drains it through SAP Integration Suite, which is the only mediation layer. Phase 6 is complete: acceptance, date update and rejection have all travelled CAP → Cloud Integration → SAP RAP for real.
 
-**The portal is deployed to SAP BTP Cloud Foundry and authenticated runtime access is verified.** It runs at [`0badc38dtrial-dev-cap-supplier-portal-srv.cfapps.us10-003.hana.ondemand.com`](https://0badc38dtrial-dev-cap-supplier-portal-srv.cfapps.us10-003.hana.ondemand.com) on SAP HANA through the pre-existing `pih-hdi` container, with XSUAA enforcing two named roles. Every route is authenticated: an anonymous request gets 401. See [Deployed state](#deployed-state-sap-btp-cloud-foundry). **No business order has yet been written to HANA**, so HANA runtime behaviour is still unverified.
+**The portal is deployed to SAP BTP Cloud Foundry and authenticated runtime access is verified.** It runs on SAP HANA through the pre-existing `pih-hdi` container, with XSUAA enforcing two named roles. CAP ingestion and supplier-response persistence have runtime evidence; interactive supplier read access is now verified in Phase 8.2. The new approuter was stopped after read-only acceptance because its upstream availability advisory remains unresolved. See [Deployed state](#deployed-state-sap-btp-cloud-foundry) and [Phase 8.2 acceptance](#phase-82-interactive-runtime-acceptance).
+
+## Phase 8.2 interactive runtime acceptance
+
+The existing `cap-supplier-portal-auth` XSUAA instance and generated `SupplierPortalUser` collection were retained. A named `sap.default` human user received `SupplierPortalUser` and static `supplier=RTTEST001` through `PIH_RTTEST001_SupplierAttribute` from the existing `userattributes` template, in the dedicated `PIH_RTTEST001_Attribute_Test` collection. An unintended human assignment to the generated `IntegrationClient` collection was removed before acceptance; that collection itself was not deleted or structurally changed. Final intended human authority has no `IntegrationClient`.
+
+The MTA build produced `mta_archives/cap-supplier-portal_0.1.0.mtar`; partial deployment selected only `cap-supplier-portal-router` and existing `cap-supplier-portal-auth`. XSUAA was updated and bound to the router, which reached started, 1/1, ready. CAP srv was not redeployed/restaged; the HDI deployer did not run; no service was deleted. The effective descriptor retained the `srv-api` destination with `forwardAuthToken: true` and a portable `/login/callback` URI.
+
+A fresh Chrome session completed browser → approuter → XSUAA/sap.default → CAP login. The read-only UI displayed “Authenticated with SAP BTP”, user “BTP user”, and no mock sign-in. Orders GET succeeded and returned the current `RTTEST001` census. Read-only detail navigation to `PO00000122` showed RECEIVED, EUR 1500.00, response version 0, and item 10/MAT001: 2.000 PCE at EUR 750.0000, line EUR 1500.00. The unchanged SupplierService rejects missing or unknown supplier identity before returning orders, so this is application-level evidence of usable `req.user.attr.supplier=RTTEST001`; no JWT was decoded or printed. No decision or data mutation was made. Authenticated navigation through the router to `/rest/integration/v1/Orders` returned Not Found: the browser route is not a generic CAP proxy. Earlier Phase 8.1 technical-client evidence showed 403 at SupplierService; no new machine negative test was run. An initial Edge session hit an SAP ID processing error not reproduced in Chrome; its cause was not established.
+
+The owner accepted `GHSA-vcc3-ghjq-m6fr` / `CVE-2026-45822` (`@sap/approuter@23.0.0` → `query-string@7.1.3` → `decode-uri-component@0.2.2`), a moderate pre-auth malformed-URL availability risk, only for time-bounded trial acceptance. This is **not remediation**. After evidence collection, `cf stop cap-supplier-portal-router` returned OK; follow-up showed requested state stopped and instances 0/1, but the process snapshot still said `stopping`. No later fully terminated snapshot was supplied; intended state is STOPPED.
+
+The complete unchanged suite passed 235/235 tests in 45 suites, zero failed/cancelled/skipped/todo. Typecheck, production CDS build, router build, generated production-resource checks and `git diff --check` passed. Cross-supplier runtime isolation remains unproved because `RTTEST001` is the only active deployed supplier. Production mutation actions remain unaccepted because the interactive UI was deliberately read-only. Phase 7 business/retry/UNKNOWN/lease/history/correlation/recovery behavior was unchanged. Phase 8.1 and 8.2 are closed within their acceptance scopes; 8.3–8.6 have not started, so Phase 8 is not closed.
 
 ## Run it locally
 
@@ -92,7 +113,7 @@ Persistence was then verified in HANA directly rather than inferred from the 201
 
 The container's catalog lists six tables — the five `pih.portal` entities plus CAP's framework `cds.outbox.Messages` — and **no `IntegrationService.Orders` table**, which runtime-confirms the `@cds.persistence.skip` design. **No HANA-specific runtime defect was found.**
 
-**Not verified:** the supplier decision/update path against HANA, because every write exercised was an INSERT — the accept/reject UPDATE, the `responseVersion` increment, the `@cds.on.update: $now` behaviour of `modifiedAt` and `SupplierResponseDeliveries` persistence are all untested — plus the interactive `SupplierPortalUser` identity and the `supplier` → `req.user.attr.supplier` mapping.
+**At this earlier ingestion checkpoint, not verified:** the supplier decision/update path against HANA, because every write exercised then was an INSERT. Interactive `SupplierPortalUser` identity and the `supplier` → `req.user.attr.supplier` mapping were also unverified *at that checkpoint*; Phase 8.2 later supplied application-behavior evidence for the latter. Subsequent Phase 7 fixture work exercised the decision path; this paragraph preserves the earlier checkpoint rather than claiming those capabilities remain absent.
 
 The synthetic supplier, order, item and receipt **remain in Trial `dev` on purpose** as labelled runtime-test data. `DeliveryReceipts.order` is an association rather than a composition, so deleting the order would orphan the receipt and the referential effect was not established; deleting the receipt would destroy the idempotency record and make that `deliveryId` re-ingestable. `runtime-test-key` on the XSUAA instance and the unbound `pih-xsuaa-probe` remain cleanup debt.
 
@@ -161,7 +182,7 @@ The pseudo-role was wrong twice over: CAP's generator skips it, so it produced n
 
 **Now verified in the deployed application**, not just at token level: a real token satisfies `@requires: 'IntegrationClient'` over HTTP and reaches the handler, anonymous access is refused 401, and the same token is refused 403 on the supplier surface. See [Authenticated runtime evidence](#authenticated-runtime-evidence). OI-14 item 2 is **resolved**.
 
-**Still unverified:** the `supplier` → `req.user.attr.supplier` mapping, which needs an interactive login with a role-collection assignment — a client-credentials token has no user, so it structurally cannot test this — and SAP S/4 is not yet configured to fetch or send a token.
+**Later evidence:** Phase 8.2 interactive application behavior verified a usable `supplier=RTTEST001` attribute; no JWT was decoded. The historical client-credentials probe could not test a human attribute. SAP S/4 outbound OAuth was verified later in Phase 5/6, not by that probe.
 
 ## What is here
 

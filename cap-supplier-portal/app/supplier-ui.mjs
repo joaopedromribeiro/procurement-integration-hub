@@ -11,6 +11,7 @@ import {
   listQuery,
   rejectPayload
 } from './lib/order-view.mjs'
+import * as auth from './auth.mjs'
 
 /**
  * Phase 4.5 — the supplier UI.
@@ -24,35 +25,14 @@ const SERVICE = '/rest/supplier/v1'
 
 const el = id => document.getElementById(id)
 
-/**
- * Local mock credentials, kept in `sessionStorage` so a refresh does not sign
- * the user out. This is the Phase 4.4 mocked identity, not authentication: the
- * supplier is derived server-side from the user, and nothing here chooses it.
- */
-const session = {
-  get() {
-    const raw = sessionStorage.getItem('portal-user')
-    return raw ? JSON.parse(raw) : null
-  },
-  set(username, password) {
-    sessionStorage.setItem('portal-user', JSON.stringify({ username, password }))
-  },
-  clear() {
-    sessionStorage.removeItem('portal-user')
-  }
-}
-
-function authHeader() {
-  const user = session.get()
-  if (!user) return {}
-  return { Authorization: `Basic ${btoa(`${user.username}:${user.password}`)}` }
-}
+/** Authentication is selected by the bundled auth module: local mock or XSUAA session. */
+const session = auth.session
 
 /** One place where the UI talks to the service, so one place handles failure. */
 async function call(path, options = {}) {
   const response = await fetch(`${SERVICE}${path}`, {
     ...options,
-    headers: { Accept: 'application/json', ...(options.headers ?? {}), ...authHeader() }
+    headers: { Accept: 'application/json', ...(options.headers ?? {}), ...auth.headers() }
   })
 
   const body = response.status === 204 ? null : await response.json().catch(() => null)
@@ -78,9 +58,10 @@ function show(view) {
 
 function renderSession() {
   const user = session.get()
-  el('signin').hidden = Boolean(user)
-  el('session').hidden = !user
-  if (user) el('current-user').textContent = user.username
+  el('signin').hidden = auth.mode !== 'mock' || Boolean(user)
+  el('session').hidden = auth.mode === 'mock' && !user
+  el('signout').hidden = auth.mode !== 'mock'
+  if (user) el('current-user').textContent = auth.displayName(user)
 }
 
 function renderList(orders) {
@@ -163,9 +144,9 @@ function renderDetail() {
   }
 
   const allowed = actionsFor(order)
-  el('accept-box').hidden = !allowed.canAccept
-  el('reject-box').hidden = !allowed.canReject
-  el('date-box').hidden = !allowed.canUpdateDate
+  el('accept-box').hidden = !auth.mutationsEnabled || !allowed.canAccept
+  el('reject-box').hidden = !auth.mutationsEnabled || !allowed.canReject
+  el('date-box').hidden = !auth.mutationsEnabled || !allowed.canUpdateDate
 }
 
 // ------------------------------------------------------------------- loading
@@ -202,6 +183,7 @@ async function openOrder(portalOrderId) {
  * trusting the response body to be the whole truth.
  */
 async function send(action, payload, success) {
+  if (!auth.mutationsEnabled) return say('Supplier decisions are not enabled on this portal yet.', 'error')
   try {
     const result = await call(`/Orders/${state.order.portalOrderId}/${action}`, {
       method: 'POST',
@@ -234,20 +216,18 @@ function handle(error) {
 
 // -------------------------------------------------------------------- wiring
 
-el('signin-form').addEventListener('submit', event => {
-  event.preventDefault()
-  session.set(el('username').value.trim(), el('password').value)
-  renderSession()
-  state.offset = 0
-  loadList()
-})
-
-el('signout').addEventListener('click', () => {
-  session.clear()
-  state.order = null
-  renderSession()
-  show('none')
-  say('')
+auth.bindControls({
+  onSignIn() {
+    renderSession()
+    state.offset = 0
+    loadList()
+  },
+  onSignOut() {
+    state.order = null
+    renderSession()
+    show('none')
+    say('')
+  }
 })
 
 el('back').addEventListener('click', () => {

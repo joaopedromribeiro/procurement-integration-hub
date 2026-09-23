@@ -10,6 +10,7 @@ build-parameters:
       commands:
         - npm ci
         - npx cds build --production
+        - node app/router/build.mjs
 modules:
   - name: cap-supplier-portal-srv
     type: nodejs
@@ -35,6 +36,27 @@ modules:
     requires:
       - name: cap-supplier-portal-db
 
+  - name: cap-supplier-portal-router
+    type: approuter.nodejs
+    path: app/router
+    parameters:
+      instances: 1
+      buildpack: nodejs_buildpack
+    build-parameters:
+      builder: npm-ci
+    requires:
+      - name: cap-supplier-portal-auth
+      - name: srv-api
+        group: destinations
+        properties:
+          name: srv-api
+          url: ~{srv-url}
+          forwardAuthToken: true
+    provides:
+      - name: router-api
+        properties:
+          router-uri: ${default-uri}
+
 resources:
   - name: cap-supplier-portal-auth
     type: org.cloudfoundry.managed-service
@@ -49,6 +71,8 @@ resources:
           credential-types:
             - "binding-secret"
             - "x509"
+          redirect-uris:
+            - https://~{router-api/router-uri}/login/callback
         role-collections:
           - name: 'IntegrationClient (cap-supplier-portal ${org}-${space})'
             description: 'generated'
@@ -58,6 +82,8 @@ resources:
             description: 'generated'
             role-template-references:
               - '$XSAPPNAME.SupplierPortalUser'
+    requires:
+      - name: router-api
   # Reuses the HDI container that already exists in this space instead of
   # creating a second one. `cds add mta` generates a managed
   # `com.sap.xs.hdi-container` here, which would have provisioned another

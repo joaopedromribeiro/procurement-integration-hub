@@ -14,6 +14,7 @@ service-key*.json
 # Dependencies and generated output
 node_modules/
 gen/
+cap-supplier-portal/app/router/resources/
 dist/
 coverage/
 @cds-models/
