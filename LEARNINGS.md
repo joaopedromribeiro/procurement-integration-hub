@@ -1,5 +1,9 @@
 # Learning journal
 
+## Phase 8.4 — technical boundary lesson
+
+Two senders that each require `ESBMessaging.send` are not isolated when their callers use the same Process Integration Runtime client. Phase 8.4 assigned separate custom sender roles and dedicated clients to the two flows; the old shared client then received 403 with no MPL on each hardened endpoint. This changes admission, not the Phase 7 delivery state machines. A sender-role cutover must be tested without sending a real outbox row, because an answered 403 would be persisted as a terminal refusal. The SAP technical action also illustrated why a PFCG role **name** is not an authorization-field **value**: `ZJP_PIH_INTEGRATION` remains the role name, while the active `ZJP_ROLE` check and fixed value are `INTEGRATOR`. The final SAP replay was idempotent, not a new decision. A Cloud Connector tunnel DNS failure must not be diagnosed as application logic merely because the iFlow surfaced a controlled pre-CSRF 503. The shared SAP Dialog user remains an explicit least-privilege limitation. Both tracked ZIPs have since been replaced with final deployed exports and their sender roles verified. See the [Phase 8.4 record](docs/phase-8-4-technical-boundaries.md).
+
 ## Phase 7 closure lessons
 
 A state-only compare-and-set is insufficient when a legitimate result can return to the same state. The CAP leg now claims first (`PENDING` or expired `IN_FLIGHT`), identifies the owner durably, and accepts the result only from that owner. The lease reduces unnecessary duplicate sends without claiming to eliminate a send that outlives its lease; receiver idempotency remains the residual safety net.

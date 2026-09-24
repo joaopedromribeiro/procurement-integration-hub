@@ -166,8 +166,9 @@ const MAX_RETRY_AFTER_LENGTH = 128
  *
  * HTTP Basic with a Process Integration Runtime `clientid`/`clientsecret` is
  * what was runtime-proven against this sender channel, whose HTTPS sender uses
- * User Role `ESBMessaging.send`. It is deliberately the development-phase
- * mechanism; a client-credentials token flow is a later hardening step and is
+ * User Role `ESBMessaging.send_SupplierResponse_RTCustomRole`.
+ * It is deliberately the development-phase mechanism; a client-credentials
+ * token flow is a later hardening step and is
  * not implemented here, because implementing an unproven second auth path
  * alongside a proven one would mean two ways for the first real end-to-end run
  * to fail.

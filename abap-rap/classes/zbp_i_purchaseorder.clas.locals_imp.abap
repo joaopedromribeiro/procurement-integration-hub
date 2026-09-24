@@ -1498,14 +1498,14 @@ METHOD get_instance_authorizations.
 
 
   " ------------------------------------------------------------
-  " INTEGRATION
+  " INTEGRATOR
   " ------------------------------------------------------------
   IF requested_authorizations-%action-applySupplierResponse =
        if_abap_behv=>mk-on.
 
     AUTHORITY-CHECK OBJECT 'ZJP_PIH'
       ID 'ZJP_ROLE'
-      FIELD 'INTEGRATION'.
+      FIELD 'INTEGRATOR'.
 
     IF sy-subrc = 0.
       integration_authorized = abap_true.
@@ -1726,7 +1726,7 @@ METHOD get_instance_authorizations.
 
 
     " ----------------------------------------------------------
-    " applySupplierResponse -> INTEGRATION
+    " applySupplierResponse -> INTEGRATOR
     " ----------------------------------------------------------
     IF requested_authorizations-%action-applySupplierResponse =
          if_abap_behv=>mk-on.
