@@ -6,42 +6,65 @@ define behavior for ZJP_I_PurchaseOrder alias PurchaseOrder
 persistent table zjp_po_h
 draft table zjp_po_hd
 lock master total etag LastChangedAt
-authorization master ( instance )
+authorization master ( global, instance )
 etag master LocalLastChangedAt
+
 {
   create;
+
   update ( precheck );
+
   delete ( precheck );
 
-  association _Items { create ( precheck ); with draft; }
+  association _Items
+  {
+    create ( precheck );
+    with draft;
+  }
 
-  action ( authorization : update ) removeItem parameter ZJP_A_RemoveItem;
-  action ( authorization : update ) submit;
-  action ( authorization : update ) approve;
-  action ( authorization : update ) sendToSupplier;
+
+  action ( authorization : instance ) removeItem
+    parameter ZJP_A_RemoveItem;
+
+
+  action ( authorization : instance ) submit;
+
+
+  action ( authorization : instance ) approve;
+
+
+  action ( authorization : instance ) sendToSupplier;
+
+
   // Phase 7.6. EML-only operator recovery of the CURRENT UNKNOWN intent.
   // It is intentionally absent from every projection and performs no HTTP.
-  action ( authorization : update ) retryDelivery;
+
+  action ( authorization : instance ) retryDelivery;
+
 
   // Phase 5.2g. The coordinator's outcome boundary. It is a NORMAL action and
-  // deliberately not an ````internal action````: the coordinator is an EXTERNAL EML
-  // consumer running outside every handler, and ````internal```` would put it out of
+  // deliberately not an internal action: the coordinator is an EXTERNAL EML
+  // consumer running outside every handler, and internal would put it out of
   // reach. "Restricted" here means NOT PROJECTED - it is absent from
   // ZJP_C_PurchaseOrder, so no OData client can reach it, which is what
   // API_CONTRACTS means by "prefer EML-only access for coordinator bookkeeping;
   // do not expose an administrative HTTP operation just because a class uses it
   // internally". It exists because Status, IntegrationStatus, LastErrorCode,
-  // LastErrorMessage, LastErrorAt and LastCorrelationId are all ````field
-  // ( readonly )```` below, so only a handler in local mode may write them.
-  action ( authorization : update ) recordDeliveryResult parameter ZJP_A_RecordDeliveryResult;
+  // LastErrorMessage, LastErrorAt and LastCorrelationId are all field
+  // ( readonly ) below, so only a handler in local mode may write them.
+
+  action ( authorization : instance ) recordDeliveryResult
+    parameter ZJP_A_RecordDeliveryResult;
+
+
   // Phase 6.5b-1. The inbound boundary, and the mirror image of
   // recordDeliveryResult: SupplierResponse, EstimatedDeliveryDate,
   // SupplierRespondedAt, RejectionOrigin, RejectionReason, LastResponseId and
-  // LastResponseVersion are all ````field ( readonly )````, so only a handler in
+  // LastResponseVersion are all field ( readonly ), so only a handler in
   // LOCAL MODE can write them and an external caller needs a door with a lock
   // rather than an opening in the wall.
   //
-  // A NORMAL action, not ````internal````, for the same reason recordDeliveryResult
+  // A NORMAL action, not internal, for the same reason recordDeliveryResult
   // is: the caller is Cloud Integration through an OData binding, which is an
   // external consumer. It is deliberately NOT projected onto
   // ZJP_C_PurchaseOrder - the buyer UI must not answer on a supplier behalf,
@@ -51,15 +74,27 @@ etag master LocalLastChangedAt
   // higher ResponseVersion, which the version rules already order correctly; a
   // second action would need the same guards, the same idempotency receipt and
   // the same conflict rules, and would add a way for the two to disagree.
-  action ( authorization : update ) applySupplierResponse parameter ZJP_A_ApplySupplierResponse;
 
-  action ( authorization : update ) reject parameter ZJP_A_Reject;
-  action ( authorization : update ) cancel;
+  action ( authorization : instance ) applySupplierResponse
+    parameter ZJP_A_ApplySupplierResponse;
+
+
+  action ( authorization : instance ) reject
+    parameter ZJP_A_Reject;
+
+
+  action ( authorization : instance ) cancel;
+
 
   draft action Edit;
+
   draft action Activate;
+
   draft action Discard;
+
   draft action Resume;
+
+
   draft determine action Prepare
   {
     validation validateSupplier;
@@ -67,18 +102,47 @@ etag master LocalLastChangedAt
     validation PurchaseOrderItem~validateNetPrice;
   }
 
-  determination initializeStatus on modify { create; }
-  validation validateSupplier on save { create; field Supplier; }
+
+  determination initializeStatus on modify
+  {
+    create;
+  }
+
+
+  validation validateSupplier on save
+  {
+    create;
+    field Supplier;
+  }
+
 
   field ( readonly, numbering : managed ) PurchaseOrderUUID;
-  field ( readonly ) PurchaseOrderNumber, SupplierName, TotalAmount, Status,
-                     SupplierResponse, EstimatedDeliveryDate,
-                     CreatedBy, CreatedAt, LastChangedBy, LastChangedAt,
-                     LocalLastChangedAt, OrderRevision, IntegrationStatus,
-                     DeliveryId, LastErrorCode, LastErrorMessage, LastErrorAt,
-                     LastCorrelationId, LastResponseId, LastResponseVersion,
-                     SupplierRespondedAt,
-                     RejectionOrigin, RejectionReason;
+
+  field ( readonly )
+    PurchaseOrderNumber,
+    SupplierName,
+    TotalAmount,
+    Status,
+    SupplierResponse,
+    EstimatedDeliveryDate,
+    CreatedBy,
+    CreatedAt,
+    LastChangedBy,
+    LastChangedAt,
+    LocalLastChangedAt,
+    OrderRevision,
+    IntegrationStatus,
+    DeliveryId,
+    LastErrorCode,
+    LastErrorMessage,
+    LastErrorAt,
+    LastCorrelationId,
+    LastResponseId,
+    LastResponseVersion,
+    SupplierRespondedAt,
+    RejectionOrigin,
+    RejectionReason;
+
 
   mapping for zjp_po_h
   {
@@ -87,8 +151,8 @@ etag master LocalLastChangedAt
     Supplier                = supplier;
     SupplierName            = supplier_name;
     CompanyCode             = company_code;
-    PurchasingOrganization = purchasing_organization;
-    PurchasingGroup        = purchasing_group;
+    PurchasingOrganization  = purchasing_organization;
+    PurchasingGroup         = purchasing_group;
     Currency                = currency;
     TotalAmount             = total_amount;
     Status                  = status;
@@ -114,24 +178,53 @@ etag master LocalLastChangedAt
   }
 }
 
+
 define behavior for ZJP_I_PurchaseOrderItem alias PurchaseOrderItem
 persistent table zjp_po_i
 draft table zjp_po_id
 lock dependent by _PurchaseOrder
 authorization dependent by _PurchaseOrder
 etag master LocalLastChangedAt
+
 {
   update ( precheck );
+
   internal delete;
 
-  association _PurchaseOrder { with draft; }
+  association _PurchaseOrder
+  {
+    with draft;
+  }
 
-  determination calculateTotalAmount on modify { create; field Quantity, NetPrice; }
-  validation validateQuantity on save { create; field Quantity; }
-  validation validateNetPrice on save { create; field NetPrice; }
+
+  determination calculateTotalAmount on modify
+  {
+    create;
+    field Quantity, NetPrice;
+  }
+
+
+  validation validateQuantity on save
+  {
+    create;
+    field Quantity;
+  }
+
+
+  validation validateNetPrice on save
+  {
+    create;
+    field NetPrice;
+  }
+
 
   field ( readonly, numbering : managed ) PurchaseOrderItemUUID;
-  field ( readonly ) PurchaseOrderUUID, TotalAmount, LocalLastChangedAt;
+
+  field ( readonly )
+    PurchaseOrderUUID,
+    TotalAmount,
+    LocalLastChangedAt;
+
 
   mapping for zjp_po_i
   {

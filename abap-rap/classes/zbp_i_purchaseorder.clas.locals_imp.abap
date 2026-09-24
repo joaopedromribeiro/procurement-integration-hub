@@ -52,6 +52,8 @@ CLASS lhc_PurchaseOrder DEFINITION
     METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
       IMPORTING keys REQUEST requested_authorizations FOR PurchaseOrder
       RESULT result.
+    METHODS get_global_authorizations FOR GLOBAL AUTHORIZATION
+      IMPORTING REQUEST requested_authorizations FOR purchaseorder RESULT result.
 ENDCLASS.
 
 CLASS lhc_PurchaseOrderItem DEFINITION
@@ -1447,36 +1449,338 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
     APPEND LINES OF reported_orders TO reported-purchaseorder.
   ENDMETHOD.
 
-  METHOD get_instance_authorizations.
-    READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
-      ENTITY PurchaseOrder
-      FIELDS ( PurchaseOrderUUID ) WITH CORRESPONDING #( keys )
+METHOD get_instance_authorizations.
+
+  DATA buyer_authorized       TYPE abap_bool.
+  DATA approver_authorized    TYPE abap_bool.
+  DATA integration_authorized TYPE abap_bool.
+  DATA operator_authorized    TYPE abap_bool.
+  DATA worker_authorized      TYPE abap_bool.
+
+
+  " ------------------------------------------------------------
+  " BUYER
+  " ------------------------------------------------------------
+  IF requested_authorizations-%update = if_abap_behv=>mk-on
+     OR requested_authorizations-%delete = if_abap_behv=>mk-on
+     OR requested_authorizations-%action-Edit = if_abap_behv=>mk-on
+     OR requested_authorizations-%action-removeItem = if_abap_behv=>mk-on
+     OR requested_authorizations-%action-submit = if_abap_behv=>mk-on
+     OR requested_authorizations-%action-sendToSupplier = if_abap_behv=>mk-on
+     OR requested_authorizations-%action-cancel = if_abap_behv=>mk-on.
+
+    AUTHORITY-CHECK OBJECT 'ZJP_PIH'
+      ID 'ZJP_ROLE'
+      FIELD 'BUYER'.
+
+    IF sy-subrc = 0.
+      buyer_authorized = abap_true.
+    ENDIF.
+
+  ENDIF.
+
+
+  " ------------------------------------------------------------
+  " APPROVER
+  " ------------------------------------------------------------
+  IF requested_authorizations-%action-approve = if_abap_behv=>mk-on
+     OR requested_authorizations-%action-reject = if_abap_behv=>mk-on.
+
+    AUTHORITY-CHECK OBJECT 'ZJP_PIH'
+      ID 'ZJP_ROLE'
+      FIELD 'APPROVER'.
+
+    IF sy-subrc = 0.
+      approver_authorized = abap_true.
+    ENDIF.
+
+  ENDIF.
+
+
+  " ------------------------------------------------------------
+  " INTEGRATION
+  " ------------------------------------------------------------
+  IF requested_authorizations-%action-applySupplierResponse =
+       if_abap_behv=>mk-on.
+
+    AUTHORITY-CHECK OBJECT 'ZJP_PIH'
+      ID 'ZJP_ROLE'
+      FIELD 'INTEGRATION'.
+
+    IF sy-subrc = 0.
+      integration_authorized = abap_true.
+    ENDIF.
+
+  ENDIF.
+
+
+  " ------------------------------------------------------------
+  " OPERATOR
+  " ------------------------------------------------------------
+  IF requested_authorizations-%action-retryDelivery =
+       if_abap_behv=>mk-on.
+
+    AUTHORITY-CHECK OBJECT 'ZJP_PIH'
+      ID 'ZJP_ROLE'
+      FIELD 'OPERATOR'.
+
+    IF sy-subrc = 0.
+      operator_authorized = abap_true.
+    ENDIF.
+
+  ENDIF.
+
+
+  " ------------------------------------------------------------
+  " WORKER
+  " ------------------------------------------------------------
+  IF requested_authorizations-%action-recordDeliveryResult =
+       if_abap_behv=>mk-on.
+
+    AUTHORITY-CHECK OBJECT 'ZJP_PIH'
+      ID 'ZJP_ROLE'
+      FIELD 'WORKER'.
+
+    IF sy-subrc = 0.
+      worker_authorized = abap_true.
+    ENDIF.
+
+  ENDIF.
+
+
+  " ------------------------------------------------------------
+  " Resolve requested instances
+  " ------------------------------------------------------------
+  READ ENTITIES OF ZJP_I_PurchaseOrder IN LOCAL MODE
+    ENTITY PurchaseOrder
+      FIELDS ( PurchaseOrderUUID )
+      WITH CORRESPONDING #( keys )
       RESULT DATA(purchase_orders)
       FAILED failed
       REPORTED reported.
 
-    SORT purchase_orders BY %tky.
-    DELETE ADJACENT DUPLICATES FROM purchase_orders COMPARING %tky.
+  SORT purchase_orders BY %tky.
 
-    DATA authorization_result LIKE LINE OF result.
+  DELETE ADJACENT DUPLICATES FROM purchase_orders
+    COMPARING %tky.
 
-    LOOP AT purchase_orders INTO DATA(purchase_order).
-      CLEAR authorization_result.
-      authorization_result-%tky = purchase_order-%tky.
+  DATA authorization_result LIKE LINE OF result.
 
-      " Study-only permissive policy; replace with actual business authorization.
-      IF requested_authorizations-%update = if_abap_behv=>mk-on.
-        authorization_result-%update = if_abap_behv=>auth-allowed.
+
+  LOOP AT purchase_orders INTO DATA(purchase_order).
+
+    CLEAR authorization_result.
+
+    authorization_result-%tky = purchase_order-%tky.
+
+
+    " ----------------------------------------------------------
+    " UPDATE -> BUYER
+    " ----------------------------------------------------------
+    IF requested_authorizations-%update = if_abap_behv=>mk-on.
+
+      IF buyer_authorized = abap_true.
+        authorization_result-%update =
+          if_abap_behv=>auth-allowed.
+      ELSE.
+        authorization_result-%update =
+          if_abap_behv=>auth-unauthorized.
       ENDIF.
 
-      IF requested_authorizations-%delete = if_abap_behv=>mk-on.
-        authorization_result-%delete = if_abap_behv=>auth-allowed.
+    ENDIF.
+
+
+    " ----------------------------------------------------------
+    " DELETE -> BUYER
+    " ----------------------------------------------------------
+    IF requested_authorizations-%delete = if_abap_behv=>mk-on.
+
+      IF buyer_authorized = abap_true.
+        authorization_result-%delete =
+          if_abap_behv=>auth-allowed.
+      ELSE.
+        authorization_result-%delete =
+          if_abap_behv=>auth-unauthorized.
       ENDIF.
 
-      APPEND authorization_result TO result.
-    ENDLOOP.
-  ENDMETHOD.
+    ENDIF.
 
+
+    " ----------------------------------------------------------
+    " EDIT -> BUYER
+    " ----------------------------------------------------------
+    IF requested_authorizations-%action-Edit =
+         if_abap_behv=>mk-on.
+
+      IF buyer_authorized = abap_true.
+        authorization_result-%action-Edit =
+          if_abap_behv=>auth-allowed.
+      ELSE.
+        authorization_result-%action-Edit =
+          if_abap_behv=>auth-unauthorized.
+      ENDIF.
+
+    ENDIF.
+
+
+    " ----------------------------------------------------------
+    " removeItem -> BUYER
+    " ----------------------------------------------------------
+    IF requested_authorizations-%action-removeItem =
+         if_abap_behv=>mk-on.
+
+      IF buyer_authorized = abap_true.
+        authorization_result-%action-removeItem =
+          if_abap_behv=>auth-allowed.
+      ELSE.
+        authorization_result-%action-removeItem =
+          if_abap_behv=>auth-unauthorized.
+      ENDIF.
+
+    ENDIF.
+
+
+    " ----------------------------------------------------------
+    " submit -> BUYER
+    " ----------------------------------------------------------
+    IF requested_authorizations-%action-submit =
+         if_abap_behv=>mk-on.
+
+      IF buyer_authorized = abap_true.
+        authorization_result-%action-submit =
+          if_abap_behv=>auth-allowed.
+      ELSE.
+        authorization_result-%action-submit =
+          if_abap_behv=>auth-unauthorized.
+      ENDIF.
+
+    ENDIF.
+
+
+    " ----------------------------------------------------------
+    " sendToSupplier -> BUYER
+    " ----------------------------------------------------------
+    IF requested_authorizations-%action-sendToSupplier =
+         if_abap_behv=>mk-on.
+
+      IF buyer_authorized = abap_true.
+        authorization_result-%action-sendToSupplier =
+          if_abap_behv=>auth-allowed.
+      ELSE.
+        authorization_result-%action-sendToSupplier =
+          if_abap_behv=>auth-unauthorized.
+      ENDIF.
+
+    ENDIF.
+
+
+    " ----------------------------------------------------------
+    " cancel -> BUYER
+    " ----------------------------------------------------------
+    IF requested_authorizations-%action-cancel =
+         if_abap_behv=>mk-on.
+
+      IF buyer_authorized = abap_true.
+        authorization_result-%action-cancel =
+          if_abap_behv=>auth-allowed.
+      ELSE.
+        authorization_result-%action-cancel =
+          if_abap_behv=>auth-unauthorized.
+      ENDIF.
+
+    ENDIF.
+
+
+    " ----------------------------------------------------------
+    " approve -> APPROVER
+    " ----------------------------------------------------------
+    IF requested_authorizations-%action-approve =
+         if_abap_behv=>mk-on.
+
+      IF approver_authorized = abap_true.
+        authorization_result-%action-approve =
+          if_abap_behv=>auth-allowed.
+      ELSE.
+        authorization_result-%action-approve =
+          if_abap_behv=>auth-unauthorized.
+      ENDIF.
+
+    ENDIF.
+
+
+    " ----------------------------------------------------------
+    " reject -> APPROVER
+    " ----------------------------------------------------------
+    IF requested_authorizations-%action-reject =
+         if_abap_behv=>mk-on.
+
+      IF approver_authorized = abap_true.
+        authorization_result-%action-reject =
+          if_abap_behv=>auth-allowed.
+      ELSE.
+        authorization_result-%action-reject =
+          if_abap_behv=>auth-unauthorized.
+      ENDIF.
+
+    ENDIF.
+
+
+    " ----------------------------------------------------------
+    " applySupplierResponse -> INTEGRATION
+    " ----------------------------------------------------------
+    IF requested_authorizations-%action-applySupplierResponse =
+         if_abap_behv=>mk-on.
+
+      IF integration_authorized = abap_true.
+        authorization_result-%action-applySupplierResponse =
+          if_abap_behv=>auth-allowed.
+      ELSE.
+        authorization_result-%action-applySupplierResponse =
+          if_abap_behv=>auth-unauthorized.
+      ENDIF.
+
+    ENDIF.
+
+
+    " ----------------------------------------------------------
+    " retryDelivery -> OPERATOR
+    " ----------------------------------------------------------
+    IF requested_authorizations-%action-retryDelivery =
+         if_abap_behv=>mk-on.
+
+      IF operator_authorized = abap_true.
+        authorization_result-%action-retryDelivery =
+          if_abap_behv=>auth-allowed.
+      ELSE.
+        authorization_result-%action-retryDelivery =
+          if_abap_behv=>auth-unauthorized.
+      ENDIF.
+
+    ENDIF.
+
+
+    " ----------------------------------------------------------
+    " recordDeliveryResult -> WORKER
+    " ----------------------------------------------------------
+    IF requested_authorizations-%action-recordDeliveryResult =
+         if_abap_behv=>mk-on.
+
+      IF worker_authorized = abap_true.
+        authorization_result-%action-recordDeliveryResult =
+          if_abap_behv=>auth-allowed.
+      ELSE.
+        authorization_result-%action-recordDeliveryResult =
+          if_abap_behv=>auth-unauthorized.
+      ENDIF.
+
+    ENDIF.
+
+
+    APPEND authorization_result TO result.
+
+  ENDLOOP.
+
+ENDMETHOD.
 
   METHOD applySupplierResponse.
     " Phase 6.5b-1 - the RAP inbound boundary for the supplier's answer.
@@ -1767,5 +2071,23 @@ CLASS lhc_PurchaseOrder IMPLEMENTATION.
       ENDIF.
     ENDLOOP.
   ENDMETHOD.
+
+METHOD get_global_authorizations.
+
+  IF requested_authorizations-%create = if_abap_behv=>mk-on.
+
+    AUTHORITY-CHECK OBJECT 'ZJP_PIH'
+      ID 'ZJP_ROLE'
+      FIELD 'BUYER'.
+
+    IF sy-subrc = 0.
+      result-%create = if_abap_behv=>auth-allowed.
+    ELSE.
+      result-%create = if_abap_behv=>auth-unauthorized.
+    ENDIF.
+
+  ENDIF.
+
+ENDMETHOD.
 
 ENDCLASS.
