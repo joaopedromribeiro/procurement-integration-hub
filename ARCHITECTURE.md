@@ -177,6 +177,8 @@ The coordinator owns outbound retries and CAP owns return retries. Avoid layered
 
 An ABAP communication arrangement is not automatically a BTP Destination. A destination locates a remote service and its authentication configuration; it does not create network reachability. CI uses its supported security-material and adapter settings. User tokens are not blindly forwarded across different audiences. Secrets remain outside Git.
 
+Phase 8's final evidence supersedes the older, point-in-time open questions embedded in ADR-033/ADR-036 and OI-14: deployed CAP/HANA `SupplierService` accept, date-update, and reject mutations and CAP → Cloud Integration → SAP delivery were proven in Phase 6/7; Phase 8.2 separately proved read-only human/XSUAA access. Phase 8.6 then proved deployed cross-supplier isolation: a `RTTEST001` human directly read an order verified as owned by `RTSEC002`, received scoped HTTP 404 with no foreign fields, and left the order unchanged. **Human browser mutation remains untested** within the accepted read-only trial scope; see the [final acceptance matrix](docs/phase-8-6-end-to-end-security-acceptance.md). Phase 8 is CLOSED; Phase 9 has not started.
+
 ## Event-driven extension, phase 9
 
 ```mermaid

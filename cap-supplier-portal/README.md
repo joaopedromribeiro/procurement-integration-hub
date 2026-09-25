@@ -5,9 +5,11 @@ The standalone XSUAA-bound approuter served a production-only read-only supplier
 UI and forwarded the signed-in human token only to `SupplierService`. Local CAP
 mock sign-in remains unchanged. The production bundle contains no mock credential
 flow, stores no credentials or tokens, and does not enable supplier decisions.
-The tenant has only one active supplier, `RTTEST001`, so cross-supplier runtime
-acceptance awaits a second distinct supplier. The approuter was stopped after
-acceptance because an upstream availability advisory remains unresolved.
+At the Phase 8.2 checkpoint the tenant had only active `RTTEST001`; Phase 8.6
+later added a labelled `RTSEC002` fixture and verified deployed cross-supplier
+scoped 404. The approuter was stopped after the Phase 8.2 acceptance because
+an upstream availability advisory remains unresolved; a final stopped-state
+confirmation after its temporary Phase 8.6 restart was not supplied.
 
 **Phase 7 CLOSED within recorded acceptance scope:** explicit flush atomically claims `PENDING` or expired `IN_FLIGHT` under a 60-second lease; `UNKNOWN` is never automatic and dry-run never claims. A deployed concurrent-drainer test had one owner, one skip and one attempt/history; an expired abandoned lease was reclaimed with one real attempt and then cleared. The read-only production reporter is `npm run operational-status:prod` and is runtime-proven. The CAP-to-iFlow timeout is 35,000 ms. The complete unchanged suite passed outside the Codex host: 231 tests in 44 suites, zero failures; typecheck and production CDS build passed. The earlier Windows `tsx` startup failure was host-only.
 
@@ -27,7 +29,7 @@ A fresh Chrome session completed browser → approuter → XSUAA/sap.default →
 
 The owner accepted `GHSA-vcc3-ghjq-m6fr` / `CVE-2026-45822` (`@sap/approuter@23.0.0` → `query-string@7.1.3` → `decode-uri-component@0.2.2`), a moderate pre-auth malformed-URL availability risk, only for time-bounded trial acceptance. This is **not remediation**. After evidence collection, `cf stop cap-supplier-portal-router` returned OK; follow-up showed requested state stopped and instances 0/1, but the process snapshot still said `stopping`. No later fully terminated snapshot was supplied; intended state is STOPPED.
 
-The complete unchanged suite passed 235/235 tests in 45 suites, zero failed/cancelled/skipped/todo. Typecheck, production CDS build, router build, generated production-resource checks and `git diff --check` passed. Cross-supplier runtime isolation remains unproved because `RTTEST001` is the only active deployed supplier. Production mutation actions remain unaccepted because the interactive UI was deliberately read-only. Phase 7 business/retry/UNKNOWN/lease/history/correlation/recovery behavior was unchanged. Phase 8.1 and 8.2 are closed within their acceptance scopes; 8.3–8.6 have not started, so Phase 8 is not closed.
+The complete unchanged suite passed 235/235 tests in 45 suites, zero failed/cancelled/skipped/todo. Typecheck, production CDS build, router build, generated production-resource checks and `git diff --check` passed. Phase 8.2's **human/XSUAA browser** acceptance was deliberately read-only; it did not exercise a supplier mutation. Separately, Phase 6/7 runtime evidence proves deployed `SupplierService.accept`, `reject`, and `updateEstimatedDeliveryDate` mutations and response delivery to SAP. Phase 8.6 then proved cross-supplier deployed isolation: the `RTTEST001` human's direct read of the verified `RTSEC002` portal order returned scoped 404 with no foreign data, and the order remained unchanged. Phase 7 business/retry/UNKNOWN/lease/history/correlation/recovery behavior was unchanged. **Phase 8.1–8.6 and Phase 8 are CLOSED** within their documented scopes. See the [final 8.6 matrix and evidence](../docs/phase-8-6-end-to-end-security-acceptance.md).
 
 ## Run it locally
 

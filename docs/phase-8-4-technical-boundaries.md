@@ -1,6 +1,6 @@
 # Phase 8.4 — technical-client and iFlow boundaries
 
-Status: **CLOSED on owner-supplied runtime evidence and verified final deployed iFlow export synchronization.** Phase 8 remains open at 8.5 and 8.6. This record does not claim that the shared SAP Dialog identity is least privilege.
+Status: **CLOSED on owner-supplied runtime evidence and verified final deployed iFlow export synchronization.** Phase 8.5 and 8.6 subsequently closed, completing Phase 8. This record does not claim that the shared SAP Dialog identity is least privilege.
 
 | Boundary | Final runtime configuration | Evidence and limit |
 | --- | --- | --- |
@@ -19,5 +19,5 @@ The owner then replayed the **already-applied current** `ACCEPTED` response `111
 
 - Both HTTPS senders remain CSRF-disabled as observed. No new CSRF posture is inferred. A2's XSUAA client and SAP's PIH-specific action authorization are separate from human SupplierPortalUser, Buyer, Approver, Operator and Worker identities.
 - The owner replaced `integration-suite/iflows/PIH_OrderDelivery_v1.zip` and `PIH_SupplierResponse_v1.zip` with **final deployed exports**. Both archives open and their XML parses. The OrderDelivery HTTPS sender has `userRole=ESBMessaging.send_OrderDelivery_RTCustomRole`; the SupplierResponse sender has `userRole=ESBMessaging.send_SupplierResponse_RTCustomRole`; both have sender CSRF disabled. The SupplierResponse CSRF GET is On-Premise through virtual host `pih-s4h2023:44323`, with empty Location ID, Basic alias `PIH_SAP_BASIC`, method GET and timeout **10,000 ms**. The temporary 60,000 ms diagnostic timeout is absent. Deployed-export equivalence for Phase 8.4 is verified; no ZIP member was hand-edited.
-- The old shared Process Integration Runtime instance/key may remain for rollback; deletion is unverified. Its credential was exposed during interactive testing, so rotation/retirement is a security follow-up after consumer inventory and rollback readiness, without recording any secret. The unused old session-cookie script in the SupplierResponse export remains an earlier documented cleanup item.
-- Phase 7 DeliveryIntent uniqueness, snapshot/hash, retry, lease, UNKNOWN, history, correlation, supplier-response idempotency and HTTP outcome semantics were not changed. Phase 8.5 and 8.6 have not started; Event Mesh remains Phase 9.
+- At Phase 8.4 closure the old shared Process Integration Runtime key still required retirement. Phase 8.5 subsequently removed that key, **not** the `pih-integration-runtime` instance; see the [8.5 closure record](phase-8-5-operator-secrets-audit.md). The unused old session-cookie script in the SupplierResponse export remains an earlier documented cleanup item.
+- Phase 7 DeliveryIntent uniqueness, snapshot/hash, retry, lease, UNKNOWN, history, correlation, supplier-response idempotency and HTTP outcome semantics were not changed. Phase 8.5 and 8.6 subsequently closed; Event Mesh remains Phase 9 and has not started.
