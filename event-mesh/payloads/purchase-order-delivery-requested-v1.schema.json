@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pih.example.invalid/events/purchase-order-delivery-requested-v1.schema.json",
+  "title": "PurchaseOrderDeliveryRequested.v1 logical event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["specversion", "id", "source", "type", "time", "subject", "data"],
+  "properties": {
+    "specversion": { "const": "1.0" },
+    "id": { "$ref": "#/$defs/uuid" },
+    "source": { "type": "string", "minLength": 1 },
+    "type": { "const": "com.pih.purchaseorder.deliveryrequested.v1" },
+    "time": { "type": "string", "format": "date-time" },
+    "subject": { "$ref": "#/$defs/uuid" },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["purchaseOrderId", "orderRevision", "deliveryId", "payloadHash"],
+      "properties": {
+        "purchaseOrderId": { "$ref": "#/$defs/uuid" },
+        "orderRevision": { "type": "integer", "minimum": 1 },
+        "deliveryId": { "$ref": "#/$defs/uuid" },
+        "payloadHash": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" }
+      }
+    }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" }
+  }
+}

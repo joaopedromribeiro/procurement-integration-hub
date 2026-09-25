@@ -1,4 +1,4 @@
-managed implementation in class ZBP_I_DELIVERYINTENT unique;
+managed with additional save implementation in class ZBP_I_DELIVERYINTENT unique;
 strict ( 2 );
 
 
@@ -11,6 +11,9 @@ etag master LocalLastChangedAt
   create;
   update;
   delete;
+
+  event PurchaseOrderDeliveryRequested
+    parameter ZJP_A_PODeliveryRequested;
 
 
   field ( readonly, numbering : managed ) DeliveryUUID;

@@ -1,0 +1,7 @@
+@EndUserText.label: 'PO delivery requested event parameter'
+define abstract entity ZJP_A_PODeliveryRequested
+{
+  PurchaseOrderUUID : sysuuid_x16;
+  OrderRevision     : abap.int4;
+  PayloadHash       : abap.char(64);
+}

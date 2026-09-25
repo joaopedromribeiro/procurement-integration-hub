@@ -1,3 +1,13 @@
+CLASS ltc_delivery_event DEFINITION DEFERRED FOR TESTING.
+
+CLASS lsc_DeliveryIntent DEFINITION
+  INHERITING FROM cl_abap_behavior_saver
+  FRIENDS ltc_delivery_event.
+
+  PROTECTED SECTION.
+    METHODS save_modified REDEFINITION.
+ENDCLASS.
+
 CLASS lhc_DeliveryIntent DEFINITION
   INHERITING FROM cl_abap_behavior_handler.
 
@@ -5,6 +15,26 @@ CLASS lhc_DeliveryIntent DEFINITION
     METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
       IMPORTING keys REQUEST requested_authorizations FOR DeliveryIntent
       RESULT result.
+ENDCLASS.
+
+CLASS lsc_DeliveryIntent IMPLEMENTATION.
+  METHOD save_modified.
+    IF create-deliveryintent IS NOT INITIAL.
+      RAISE ENTITY EVENT
+        ZJP_I_DeliveryIntent~PurchaseOrderDeliveryRequested
+        FROM VALUE #(
+          FOR delivery_intent IN create-deliveryintent
+          (
+            DeliveryUUID = delivery_intent-DeliveryUUID
+            %param = VALUE #(
+              PurchaseOrderUUID = delivery_intent-PurchaseOrderUUID
+              OrderRevision     = delivery_intent-OrderRevision
+              PayloadHash       = delivery_intent-PayloadHash
+            )
+          )
+        ).
+    ENDIF.
+  ENDMETHOD.
 ENDCLASS.
 
 CLASS lhc_DeliveryIntent IMPLEMENTATION.

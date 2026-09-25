@@ -1,0 +1,14 @@
+{
+  "specversion": "1.0",
+  "id": "77777777-7777-4777-8777-777777777777",
+  "source": "urn:pih:test:sap:a4h:client-000",
+  "type": "com.pih.purchaseorder.deliveryrequested.v1",
+  "time": "2026-09-25T00:02:00.000Z",
+  "subject": "22222222-2222-4222-8222-222222222222",
+  "data": {
+    "purchaseOrderId": "22222222-2222-4222-8222-222222222222",
+    "orderRevision": 1,
+    "deliveryId": "33333333-3333-4333-8333-333333333333",
+    "payloadHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+}
