@@ -1,6 +1,6 @@
 # Phase 9.2 — Local event contract and consumer-decision proof
 
-Status: **CLOSED for local contract/semantics only**. Phase 9.3 subsequently activated and locally verified the SAP RAP producer; see [its evidence record](phase-9-3-rap-producer.md). No PIH Event Binding, Event Mesh broker, Cloud Integration consumer, callback, queue acknowledgement, or external event delivery is implemented or verified.
+Status: **CLOSED for local contract/semantics only**. Phase 9.3 subsequently activated and locally verified the SAP RAP producer; see [its evidence record](phase-9-3-rap-producer.md). [Phase 9.4](phase-9-4-event-binding.md) activated a PIH-owned Event Binding, but no Event Mesh broker, Cloud Integration consumer, callback, queue acknowledgement, or external event delivery is implemented or verified.
 
 ## Frozen first logical event
 

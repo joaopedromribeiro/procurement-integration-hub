@@ -1,6 +1,6 @@
 # Phase 9.1 — Event Mesh offering discovery and event architecture
 
-Status: **CLOSED WITH ENVIRONMENT LIMITATION** on owner-supplied, read-only checks in the current Trial account. This is the 9.1 architecture record. Phase 9.3 later activated and locally verified the RAP producer, but no PIH broker, Event Binding, or deployed external event flow exists. Phase 6–8 HTTP integrations remain the runtime-proven reference and rollback path.
+Status: **CLOSED WITH ENVIRONMENT LIMITATION** on owner-supplied, read-only checks in the currently inspected BTP environment. This is the 9.1 architecture record. Phase 9.3 later activated and locally verified the RAP producer; [Phase 9.4](phase-9-4-event-binding.md) activated a PIH-owned Event Binding. No PIH broker or deployed external event flow exists. Phase 6–8 HTTP integrations remain the runtime-proven reference and rollback path.
 
 ## Owner discovery result (this account only)
 
@@ -82,7 +82,7 @@ The actual adapter settlement behavior, lock/visibility duration, retries, DLQ s
 | 9.1 | Confirm offering, entitlement, target channel and CI adapter by read-only checks; freeze logical semantics and identify trigger/ack design gap. No resources. |
 | 9.2 | Versioned event fixture and local duplicate/new-ID/out-of-order/poison tests; define exact coordinator trigger contract, commit boundary and broker-specific ack/quarantine policy. No runtime cutover. |
 | 9.3 | RAP producer definition, target compiler/save-image proof and local saver Event TDF tests. **Completed locally**; no Event Binding or external rollback/publication proof is claimed. Keep dispatch off. |
-| 9.4 | Owner configures least-privilege broker client, topic, subscribed queue and quarantine using selected supported plan; prove publish/subscribe and authorization with disposable messages. |
+| 9.4 | PIH-owned Event Binding activated with generated external type; external broker client, dedicated channel/binding, topic, subscribed queue, quarantine, and publish/subscribe proof remain environment-blocked. See [9.4 evidence](phase-9-4-event-binding.md). |
 | 9.5 | Add isolated CI consumer and narrow authorized SAP trigger; prove exact existing DeliveryIntent/coordinator path and correlated durable outcome, without altering the proven HTTP iFlows. |
 | 9.6 | One disposable SAP → broker → CI trigger → SAP coordinator → existing CI HTTP → CAP delivery; verify single CAP order and same DeliveryUUID. |
 | 9.7 | Controlled duplicates, crash/redelivery, CAP/CI outage, poison, backlog, retention and manual recovery; verify bounded policy and no second business effect. |
