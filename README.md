@@ -4,7 +4,7 @@
 
 **Phase 8.2 interactive supplier login was runtime accepted within a read-only trial scope.** A standalone XSUAA-bound approuter authenticated a named `sap.default` human user, forwarded that user's token to the unchanged CAP SupplierService, and returned that user's `RTTEST001` orders. The browser route did not proxy IntegrationService; no human supplier decision was made. Phase 8.6 later added a labelled `RTSEC002` supplier/order and verified deployed cross-supplier scoped 404 with no foreign fields. The unresolved approuter advisory remains a time-bounded trial limitation. See [current status](PROJECT_STATUS.md#phase-8--current-security-checkpoint), the [Phase 8.6 record](docs/phase-8-6-end-to-end-security-acceptance.md), and the [portal security notes](cap-supplier-portal/README.md#phase-82-interactive-runtime-acceptance).
 
-**PHASE 8 CLOSED:** 8.1 identity, 8.2 read-only interactive supplier login, 8.3 Buyer/Approver authorization, 8.4 technical integration boundaries, 8.5 operator/secrets/audit, and 8.6 end-to-end security acceptance are all closed within their recorded scopes. The final `RTTEST001` human direct read of a verified `RTSEC002` order returned scoped HTTP 404 and disclosed no foreign fields; post-denial CAP/HANA inspection showed the order unchanged. Shared SAP `ZHUB.USER`, retention-limited traces, the targeted-only secret scan, unresolved approuter advisory, and untested human browser mutations remain documented limitations, not hidden proofs. Phase 9 is Event Mesh and has **not started**. See [current status](PROJECT_STATUS.md#phase-8--current-security-checkpoint), the [final security matrix](docs/phase-8-6-end-to-end-security-acceptance.md), the [8.4 record](docs/phase-8-4-technical-boundaries.md), and the [8.5 record](docs/phase-8-5-operator-secrets-audit.md).
+**PHASE 8 CLOSED:** 8.1 identity, 8.2 read-only interactive supplier login, 8.3 Buyer/Approver authorization, 8.4 technical integration boundaries, 8.5 operator/secrets/audit, and 8.6 end-to-end security acceptance are all closed within their recorded scopes. The final `RTTEST001` human direct read of a verified `RTSEC002` order returned scoped HTTP 404 and disclosed no foreign fields; post-denial CAP/HANA inspection showed the order unchanged. Shared SAP `ZHUB.USER`, retention-limited traces, the targeted-only secret scan, unresolved approuter advisory, and untested human browser mutations remain documented limitations, not hidden proofs. **Phase 9 is in progress:** the SAP event producer/binding is locally active, and Phase 9.5B's authenticated HTTP trigger was verified through the existing coordinator/CPI/CAP/HANA path in DEV; no real Event Mesh runtime is proven. See [current status](PROJECT_STATUS.md#phase-9--event-mesh-checkpoint), the [9.5 evidence](event-mesh/docs/phase-9-5-consumer-trigger.md), and the [final Phase 8 security matrix](docs/phase-8-6-end-to-end-security-acceptance.md).
 
 A guided SAP portfolio project connecting a custom procurement application to an external supplier portal.
 
@@ -40,7 +40,7 @@ flowchart LR
     CI -->|OData V4 action| RAP
 ```
 
-The RAP purchase-order service and Fiori Elements buyer UI are implemented through Phase 3. The dispatcher, CAP portal and integration components remain planned for the later phases below; Phase 4 has begun that work, and the CAP Supplier Portal already runs locally as a standalone application with its own persistence and a working ingestion API. Phase 5 connects the dispatcher and CAP directly for testing. Phase 6 introduces Cloud Integration. Phase 9 adds SAP Event Mesh. Supplier decisions happen later in a separate request; an HTTP connection never waits for human approval.
+The RAP purchase-order service, Fiori Elements buyer UI, SAP dispatcher, CAP Supplier Portal, and both Cloud Integration HTTP flows are implemented and runtime-verified within their recorded scopes. Phase 9 has added a locally active RAP DeliveryIntent event and a DEV-verified authorized HTTP trigger for the existing dispatcher; Event Mesh publication and consumption remain blocked in the inspected environment. Supplier decisions travel later in a separate request; an HTTP connection never waits for human approval.
 
 ## Technology stack
 
@@ -98,7 +98,7 @@ Delivery IDs and immutable snapshots make retry safe. A timeout means the delive
 
 ## Event-driven architecture
 
-Phase 9 will replace the delivery trigger with committed RAP business events, SAP Event Mesh queues, and integration consumers. HTTP receipt and business-response semantics remain distinct. Event contracts, durable publication, idempotency, eventual consistency, and dead-letter recovery are designed in [ARCHITECTURE.md](ARCHITECTURE.md).
+Phase 9 adds a committed DeliveryIntent business event and, when a PIH-owned broker becomes available, may use an Event Mesh queue/consumer to call the narrow authenticated SAP trigger. It does not replace the proven SAP → CPI → CAP HTTP delivery or CAP → CPI → SAP response flows. Phase 9.5B verified the HTTP trigger path independently of Event Mesh; broker publication, ACK/redelivery, and cutover remain unproven. See [ARCHITECTURE.md](ARCHITECTURE.md) and the [Phase 9.5 evidence](event-mesh/docs/phase-9-5-consumer-trigger.md).
 
 ## How to run
 

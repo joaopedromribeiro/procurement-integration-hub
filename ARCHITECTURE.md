@@ -177,30 +177,13 @@ The coordinator owns outbound retries and CAP owns return retries. Avoid layered
 
 An ABAP communication arrangement is not automatically a BTP Destination. A destination locates a remote service and its authentication configuration; it does not create network reachability. CI uses its supported security-material and adapter settings. User tokens are not blindly forwarded across different audiences. Secrets remain outside Git.
 
-Phase 8's final evidence supersedes the older, point-in-time open questions embedded in ADR-033/ADR-036 and OI-14: deployed CAP/HANA `SupplierService` accept, date-update, and reject mutations and CAP → Cloud Integration → SAP delivery were proven in Phase 6/7; Phase 8.2 separately proved read-only human/XSUAA access. Phase 8.6 then proved deployed cross-supplier isolation: a `RTTEST001` human directly read an order verified as owned by `RTSEC002`, received scoped HTTP 404 with no foreign fields, and left the order unchanged. **Human browser mutation remains untested** within the accepted read-only trial scope; see the [final acceptance matrix](docs/phase-8-6-end-to-end-security-acceptance.md). Phase 8 is CLOSED; Phase 9 has not started.
+Phase 8's final evidence supersedes the older, point-in-time open questions embedded in ADR-033/ADR-036 and OI-14: deployed CAP/HANA `SupplierService` accept, date-update, and reject mutations and CAP → Cloud Integration → SAP delivery were proven in Phase 6/7; Phase 8.2 separately proved read-only human/XSUAA access. Phase 8.6 then proved deployed cross-supplier isolation: a `RTTEST001` human directly read an order verified as owned by `RTSEC002`, received scoped HTTP 404 with no foreign fields, and left the order unchanged. **Human browser mutation remains untested** within the accepted read-only trial scope; see the [final acceptance matrix](docs/phase-8-6-end-to-end-security-acceptance.md). Phase 8 is CLOSED; Phase 9 is in progress, with a locally verified SAP event producer/binding and a DEV-verified HTTP trigger boundary, but no verified Event Mesh runtime.
 
 ## Event-driven extension, phase 9
 
-```mermaid
-flowchart LR
-    RAP[RAP approval committed] --> Binding[RAP event binding and outbound channel]
-    Binding --> Mesh[SAP Event Mesh]
-    Mesh --> Queue[Subscribed durable queue]
-    Queue --> CI[Cloud Integration consumer]
-    CI --> CAP[CAP portal REST API]
-    CAP -. optional response events .-> Mesh
-    CI -->|Receipt or supplier response via OData| RAPAPI[RAP integration API]
-```
+The active event is `ZJP_I_DELIVERYINTENT~PURCHASEORDERDELIVERYREQUESTED`: `sendToSupplier` first commits an immutable DeliveryIntent, and its CREATE emits a reference to that durable operation. `PurchaseOrderApproved` is **not** a delivery command in the current lifecycle. The PIH-owned Event Binding `ZJPEBPODLVREQ` is active in A4H, but no external publication or broker delivery has been observed. The Phase 9.5B HTTP Service `ZJP_PO_EVENT_DISPATCH` is a separately verified, authorized DEV trigger for the same DeliveryUUID; it delegates to the existing Phase 7 coordinator, which alone owns leases, attempts, retry/UNKNOWN classification, and result persistence. Its proven path continues over `PIH_OrderDelivery_v1` to CAP, without replacing either verified HTTP business flow. See the [Phase 9.5 evidence](event-mesh/docs/phase-9-5-consumer-trigger.md).
 
-Planned event names: `PurchaseOrderApproved`, `PurchaseOrderSent`, `PurchaseOrderAccepted`, `PurchaseOrderRejected`. RAP owns the first two; CAP owns supplier decisions. `PurchaseOrderSent` is emitted only after a portal receipt, never after merely publishing the approval event. Only approval events trigger outbound delivery; status events must not create a send loop.
-
-Propose a versioned CloudEvents-compatible envelope containing `id`, `source`, `type`, `specversion`, `time`, `subject`, and `data` with order UUID, revision and delivery/response identity. Native RAP envelope support and mapping to this logical contract depend on the selected outbound channel. Events must refer to a committed immutable snapshot, not an editable current order.
-
-Version 2 may automatically request delivery on approval; this is an explicit change from the manually triggered synchronous learning version. Do not enable both triggers for the same order. Define topic names, subscriptions and exact broker offering only after checking the account's entitlement and RAP/CI compatibility.
-
-Use durable publication tied to commit, consumer deduplication, acknowledgement after successful processing, bounded retries and an observable dead-letter queue or equivalent supported quarantine. Store event IDs and business operation IDs: a republished event with a new event ID must still not duplicate an order. Order revision/response version protects against stale and out-of-order messages. No exactly-once delivery claim is made.
-
-Asynchronous delivery absorbs downtime and separates producer availability from consumer availability. It adds operational state and eventual consistency: SAP and CAP may temporarily show different progress. Synchronous REST remains preferable for queries, immediate validation and a simple low-volume initial integration.
+The *future, unconfigured* asynchronous hop is Event Binding → PIH-owned outbound channel/broker/queue → consumer → authenticated SAP trigger. The consumer must use the DeliveryUUID and immutable identity, not create a new intent or send directly to CAP. Native external CloudEvents shape, publication, ACK/redelivery, dead-letter behavior, topic/queue ACLs, and the two-read revision race remain cutover questions. There is no exactly-once claim. Existing synchronous HTTP flows remain the working baseline and rollback.
 
 SAP supports [RAP business events](https://help.sap.com/docs/abap-cloud/abap-rap/develop-business-events). SAP Event Mesh, the Event Mesh capability in Integration Suite, and Integration Suite advanced event mesh must not be treated as interchangeable subscriptions; see [environment decisions](docs/environments.md).
 

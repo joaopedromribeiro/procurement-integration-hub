@@ -33,9 +33,41 @@ annotate entity ZJP_C_PurchaseOrder
         }
     ]
 
-    @UI.lineItem: [{ position: 10, label: 'Purchase Order' }]
-    @UI.selectionField: [{ position: 10 }]
-    @UI.identification: [{ position: 10, label: 'Purchase Order' }]
+    @UI.lineItem: [
+        {
+            position: 10,
+            label: 'Purchase Order'
+        }
+    ]
+    @UI.selectionField: [
+        {
+            position: 10
+        }
+    ]
+    @UI.identification: [
+        {
+            position: 10,
+            label: 'Purchase Order'
+        },
+        {
+            type: #FOR_ACTION,
+            dataAction: 'submit',
+            label: 'Submit',
+            position: 110
+        },
+        {
+            type: #FOR_ACTION,
+            dataAction: 'approve',
+            label: 'Approve',
+            position: 120
+        },
+        {
+            type: #FOR_ACTION,
+            dataAction: 'sendToSupplier',
+            label: 'Send to Supplier',
+            position: 130
+        }
+    ]
     PurchaseOrderNumber;
 
     @UI.lineItem: [{ position: 20, label: 'Supplier' }]

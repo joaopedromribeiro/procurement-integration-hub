@@ -9,16 +9,20 @@ define behavior for ZJP_C_PurchaseOrder
   use create;
   use update;
   use delete;
+
   use action removeItem;
   use action submit;
   use action approve;
+  use action sendToSupplier;
   use action reject;
   use action cancel;
+
   use action Edit;
   use action Activate;
   use action Discard;
   use action Resume;
   use action Prepare;
+
   use association _Items { create; with draft; }
 }
 
